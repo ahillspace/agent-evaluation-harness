@@ -47,12 +47,14 @@ it("counts complete OpenCode context and reasoning from sealed q001 without doub
   );
   expect(usage.value()).toEqual({
     inputTokens: 88979,
+    cachedInputTokens: 69181,
     outputTokens: 1134,
     costUsd: 0,
   });
   usage.add({ id: "step-0", tokens: recordedSteps[0], cost: 0 });
   expect(usage.value()).toEqual({
     inputTokens: 88979,
+    cachedInputTokens: 69181,
     outputTokens: 1134,
     costUsd: 0,
   });
@@ -69,7 +71,11 @@ it("restores cached input and separate reasoning in the real failed q003 step", 
         cache: { write: 0, read: 29312 },
       },
     }),
-  ).toEqual({ inputTokens: 29402, outputTokens: 1166 });
+  ).toEqual({
+    inputTokens: 29402,
+    outputTokens: 1166,
+    cachedInputTokens: 29312,
+  });
 });
 
 it("restores cache writes too and supports a missing optional provider total", () => {
@@ -82,7 +88,7 @@ it("restores cache writes too and supports a missing optional provider total", (
         cache: { read: 20, write: 30 },
       },
     }),
-  ).toEqual({ inputTokens: 60, outputTokens: 5 });
+  ).toEqual({ inputTokens: 60, outputTokens: 5, cachedInputTokens: 20 });
 });
 
 it("does not add Codex cache or reasoning subsets again", () => {
@@ -93,7 +99,7 @@ it("does not add Codex cache or reasoning subsets again", () => {
       output_tokens: 20,
       reasoning_output_tokens: 15,
     }),
-  ).toEqual({ inputTokens: 100, outputTokens: 20 });
+  ).toEqual({ inputTokens: 100, outputTokens: 20, cachedInputTokens: 80 });
 });
 
 it("leaves usage unknown for missing, invalid, or inconsistent token components", () => {
@@ -128,4 +134,10 @@ it("fails closed on conflicting duplicate step reports", () => {
   usage.add({ id: "same", tokens: recordedSteps[0], cost: 0 });
   usage.add({ id: "same", tokens: recordedSteps[1], cost: 0 });
   expect(usage.value()).toBeUndefined();
+});
+
+it("does not invent a cached-input subtotal when Codex omits that field", () => {
+  expect(
+    normalizeHarnessUsage("codex", { input_tokens: 100, output_tokens: 20 }),
+  ).toEqual({ inputTokens: 100, outputTokens: 20 });
 });

@@ -95,11 +95,11 @@ export function JevConfiguration({
       >
         Edit instructions and criteria
       </button>
-      {!connections.some((item) => item.provider === "typesafe") && (
-        <p className="warning">
-          Add a TypeSafe / Jev connection in <a href="#/settings">Settings</a>.
-        </p>
-      )}
+      <p className="subtle">
+        Save judge credentials in{" "}
+        <a href="#/settings/connections">Settings, Connections</a>. This run
+        uses the saved connection selected above.
+      </p>
       {editing && bank && (
         <Modal
           title="Jev instructions and criteria"

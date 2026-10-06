@@ -1,3 +1,4 @@
+import { JsonEditor } from "./json-editor.js";
 import { useState } from "react";
 import type {
   ExternalTargetConfig,
@@ -8,7 +9,7 @@ import { sameTarget } from "../contracts/targets.js";
 import { httpTargetSchema } from "../contracts/http-target.js";
 import { command, useResource } from "./api.js";
 import { Answer } from "./answer.js";
-import { ErrorNotice, Field, Help } from "./ui.js";
+import { ErrorNotice, Field, Help, SectionIntro } from "./ui.js";
 
 export function ExternalAgentEditor({
   record,
@@ -217,6 +218,7 @@ export function ExternalAgentEditor({
           />
         </Field>
       )}
+      <h3>Request and answer</h3>
       <Field
         label="Question field"
         help="The top-level JSON field that receives the question, such as question, prompt, or message. Use advanced bindings for nested fields."
@@ -238,7 +240,7 @@ export function ExternalAgentEditor({
           onChange={(event) => setAnswer(event.target.value)}
         />
       </Field>
-      <details>
+      <details className="disclosure">
         <summary>Advanced request settings</summary>
         <div className="stack">
           <Field
@@ -254,37 +256,86 @@ export function ExternalAgentEditor({
             label="Request body template"
             help="JSON values and existing slots. The bindings below replace those slots with public question data."
           >
-            <textarea
-              aria-label="Request body template"
-              rows={7}
+            <JsonEditor
+              label="Request body template"
               value={body}
-              onChange={(event) => setBody(event.target.value)}
+              onChange={setBody}
+              guide={{
+                description:
+                  "Build the JSON body your endpoint expects. Bindings replace existing slots with public question data.",
+                example: { question: null, context: null, answerFormat: null },
+                fields: [
+                  {
+                    key: "Your endpoint fields",
+                    description:
+                      "Fixed values stay unchanged; use null as a slot to fill through bindings.",
+                    values:
+                      "JSON objects, strings, numbers, booleans, arrays, or null",
+                  },
+                ],
+              }}
             />
           </Field>
           <Field
             label="Public input bindings"
             help="Map a JSON Pointer to question, context, answerFormat, runId, questionId, repetition, or attemptId. No scripts or expected answers are available."
           >
-            <textarea
-              aria-label="Public input bindings"
-              rows={7}
+            <JsonEditor
+              label="Public input bindings"
               value={bindings}
-              onChange={(event) => setBindings(event.target.value)}
+              onChange={setBindings}
+              shape="array"
+              guide={{
+                description:
+                  "Each binding fills an existing request-body slot. JSON Pointer paths start with /; use ~1 for / and ~0 for ~ in a field name.",
+                example: [
+                  { pointer: "/question", source: "question" },
+                  { pointer: "/context", source: "context" },
+                ],
+                fields: [
+                  {
+                    key: "pointer",
+                    description: "Existing slot in the body template.",
+                    values: "JSON Pointer string, such as /question",
+                  },
+                  {
+                    key: "source",
+                    description:
+                      "Public input to put into that slot. Expected answers are never available.",
+                    values:
+                      "question, context, answerFormat, runId, questionId, repetition, attemptId",
+                  },
+                ],
+              }}
             />
           </Field>
           <Field
             label="Non-secret headers"
             help="A JSON object. Configure authentication above; credentials cannot go here."
           >
-            <textarea
-              aria-label="Non-secret headers"
-              rows={3}
+            <JsonEditor
+              label="Non-secret headers"
               value={headers}
-              onChange={(event) => setHeaders(event.target.value)}
+              onChange={setHeaders}
+              guide={{
+                description:
+                  "Optional headers required by your endpoint. Configure authentication in the credential fields, never here.",
+                example: { "X-Deployment": "evaluation" },
+                fields: [
+                  {
+                    key: "Header name",
+                    description:
+                      "A non-secret HTTP header understood by the endpoint.",
+                    values: "string values",
+                    default: "no additional headers",
+                  },
+                ],
+              }}
             />
           </Field>
         </div>
       </details>
+      <h3>Try the connection</h3>
       <Field
         label="Sample question"
         help="Preview does not contact the endpoint. Send sample request invokes the remote agent and can cause billable work."
@@ -296,7 +347,7 @@ export function ExternalAgentEditor({
           onChange={(event) => setSample(event.target.value)}
         />
       </Field>
-      <div className="row wrap">
+      <div className="actions">
         <button
           className="button"
           disabled={busy}
@@ -407,7 +458,7 @@ export function ExternalAgentPicker({
         </select>
       </Field>
       {target && (
-        <div className="notice">
+        <div className="notice stack">
           <strong>{target.name}</strong>
           <p className="subtle">
             Your external system controls this agent. The harness sends
@@ -456,25 +507,29 @@ export function ExternalAgentSettings() {
     <section className="panel">
       <div className="panel-heading">
         <h2>External agents</h2>
-        <button className="button" onClick={() => setEditing(null)}>
-          Add external agent
-        </button>
+        {editing === undefined && (
+          <button className="button" onClick={() => setEditing(null)}>
+            Add external agent
+          </button>
+        )}
       </div>
       <div className="panel-body stack">
-        <p className="subtle">
-          Evaluate deployed agents through a JSON HTTP endpoint. Internal
-          configuration and observability stay with the external system.
-        </p>
-        <p className="subtle">
-          Removing an endpoint keeps credential versions used by saved runs and
-          samples so those snapshots can still resolve authentication.
-        </p>
+        <SectionIntro
+          title="External agents"
+          description="Connect an agent that already runs outside this app. The harness sends questions to its HTTP endpoint and evaluates the answers."
+          details="The external system owns its prompts, models, tools, and internal observation. Configure its request format and authentication here, then select the saved agent in Run."
+        />
         <ErrorNotice error={error ?? resource.error} />
         {(resource.data ?? []).map((record) => (
           <div className="row between" key={record.id}>
             <div>
               <strong>{record.name}</strong>
-              <p className="subtle">HTTP endpoint</p>
+              <p className="subtle">
+                {String(
+                  (record.target.configuration as { endpoint?: string })
+                    .endpoint ?? "HTTP endpoint",
+                )}
+              </p>
             </div>
             <div className="row">
               <button className="button" onClick={() => setEditing(record)}>
@@ -490,15 +545,27 @@ export function ExternalAgentSettings() {
               >
                 Remove
               </button>
+              <Help label="Removing a saved endpoint">
+                Removing an endpoint keeps credentials needed by saved runs and
+                samples.
+              </Help>
             </div>
           </div>
         ))}
         {editing !== undefined && (
-          <ExternalAgentEditor
-            key={editing?.id ?? "new"}
-            record={editing ?? undefined}
-            onSaved={() => resource.refresh()}
-          />
+          <section className="stack" aria-label="External agent editor">
+            <div className="row between">
+              <h3>{editing ? "Edit external agent" : "New external agent"}</h3>
+              <button className="button" onClick={() => setEditing(undefined)}>
+                Close editor
+              </button>
+            </div>
+            <ExternalAgentEditor
+              key={editing?.id ?? "new"}
+              record={editing ?? undefined}
+              onSaved={() => resource.refresh()}
+            />
+          </section>
         )}
       </div>
     </section>

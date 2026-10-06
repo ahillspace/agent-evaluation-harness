@@ -10,6 +10,7 @@ import {
   Status,
   JsonView,
   Modal,
+  SectionIntro,
 } from "./ui.js";
 
 export function ResearchPanel({
@@ -29,7 +30,7 @@ export function ResearchPanel({
     <section className="panel research-panel">
       <div className="panel-heading">
         <div>
-          <div className="eyebrow">Persistent research session</div>
+          <div className="eyebrow">Research session</div>
           <h2>{session.name}</h2>
           <p>
             {session.runIds.length} runs · {session.turns.length} researcher
@@ -53,6 +54,11 @@ export function ResearchPanel({
       </div>
       <ErrorNotice error={error ?? resource.error ?? session.error} />
       <div className="panel-body">
+        <SectionIntro
+          title="Research observation"
+          description="Watch the researcher propose changes and compare candidate agents. Select a run below to inspect its answers."
+          details="The baseline runs first. The researcher then reviews evidence and proposes changes within your limits. Research activity and evaluation activity are recorded separately."
+        />
         <div className="row">
           <Field label="Candidate run">
             <select
@@ -65,30 +71,57 @@ export function ResearchPanel({
               {session.runIds.map((id, index) => (
                 <option key={id} value={id}>
                   {index === 0 ? "Baseline" : `Candidate ${index}`}
-                  {id === session.bestRunId ? " · best" : ""}
+                  {id === session.bestRunId ? " · retained" : ""}
                   {id === session.currentRunId ? " · current" : ""}
                 </option>
               ))}
             </select>
           </Field>
-          <span className="subtle">
-            {session.stopReason ??
-              "Every candidate is an ordinary, inspectable run."}
-          </span>
+          <a
+            className="button secondary"
+            href={`#/observe/${session.bestRunId}?session=${sessionId}`}
+          >
+            Open retained{" "}
+            {session.bestRunId === session.baselineRunId
+              ? "baseline"
+              : "candidate"}
+          </a>
         </div>
-        <details className="disclosure">
-          <summary>Researcher activity and decisions</summary>
-          <EventList
-            events={events}
-            empty="No researcher events recorded yet."
-          />
+        {session.stopReason && (
+          <p className="notice">
+            <strong>Research stopped:</strong> {session.stopReason}
+          </p>
+        )}
+        <section className="stack">
+          <h3>Decisions</h3>
+          {!session.turns.length && (
+            <p className="subtle">
+              The researcher begins after the baseline evaluation completes.
+            </p>
+          )}
           {session.turns.map((turn, index) => (
             <div key={index} className="research-turn">
               <h3>Turn {index + 1}</h3>
               <p>{turn.output.message}</p>
               <p className="subtle">
-                {turn.output.decision} {turn.output.reason}
+                {turn.output.disposition === "keep"
+                  ? "Candidate kept"
+                  : turn.output.disposition === "discard"
+                    ? "Candidate discarded"
+                    : turn.output.decision === "keep"
+                      ? "Candidate kept"
+                      : turn.output.decision === "discard"
+                        ? "Candidate discarded"
+                        : "Evidence reviewed"}
+                {turn.output.control === "stop" ||
+                turn.output.decision === "stop"
+                  ? " · Research stopped"
+                  : " · Research continued"}
+                {turn.output.stopCategory === "blocked"
+                  ? " because technical problems prevent a useful comparison"
+                  : ""}
               </p>
+              {turn.output.reason && <p>{turn.output.reason}</p>}
               <button
                 className="text-button"
                 onClick={() => {
@@ -101,6 +134,13 @@ export function ResearchPanel({
               </button>
             </div>
           ))}
+        </section>
+        <details className="disclosure">
+          <summary>Recorded research activity</summary>
+          <EventList
+            events={events}
+            empty="No researcher activity recorded yet."
+          />
         </details>
       </div>
       {fullTurn !== null && (

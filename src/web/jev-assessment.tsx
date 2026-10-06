@@ -12,6 +12,13 @@ const labels = {
   reference: "Reference consistency",
 } as const;
 const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
+export function jevErrorLabel(code?: string) {
+  return code === "token_limit_exceeded"
+    ? "Not judged: token limit exceeded"
+    : code === "capacity_exceeded"
+      ? "Not judged: request limit exceeded"
+      : "Not judged: provider error";
+}
 export function JevAssessment({
   assessment,
   inspect = false,
@@ -27,7 +34,7 @@ export function JevAssessment({
         <strong>Jev</strong>
         <span>
           {assessment.status === "error"
-            ? "Provider error"
+            ? jevErrorLabel(assessment.error?.code)
             : assessment.status === "pending"
               ? "Pending"
               : assessment.reviewRequired

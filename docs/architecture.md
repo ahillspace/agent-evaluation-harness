@@ -10,19 +10,20 @@ Evaluation reads immutable results and never reruns a target.
 
 ## Domain vocabulary
 
-| Concept            | Meaning                                                                 |
-| ------------------ | ----------------------------------------------------------------------- |
-| Bank revision      | Published questions and expected evidence.                              |
-| Evaluator revision | Published deterministic rules and optional custom code.                 |
-| Blueprint          | Reusable agent and launch settings.                                     |
-| Run                | One frozen configuration, question set, and repetition count.           |
-| Result             | One question and repetition, with recorded execution attempts.          |
-| Attempt            | A physical target invocation, including interrupted invocations.        |
-| Score set          | Append-only assessments of saved evidence under one evaluator revision. |
-| Research session   | One persistent researcher conversation and its ordinary child Runs.     |
-| Human review       | An attributed assessment separate from computed accuracy.               |
-| Jev profile        | Published bank-level instructions and criteria for classification.      |
-| Jev assessment     | A saved classification request and result for one sealed attempt.       |
+| Concept            | Meaning                                                                  |
+| ------------------ | ------------------------------------------------------------------------ |
+| Bank revision      | Published questions and expected evidence.                               |
+| Evaluator revision | Published deterministic rules and optional custom code.                  |
+| Blueprint          | Reusable agent and launch settings.                                      |
+| Run                | One frozen configuration, question set, and repetition count.            |
+| Result             | One question and repetition, with recorded execution attempts.           |
+| Attempt            | A physical target invocation, including interrupted invocations.         |
+| Assessment pass    | Named frozen judgments, coverage, and provenance over one Run.           |
+| Score set          | Internal deterministic evidence under one evaluator revision.            |
+| Research session   | One persistent researcher conversation and its ordinary child Runs.      |
+| Human review       | A derived assessment pass with attributed edits and untouched judgments. |
+| Jev profile        | Published bank-level instructions and criteria for classification.       |
+| Jev assessment     | A saved classification request and result for one sealed attempt.        |
 
 ## Lifecycle ownership
 
@@ -44,7 +45,8 @@ Expected answers stay in engine-owned manifests and never cross the public quest
 New bank revisions publish a public answer format for typed tables using declared column names and types.
 The catalog permits nulls in automatically derived formats because reference nullability does not establish a source constraint.
 Explicit author formats retain their null rules, but cannot exclude nulls allowed by the reference declaration.
-Expected rows, values, counts, and ordering metadata remain private.
+Expected rows, values, and counts remain private.
+Public evaluation guidance exposes declared ordering requirements without reference rows.
 The catalog rejects a public format that contradicts the declared reference structure.
 Existing bank revisions and run manifests remain unchanged, including their frozen public formats.
 Shared contract helpers generate the submission schema and validate its structure before the runtime seals an answer.
@@ -64,9 +66,11 @@ They contain no question bank, expected answers, evaluator golds, or private sec
 `Database` exposes a typed record map and indexed queries scoped by Run, result, bank, session, or status.
 SQLite constraints reject changes to published revisions, manifests, and completed attempt evidence.
 Score publication can change from preview to published; assessment contents remain fixed.
-The database records schema version 3 and rejects a newer unknown version.
+The database records schema version 5 and rejects a newer unknown version.
 The transactional migration from version 1 preserves existing records and idempotency keys while adding classification records.
 Version 3 extends blueprint immutability to target settings without rewriting existing record bytes.
+Version 4 adds a durable workspace identity used to isolate browser drafts without changing existing Run evidence.
+Version 5 adds named assessment passes and bank findings through a transactional record-table migration.
 Future schema changes require an explicit transactional migration and recovery tests.
 An exclusive SQLite transaction in a separate ownership file provides a crash-released local lock.
 The ownership file contains no product records.
@@ -202,3 +206,78 @@ The web app presents one target-first setup and one observation workspace.
 External ownership hides local prompt, model, tool, and research controls.
 Future runtime integrations add an adapter and its presentation configuration; they do not add a second Run engine.
 See `target-adapters.md` for maintainer responsibilities and registration points.
+
+## Configuration and execution recovery
+
+Settings owns saved connection configuration; Run selects saved references and keeps a tab-local, workspace-scoped setup draft.
+The storage layer provides a durable workspace identity instead of deriving one from mutable catalog content.
+Draft serialization includes public configuration and credential references, and rejects credential fields in advanced JSON.
+Research reuse reads the recorded session configuration rather than reconstructing a researcher from its child Run.
+Runtime and UI share model-setting validation and harness/provider compatibility contracts.
+Help overlays render outside panel clipping boundaries, and JSON editors share reference and validation behavior.
+
+Failure classification is recorded with each physical attempt.
+Automatic retries require trusted transient metadata and evidence that retrying has no side effects.
+Every physical attempt enters the same cancellation-aware admission gate, including retries after reduced concurrency.
+Research budgets are checked again after admission waits.
+Failed-attempt usage contributes when known and remains unknown when unavailable.
+Manual retry creates a linked Run with the identical frozen manifest and only selected failed result slots.
+Original scores, attempts, and research decisions remain immutable; comparisons include actual question/repetition slots.
+
+The built-in Bedrock runtime uses non-streaming Converse behind the managed runtime contract.
+It uses the same supervised MCP bridge lifecycle, frozen tool allowlist, answer submission, and researcher evidence boundaries as local harnesses.
+Research conversations preserve exact identity and recorded message history; unresolved requests cannot be silently resumed.
+OpenCode's separate Bedrock path requires streaming support.
+
+## Named assessment passes
+
+One Run contains any number of named deterministic, LLM, Jev, and human assessment passes.
+AssessmentPassService owns pass creation, retry, selection, human derivation, and exports through the common command dispatcher.
+The evaluator continues to own deterministic scoring, and JevService owns recorded classification requests.
+Score sets and per-request classification records remain detailed evidence behind the single pass selection presented by the app.
+Published deterministic rescoring appears in the same pass list.
+
+Every pass freezes its evaluator, reference revision, optional judge configuration, eligible result slots, exclusions, and source lineage.
+The service checkpoints judgments before further admissions and seals a completed pass against mutation.
+Restart marks unfinished passes interrupted without repeating potentially billable requests.
+Retry creates a new pass, carries successful judgments forward, and evaluates only failed or unfinished judgments with sealed target answers.
+Completed abstentions and failed target executions do not become automatic judge retries.
+No assessment operation invokes the target agent.
+
+Human derivation copies the entire parent judgment set and records reviewer, note, previous judgment, and timestamp for each edited result.
+Failed executions accept notes and explicit exclusions but cannot receive a correctness verdict without a sealed answer.
+Reviewing a paused original creates an immutable parent snapshot before the derived review.
+Pass exports include frozen references and judge request, response, error, and evidence-hash provenance when available.
+Observation projections omit raw requests, responses, and reference payloads; deliberate pass reads retrieve them.
+
+Accuracy uses correct answers divided by completed judgments with a correctness verdict.
+Existing saved passes derive display rates from frozen counts without rewriting their evidence.
+Research selection separately uses `eligibleOutcome`, correct answers divided by frozen eligible slots, and requires coverage that matches or exceeds the baseline.
+Answered, judged, unjudged, failed, and excluded coverage remain visible independently.
+Comparisons require equivalent selected sources, settings, reference answers, and eligible slots.
+An empty eligible basis is not comparable.
+Selecting a pass persists a Run preference without changing its manifest or historical research decisions.
+
+Performance queries keep target, researcher, and judge usage separate.
+Each field preserves its reported subtotal and counts pending and unreported invocations separately.
+A field is unknown when invocations exist but none report that field; no invocations produce zero.
+Stored `inputTokens` includes cached input and remains the budget-accounting total.
+Presentation uses explicit uncached input, generated output, and reused cache fields.
+Uncached input is derived per invocation only when both inclusive input and a valid cache count exist.
+Older target attempts recover cache from bounded provider usage events only when normalized input and output exactly match sealed usage.
+Recovery reads at most 4,096 usage events and 1 MiB per attempt, with a 1,000-entry least-recently-used cache for settled attempts.
+Missing or inconsistent breakdowns remain unreported, and sealed evidence is never rewritten.
+Strict budget accounting remains separate from partial display totals.
+Copied judgments share a physical judgment identifier, so a retry does not double-count successful requests.
+Research conversation usage contributes per-turn increments rather than repeatedly counting cumulative totals.
+Bank findings link question revisions to saved Run evidence and preserve explicit accept or dismiss decisions.
+Accepted corrections publish a bank revision, and accepted exclusions publish evaluator policy; existing evidence remains unchanged.
+
+## Observation workspace
+
+Live and saved Runs open on Questions, followed by Summary, optional Research, and Configuration.
+A compact shared strip shows every saved assessment score with judgment coverage and errors.
+Results presents one row per Run with one remembered assessment selection.
+Question-bank and setup answer-size warnings are estimates and never block launch or truncate judging evidence.
+The build includes a visible build identifier and a local build metadata endpoint.
+No analytics dashboard or additional execution hierarchy is introduced.

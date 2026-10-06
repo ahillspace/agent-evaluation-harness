@@ -126,7 +126,8 @@ describe.skipIf(!["win32", "darwin"].includes(process.platform))(
       );
       expect(maximum).toBe(1);
       expect(supervisor.activeReservations).toBe(0);
-    });
+      // Eight serial scopes include startup and a 500 ms POSIX cleanup grace each.
+    }, 20000);
 
     it("stops descendants on cancellation and after the direct child exits", async () => {
       const { directory, supervisor } = await setup();

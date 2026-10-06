@@ -1,3 +1,8 @@
+import {
+  MODEL_PROVIDERS,
+  modelProviderSettings,
+  providerEnvironment,
+} from "./model-providers.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type {
@@ -39,12 +44,6 @@ const tableauSettings = z
       .default(["-y", "@tableau/mcp-server@4.13.3"]),
   })
   .strict();
-const apiSettings = z.object({ baseUrl: endpoint.optional() }).strict();
-const API_PROVIDERS: Record<string, string> = {
-  openai: "OPENAI_API_KEY",
-  anthropic: "ANTHROPIC_API_KEY",
-  openrouter: "OPENROUTER_API_KEY",
-};
 export interface McpBinding {
   name: string;
   command: string;
@@ -86,15 +85,26 @@ export class ConnectionService {
           additionalProperties: false,
         },
       },
-      ...Object.keys(API_PROVIDERS).map((id) => ({
+      ...MODEL_PROVIDERS.map((id) => ({
         id,
-        name: `${id} API key`,
+        name:
+          id === "amazon-bedrock"
+            ? "Amazon Bedrock Converse"
+            : `${id} model credentials`,
         kind: "model" as const,
         credentialFields: ["apiKey"],
         settingsSchema: {
           type: "object",
           properties: {
-            baseUrl: { type: "string", title: "API base URL (optional)" },
+            baseUrl: { type: "string", title: "API endpoint (optional)" },
+            authMode: {
+              type: "string",
+              enum:
+                id === "amazon-bedrock" ? ["bearer"] : ["api-key", "bearer"],
+            },
+            ...(id === "amazon-bedrock"
+              ? { region: { type: "string", title: "AWS region" } }
+              : {}),
           },
           additionalProperties: false,
         } as Json,
@@ -155,7 +165,8 @@ export class ConnectionService {
         throw new Error("MCP arguments cannot contain credentials.");
       return settings;
     }
-    if (Object.hasOwn(API_PROVIDERS, provider)) return apiSettings.parse(value);
+    if (MODEL_PROVIDERS.some((id) => id === provider))
+      return modelProviderSettings(provider, value);
     throw new Error(`Unknown connection provider: ${provider}.`);
   }
   save(input: ConnectionInput): Promise<ConnectionRecord> {
@@ -339,14 +350,14 @@ export class ConnectionService {
           },
         });
       } else {
-        const key = API_PROVIDERS[binding.provider];
-        if (!key) throw new Error("Unknown provider binding.");
-        if (env[key])
+        const values = providerEnvironment(
+          binding.provider,
+          binding.settings,
+          credentials.apiKey!,
+        );
+        if (Object.keys(values).some((key) => env[key] !== undefined))
           throw new Error("Use one credential binding per model provider.");
-        env[key] = credentials.apiKey!;
-        if (typeof binding.settings.baseUrl === "string")
-          env[`${binding.provider.toUpperCase()}_BASE_URL`] =
-            binding.settings.baseUrl;
+        Object.assign(env, values);
       }
     }
     return { mcp, env, secrets };

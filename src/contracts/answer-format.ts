@@ -1,3 +1,4 @@
+import { MAX_ANSWER_ITEMS } from "./answer-limits.js";
 import {
   answerFormatSchema,
   type AnswerFormat,
@@ -98,7 +99,7 @@ export function answerFormatJsonSchema(format: AnswerFormat): Json {
   if (validated.type === "list")
     return {
       type: "array",
-      maxItems: 1000,
+      maxItems: MAX_ANSWER_ITEMS,
       items:
         validated.itemType === "json"
           ? validated.nullable
@@ -112,7 +113,7 @@ export function answerFormatJsonSchema(format: AnswerFormat): Json {
     };
   return {
     type: "array",
-    maxItems: 1000,
+    maxItems: MAX_ANSWER_ITEMS,
     items: {
       type: "object",
       properties: Object.fromEntries(
@@ -164,11 +165,11 @@ export function validateSubmittedAnswer(
           error: `Submit one ${validated.valueType} value${validated.nullable ? " or null" : ""}, not a wrapper or list.`,
         };
   if (validated.type === "list") {
-    if (!Array.isArray(answer) || answer.length > 1000)
+    if (!Array.isArray(answer) || answer.length > MAX_ANSWER_ITEMS)
       return {
         ok: false,
         error:
-          "Submit a JSON array with at most 1,000 items. Use [] for an empty result.",
+          "Submit a JSON array with at most 10,000 items. Use [] for an empty result.",
       };
     for (const [index, item] of answer.entries()) {
       const valid =
@@ -190,10 +191,10 @@ export function validateSubmittedAnswer(
     }
     return { ok: true };
   }
-  if (!Array.isArray(answer) || answer.length > 1000)
+  if (!Array.isArray(answer) || answer.length > MAX_ANSWER_ITEMS)
     return {
       ok: false,
-      error: "Submit an array of row objects with at most 1,000 rows.",
+      error: "Submit an array of row objects with at most 10,000 rows.",
     };
   for (const [index, row] of answer.entries()) {
     if (

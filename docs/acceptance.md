@@ -80,6 +80,19 @@
 Record executed unit, integration, browser, and bounded provider checks in the final delivery report.
 Clearly distinguish implementation coverage from checks blocked by local authentication or unavailable provider software.
 
+## Observation redesign
+
+- One Run supports named deterministic, LLM, Jev, and human assessment passes with frozen configurations and references.
+- Saved-answer assessment and retry never rerun a target; retry carries successful judgments forward.
+- Failed and oversized judge requests remain unjudged errors with inspectable request and response evidence.
+- Human review preserves untouched judgments, records overrides, and supports notes on failed executions.
+- Results remembers each Run's selected pass and shows correct / judged accuracy with separate coverage.
+- Research selection retains a fixed eligible objective and coverage guard.
+- Unknown target, researcher, and judge usage appears as unknown instead of zero.
+- Question findings link saved evidence and require an explicit decision before publishing corrected references or exclusions.
+- Live and saved Runs open on Questions, followed by Summary, Research when applicable, and Configuration.
+- The built app exposes its build identifier, and the analytics dashboard remains outside this redesign.
+
 ## External targets
 
 - Generic HTTP sends public questions, context, and answer-format guidance without gold answers or evaluator criteria.
@@ -97,3 +110,18 @@ Clearly distinguish implementation coverage from checks blocked by local authent
 - External-only work does not start local discovery or require a native process helper.
 - An internal session adapter fixture proves registration, invocation, cleanup, and bounded recovery.
 - Existing managed records remain readable and their stored bytes remain unchanged during migration.
+
+## Configuration and recovery usability
+
+- Settings distinguishes subscriptions, saved API keys, and company gateway bearer tokens.
+- Supported OpenAI Codex, Anthropic Claude Code, OpenCode, and built-in Bedrock options remain visible independently of local installation.
+- Non-streaming Bedrock Converse supports target, researcher, and judge roles without requiring ConverseStream.
+- Run drafts survive navigation and reload without sharing mutable drafts between tabs or workspaces.
+- Reuse restores research configuration, including researcher, instructions, limits, and authentication references.
+- Models and tools refresh automatically when the relevant configuration changes, without replacing manually entered model IDs or selected tools.
+- Questions supports search, answer-type and tag filtering, select all, and deselect all.
+- Section help uses plain-language explanations and stays within the viewport.
+- JSON settings include valid examples and runtime-aligned validation.
+- Execution failures remain separate from incorrect answers; all physical attempts and available usage remain inspectable.
+- Safe transient failures receive bounded retries through the same admission controls as ordinary work.
+- Manual retries preserve original evidence and disclose possible duplicate external actions.

@@ -12,6 +12,229 @@ export function EvaluatorPolicy({
     <div className="stack">
       <div className="form-grid">
         <Field
+          label="Answer representation"
+          help="Compatible accepts supported equivalent representations, including JSON-encoded tables and one-cell scalar results. Strict enforces the published public shape."
+        >
+          <select
+            aria-label="Answer representation"
+            value={settings.representationPolicy}
+            onChange={(event) =>
+              onChange({
+                ...settings,
+                representationPolicy: event.target
+                  .value as EvaluatorSettings["representationPolicy"],
+              })
+            }
+          >
+            <option value="compatible">
+              Compatible representations (default)
+            </option>
+            <option value="strict">Strict public format</option>
+          </select>
+        </Field>
+        <Field
+          label="Duplicate rows"
+          help="Preserve counts every repeated row. Distinct compares unique rows and is appropriate only when the question requires a distinct result grain."
+        >
+          <select
+            aria-label="Duplicate rows"
+            value={settings.duplicateRows}
+            onChange={(event) =>
+              onChange({
+                ...settings,
+                duplicateRows: event.target
+                  .value as EvaluatorSettings["duplicateRows"],
+              })
+            }
+          >
+            <option value="preserve">Preserve multiplicity (default)</option>
+            <option value="distinct">Distinct rows</option>
+          </select>
+        </Field>
+      </div>
+      <Field
+        label="Collation"
+        help="Collation controls ordering only. It does not erase punctuation or change which cell values count as correct."
+      >
+        <select
+          aria-label="Collation"
+          value={settings.collation ? "locale" : "codepoint"}
+          onChange={(event) =>
+            onChange({
+              ...settings,
+              collation:
+                event.target.value === "locale"
+                  ? {
+                      locale: "en-US",
+                      numeric: false,
+                      ignorePunctuation: false,
+                      sensitivity: "variant",
+                    }
+                  : undefined,
+            })
+          }
+        >
+          <option value="codepoint">Unicode character order</option>
+          <option value="locale">Explicit language collation</option>
+        </select>
+      </Field>
+      {settings.collation && (
+        <div className="stack">
+          <div className="form-grid">
+            <Field label="Collation locale">
+              <input
+                aria-label="Collation locale"
+                value={settings.collation.locale}
+                onChange={(event) =>
+                  onChange({
+                    ...settings,
+                    collation: {
+                      ...settings.collation!,
+                      locale: event.target.value,
+                    },
+                  })
+                }
+              />
+            </Field>
+            <Field label="Collation sensitivity">
+              <select
+                aria-label="Collation sensitivity"
+                value={settings.collation.sensitivity}
+                onChange={(event) =>
+                  onChange({
+                    ...settings,
+                    collation: {
+                      ...settings.collation!,
+                      sensitivity: event.target.value as NonNullable<
+                        EvaluatorSettings["collation"]
+                      >["sensitivity"],
+                    },
+                  })
+                }
+              >
+                {["variant", "base", "accent", "case"].map((value) => (
+                  <option key={value}>{value}</option>
+                ))}
+              </select>
+            </Field>
+          </div>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={settings.collation.numeric}
+              onChange={(event) =>
+                onChange({
+                  ...settings,
+                  collation: {
+                    ...settings.collation!,
+                    numeric: event.target.checked,
+                  },
+                })
+              }
+            />
+            <span>Sort embedded numbers numerically (2 before 10)</span>
+          </label>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={settings.collation.ignorePunctuation}
+              onChange={(event) =>
+                onChange({
+                  ...settings,
+                  collation: {
+                    ...settings.collation!,
+                    ignorePunctuation: event.target.checked,
+                  },
+                })
+              }
+            />
+            <span>Ignore punctuation when sorting</span>
+          </label>
+        </div>
+      )}
+      <div className="stack">
+        <div className="row">
+          <h4>Explicit sort order</h4>
+          <button
+            className="text-button"
+            onClick={() =>
+              onChange({
+                ...settings,
+                tableOrder: "ordered",
+                sortOrder: [
+                  ...(settings.sortOrder ?? []),
+                  { column: "", direction: "asc" },
+                ],
+              })
+            }
+          >
+            Add sort column
+          </button>
+        </div>
+        <p className="subtle">
+          Optional. Compare all row values, then validate this ordering
+          independently of the reference row sequence. Empty uses the table
+          ordering setting.
+        </p>
+        {settings.sortOrder?.map((key, index) => (
+          <div className="form-grid" key={index}>
+            <Field label={`Sort column ${index + 1}`}>
+              <input
+                aria-label={`Sort column ${index + 1}`}
+                value={key.column}
+                onChange={(event) =>
+                  onChange({
+                    ...settings,
+                    sortOrder: settings.sortOrder!.map((item, position) =>
+                      position === index
+                        ? { ...item, column: event.target.value }
+                        : item,
+                    ),
+                  })
+                }
+              />
+            </Field>
+            <Field label={`Sort direction ${index + 1}`}>
+              <select
+                aria-label={`Sort direction ${index + 1}`}
+                value={key.direction}
+                onChange={(event) =>
+                  onChange({
+                    ...settings,
+                    sortOrder: settings.sortOrder!.map((item, position) =>
+                      position === index
+                        ? {
+                            ...item,
+                            direction: event.target.value as "asc" | "desc",
+                          }
+                        : item,
+                    ),
+                  })
+                }
+              >
+                <option value="asc">Ascending</option>
+                <option value="desc">Descending</option>
+              </select>
+            </Field>
+            <button
+              className="text-button"
+              onClick={() => {
+                const next = settings.sortOrder!.filter(
+                  (_, position) => index !== position,
+                );
+                onChange({
+                  ...settings,
+                  sortOrder: next.length ? next : undefined,
+                });
+              }}
+            >
+              Remove sort column {index + 1}
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="form-grid">
+        <Field
           label="Decimal places"
           help="Compare numeric values after rounding to this precision. Leave blank to use tolerances. Column rules can set different precision for currency and counts."
         >

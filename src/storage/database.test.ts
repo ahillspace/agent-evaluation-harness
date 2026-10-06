@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   agentSchema,
+  jsonSchema,
   evaluatorSettingsSchema,
   judgeSchema,
   limitsSchema,
@@ -136,7 +137,7 @@ describe("typed durable records", () => {
       raw.prepare("SELECT value FROM records WHERE id='old'").get()?.value,
     ).toBe(original);
     expect(raw.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
-    expect(raw.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
+    expect(raw.prepare("PRAGMA user_version").get()?.user_version).toBe(5);
     raw.close();
   });
   it("preserves version 2 record bytes while installing target immutability", async () => {
@@ -159,7 +160,7 @@ describe("typed durable records", () => {
     expect(
       after.prepare("SELECT value FROM records WHERE id='legacy'").get()?.value,
     ).toBe(before);
-    expect(after.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
+    expect(after.prepare("PRAGMA user_version").get()?.user_version).toBe(5);
     after.close();
   });
   it("projects score and researcher summaries without returning raw evidence", async () => {
@@ -294,8 +295,8 @@ describe("typed durable records", () => {
     new Database(path).close();
     const raw = new DatabaseSync(path);
     try {
-      expect(raw.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
-      raw.exec("PRAGMA user_version=4");
+      expect(raw.prepare("PRAGMA user_version").get()?.user_version).toBe(5);
+      raw.exec("PRAGMA user_version=6");
     } finally {
       raw.close();
     }
@@ -385,4 +386,238 @@ describe("typed durable records", () => {
     expect(db.get("run", "run1")).toBeUndefined();
     expect(db.idempotent("launch", "digest")).toBeUndefined();
   });
+});
+
+it("projects known usage from failed attempts without inventing zero usage", async () => {
+  const db = await setup();
+  db.insert("attempt", {
+    id: "failed",
+    runId: "run",
+    resultId: "result",
+    number: 1,
+    startedAt: bank.createdAt,
+    status: "failed",
+    failure: {
+      code: "target_failure",
+      classification: {
+        category: "rate-limit",
+        transient: true,
+        retrySafety: "unknown",
+        usage: { inputTokens: 12, outputTokens: 3 },
+      },
+    },
+  });
+  expect(db.attemptSummaries("run")[0]?.usage).toEqual({
+    inputTokens: 12,
+    outputTokens: 3,
+  });
+});
+
+it("keeps an opaque workspace identity across reopening and catalog changes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aeh-identity-"));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  const file = join(directory, "catalog.sqlite"),
+    first = new Database(file);
+  const identity = first.workspaceId();
+  first.insert("bankRevision", bank);
+  first.close();
+  const reopened = new Database(file),
+    other = new Database(join(directory, "other.sqlite"));
+  try {
+    expect(reopened.workspaceId()).toBe(identity);
+    expect(other.workspaceId()).not.toBe(identity);
+    expect(identity).toMatch(/^workspace_/);
+  } finally {
+    reopened.close();
+    other.close();
+  }
+});
+it("projects original judge requests as pending until their assessment is recorded", async () => {
+  const db = await setup();
+  db.append({
+    runId: "run",
+    attemptId: "attempt",
+    type: "judge.request",
+    message: "Requested",
+    data: {},
+  });
+  expect(db.originalJudgeUsage("run")).toEqual([{ pending: true }]);
+  db.insert("assessment", {
+    id: "assessment",
+    runId: "run",
+    resultId: "result",
+    attemptId: "attempt",
+    deterministic: { status: "correct", explanation: "Matched" },
+    judge: { verdict: true, usage: { inputTokens: 5, outputTokens: 2 } },
+  });
+  expect(db.originalJudgeUsage("run")).toEqual([
+    { pending: false, usage: { inputTokens: 5, outputTokens: 2 } },
+  ]);
+});
+
+it("distinguishes a pending saved judgment from completed abstentions with unreported usage", async () => {
+  const db = await setup();
+  db.insert("assessmentPass", {
+    id: "pass",
+    runId: "run",
+    name: "Judge",
+    source: "llm",
+    status: "running",
+    createdAt: bank.createdAt,
+    basis: {
+      bankRevisionId: bank.id,
+      evaluatorRevisionId: evaluator.id,
+      eligibleResultIds: ["r1", "r2", "r3"],
+      excludedResultIds: [],
+      referenceHash: "hash",
+    },
+    configuration: {},
+    judgments: [
+      {
+        resultId: "r1",
+        judgmentId: "j1",
+        status: "unjudged",
+        explanation: "Abstained",
+        response: { verdict: null },
+      },
+      {
+        resultId: "r2",
+        judgmentId: "j2",
+        status: "unjudged",
+        explanation: "Pending",
+        request: {},
+      },
+      {
+        resultId: "r3",
+        judgmentId: "j3",
+        status: "correct",
+        explanation: "Correct",
+      },
+    ],
+    coverage: {
+      eligible: 3,
+      answered: 3,
+      judged: 1,
+      correct: 1,
+      incorrect: 0,
+      unjudged: 2,
+      errors: 0,
+      excluded: 0,
+      reviewed: 0,
+      overridden: 0,
+    },
+    accuracy: 1,
+    judgedAccuracy: 1,
+  });
+  expect(db.passJudgeUsage("run")).toEqual([
+    { judgmentId: "j1", pending: false },
+    { judgmentId: "j2", pending: true },
+    { judgmentId: "j3", pending: false },
+  ]);
+});
+it("recovers only matching sealed usage breakdowns and caches settled projections", async () => {
+  const db = await setup();
+  db.insert("run", run("usage-run"));
+  for (const [id, raw] of Object.entries({
+    good: { input_tokens: 100, output_tokens: 20, cached_input_tokens: 60 },
+    mismatch: { input_tokens: 101, output_tokens: 20, cached_input_tokens: 60 },
+    malformed: {
+      input_tokens: 100,
+      output_tokens: 20,
+      cached_input_tokens: 200,
+    },
+    absent: { input_tokens: 100, output_tokens: 20 },
+  })) {
+    db.insert("attempt", {
+      id,
+      runId: "usage-run",
+      resultId: id,
+      number: 1,
+      startedAt: bank.createdAt,
+      status: "completed",
+      output: {
+        answer: 42,
+        text: "42",
+        usage: { inputTokens: 100, outputTokens: 20 },
+      },
+    });
+    db.append({
+      runId: "usage-run",
+      attemptId: id,
+      type: "usage",
+      message: "Usage",
+      data: jsonSchema.parse(raw),
+    });
+  }
+  for (const id of ["no-events", "duplicate"]) {
+    db.insert("attempt", {
+      id,
+      runId: "usage-run",
+      resultId: id,
+      number: 1,
+      startedAt: bank.createdAt,
+      status: "completed",
+      output: {
+        answer: 42,
+        text: "42",
+        usage: { inputTokens: 100, outputTokens: 20 },
+      },
+    });
+  }
+  for (let i = 0; i < 2; i++)
+    db.append({
+      runId: "usage-run",
+      attemptId: "duplicate",
+      type: "usage",
+      message: "Usage",
+      data: { input_tokens: 100, output_tokens: 20, cached_input_tokens: 60 },
+    });
+  const { UsageProjection } =
+    await import("../application/usage-projection.js");
+  const { HarnessUsage } = await import("../runtime/usage.js");
+  let calls = 0;
+  const projection = new UsageProjection(db, (harness, events) => {
+    calls++;
+    const usage = new HarnessUsage(harness);
+    for (const event of events) usage.add(event);
+    return usage.value();
+  });
+  expect(
+    projection.attempts("usage-run").map((a) => a.usage?.uncachedInputTokens),
+  ).toEqual([40, undefined, undefined, undefined, undefined, undefined]);
+  projection.attempts("usage-run");
+  expect(calls).toBe(6);
+  expect(db.require("attempt", "good").output?.usage).toEqual({
+    inputTokens: 100,
+    outputTokens: 20,
+  });
+});
+
+it("bounds historical usage event projection and excludes unrelated large events", async () => {
+  const db = await setup();
+  db.append({
+    runId: "run",
+    attemptId: "attempt",
+    type: "message",
+    message: "Large transcript",
+    data: { text: "x".repeat(20000) },
+  });
+  db.append({
+    runId: "run",
+    attemptId: "attempt",
+    type: "usage",
+    message: "Usage",
+    data: { input_tokens: 100, output_tokens: 20, cached_input_tokens: 60 },
+  });
+  expect(db.attemptUsageEvents("attempt")).toEqual([
+    { input_tokens: 100, output_tokens: 20, cached_input_tokens: 60 },
+  ]);
+  db.append({
+    runId: "run",
+    attemptId: "attempt",
+    type: "usage",
+    message: "Oversized",
+    data: { text: "x".repeat(1048576) },
+  });
+  expect(db.attemptUsageEvents("attempt")).toBeUndefined();
 });

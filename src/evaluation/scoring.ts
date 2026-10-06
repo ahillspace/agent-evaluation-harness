@@ -7,7 +7,7 @@ import type {
 import { gradeCustom } from "./custom.js";
 import { gradeTypedAnswer, validateReference } from "./typed-answers.js";
 import { decimalsMatch, roundedDecimalsMatch } from "./decimal.js";
-import { selectAnswer } from "./answer-policy.js";
+import { selectAnswer, scalarRepresentation } from "./answer-policy.js";
 import { temporalValue } from "../contracts/temporal.js";
 import { rowsMatch } from "./row-matching.js";
 import { errorMessage } from "../domain/errors.js";
@@ -19,6 +19,27 @@ function text(value: Json, settings: EvaluatorSettings): string {
   if (settings.collapseWhitespace) result = result.replace(/\s+/g, " ");
   if (!settings.caseSensitive) result = result.toLocaleLowerCase("en-US");
   return result;
+}
+/** Canonical equality is a sufficient fast path; tolerance matching retains the complete inputs. */
+function exactJsonKey(value: Json): string {
+  if (Array.isArray(value))
+    return JSON.stringify(["array", value.map(exactJsonKey).sort()]);
+  if (value !== null && typeof value === "object")
+    return JSON.stringify([
+      "object",
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, exactJsonKey(value[key]!)]),
+    ]);
+  return JSON.stringify([typeof value, value]);
+}
+function containsNumber(value: Json): boolean {
+  return (
+    typeof value === "number" ||
+    (value !== null &&
+      typeof value === "object" &&
+      Object.values(value).some(containsNumber))
+  );
 }
 function equivalent(
   expected: Json,
@@ -38,8 +59,16 @@ function equivalent(
       return expected.every((item, index) =>
         equivalent(item, answer[index]!, settings),
       );
+    if (exactJsonKey(expected) === exactJsonKey(answer)) return true;
+    if (
+      (!containsNumber(expected) && !containsNumber(answer)) ||
+      (settings.absoluteTolerance === 0 && settings.relativeTolerance === 0)
+    )
+      return false;
     if (expected.length > 500)
-      throw new Error("Unordered JSON comparison exceeds the 500-item limit.");
+      throw new Error(
+        "Tolerance-dependent unordered JSON comparison exceeds the 500-item search limit.",
+      );
     return rowsMatch(expected.length, (left, right) =>
       equivalent(expected[left]!, answer[right]!, settings),
     );
@@ -70,6 +99,17 @@ async function evaluate(
   settings: EvaluatorSettings,
   format?: AnswerFormat,
 ): Promise<Verdict> {
+  if (settings.representationPolicy === "strict" && format) {
+    const invalid = validateEvaluationFormat(format, answer, settings);
+    if (invalid) return invalid;
+  }
+  if (
+    settings.representationPolicy !== "strict" &&
+    format?.type === "scalar" &&
+    (typeof expected === "number" || typeof expected === "string") &&
+    answer !== expected
+  )
+    answer = scalarRepresentation(answer);
   if (settings.mode === "custom")
     return (
       validateEvaluationFormat(format, answer, settings) ??
@@ -89,6 +129,7 @@ async function evaluate(
           : "json";
   if (
     mode === "json" &&
+    settings.representationPolicy !== "strict" &&
     typeof answer === "string" &&
     typeof expected !== "string"
   ) {

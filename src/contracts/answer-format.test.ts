@@ -135,3 +135,26 @@ it("validates nullable and date metadata and rejects ambiguous column declaratio
     validateSubmittedAnswer(format, [{ day: "2026-02-30" }]),
   ).toMatchObject({ ok: false });
 });
+
+it("advertises and validates up to 10000 collection items without changing values", () => {
+  for (const format of [
+    answerFormatSchema.parse({
+      type: "list",
+      itemType: "string",
+      nullable: false,
+    }),
+    answerFormatSchema.parse({
+      type: "table",
+      columns: [{ name: "name", type: "string", nullable: false }],
+    }),
+  ]) {
+    const answer = Array.from({ length: 10000 }, (_, i) =>
+      format.type === "list" ? String(i) : { name: String(i) },
+    );
+    expect(answerFormatJsonSchema(format)).toMatchObject({ maxItems: 10000 });
+    expect(validateSubmittedAnswer(format, answer).ok).toBe(true);
+    expect(validateSubmittedAnswer(format, [...answer, answer[0]!]).ok).toBe(
+      false,
+    );
+  }
+});

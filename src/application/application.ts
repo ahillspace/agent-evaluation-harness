@@ -11,6 +11,11 @@ import {
 import { AppError } from "../domain/errors.js";
 import { Database } from "../storage/database.js";
 import { acquireOwnerLock } from "../storage/owner-lock.js";
+import { AssessmentPassService, summarizePass } from "./assessment-passes.js";
+import { BankFindingService } from "./bank-findings.js";
+import { UsageProjection } from "./usage-projection.js";
+import { runPerformance } from "./performance.js";
+import { digest } from "../domain/identity.js";
 import { CatalogService } from "./catalog.js";
 import {
   accuracy,
@@ -78,12 +83,25 @@ export async function createApplication(options: {
   const catalog = new CatalogService(db);
   const evaluations = new EvaluationService(db);
   const jev = new JevService(db, runtime);
+  const passes = new AssessmentPassService(
+    db,
+    evaluations,
+    jev,
+    runtime,
+    options.dataDirectory,
+  );
+  const findings = new BankFindingService(db, catalog, passes);
+  const usage = new UsageProjection(
+    db,
+    runtime.normalizeRecordedUsage?.bind(runtime),
+  );
   const runs = new RunService(
     db,
     runtime,
     evaluations,
     options.dataDirectory,
     jev,
+    usage,
   );
   const research = new ResearchService(
     db,
@@ -96,6 +114,7 @@ export async function createApplication(options: {
     await jev.recover();
     await runs.recover();
     await evaluations.recover();
+    passes.recover();
     research.recover();
   } catch (error) {
     await dispose(
@@ -112,15 +131,25 @@ export async function createApplication(options: {
     const records = db.list("run", { limit, offset, descending: true });
     const items = records.map((run) => {
       const target = savedTarget(run.manifest);
+      const assessmentPasses = passes.list(run.id);
+      const selectedAssessmentPassId =
+        run.selectedAssessmentPassId ?? assessmentPasses[0]?.id;
+      const selectedAssessment = assessmentPasses.find(
+        (pass) => pass.id === selectedAssessmentPassId,
+      );
       const results = db.list("result", { runId: run.id });
       const assessments = evaluations
         .summaries(run.id)
         .find((scores) => scores.kind === "original")!.assessments;
       return {
         id: run.id,
+        assessmentPasses: assessmentPasses.map(summarizePass),
+        selectedAssessmentPassId,
+        performance: runPerformance(db, run.id, usage),
         name: run.name,
         status: run.status,
         createdAt: run.createdAt,
+        ...(run.retryOf ? { retryOf: run.retryOf } : {}),
         bankName: run.manifest.bank.name,
         bankId: run.manifest.bank.bankId,
         model: target.kind === "managed" ? target.agent.model : null,
@@ -128,10 +157,13 @@ export async function createApplication(options: {
         target: savedTarget(run.manifest),
         completed: results.filter((r) => r.status === "completed").length,
         failed: results.filter((r) => r.status === "failed").length,
-        graded: gradedCount(assessments),
-        unscorable: unscorableCount(assessments),
+        graded: selectedAssessment?.coverage.judged ?? gradedCount(assessments),
+        unscorable:
+          selectedAssessment?.coverage.excluded ?? unscorableCount(assessments),
         total: results.length,
-        accuracy: accuracy(assessments),
+        accuracy:
+          selectedAssessment?.accuracy ??
+          (selectedAssessment ? null : accuracy(assessments)),
         ...(run.researchSessionId
           ? { researchSessionId: run.researchSessionId }
           : {}),
@@ -147,6 +179,7 @@ export async function createApplication(options: {
   async function workspace(): Promise<WorkspaceView> {
     const summaries = listRuns();
     return {
+      workspaceId: db.workspaceId(),
       banks: db.list("bank").map((bank) => {
         const revision = db.require("bankRevision", bank.latestRevisionId);
         return {
@@ -197,6 +230,33 @@ export async function createApplication(options: {
       );
     const command = operation as CommandName;
     switch (command) {
+      case "runs.assess":
+        return passes.create(
+          commandSchemas["runs.assess"].parse(input),
+          shutdownController.signal,
+        );
+      case "runs.assessment":
+      case "runs.export-assessment": {
+        const value = commandSchemas[command].parse(input);
+        return passes.get(value.runId, value.passId);
+      }
+      case "runs.select-assessment": {
+        const value = commandSchemas[command].parse(input);
+        return passes.select(value.runId, value.passId);
+      }
+      case "runs.retry-assessment":
+        return passes.retry(
+          commandSchemas[command].parse(input),
+          shutdownController.signal,
+        );
+      case "runs.review-assessment":
+        return passes.review(commandSchemas[command].parse(input));
+      case "banks.findings":
+        return findings.list(commandSchemas[command].parse(input).bankId);
+      case "banks.report-finding":
+        return findings.report(commandSchemas[command].parse(input));
+      case "banks.resolve-finding":
+        return findings.resolve(commandSchemas[command].parse(input));
       case "jev.profiles.publish":
         return jev.publishProfile(
           commandSchemas["jev.profiles.publish"].parse(input),
@@ -272,11 +332,17 @@ export async function createApplication(options: {
       }
       case "runs.get": {
         const value = commandSchemas["runs.get"].parse(input);
-        return runs.view(value.runId, value.cursor);
+        return {
+          ...passes.enrich(runs.view(value.runId, value.cursor)),
+          performance: runPerformance(db, value.runId, usage),
+        };
       }
       case "runs.observe": {
         const value = commandSchemas["runs.observe"].parse(input);
-        return runs.observe(value.runId, value.cursor);
+        return {
+          ...passes.enrich(runs.observe(value.runId, value.cursor)),
+          performance: runPerformance(db, value.runId, usage),
+        };
       }
       case "runs.attempt": {
         const value = commandSchemas["runs.attempt"].parse(input);
@@ -306,6 +372,10 @@ export async function createApplication(options: {
         });
         return { events, cursor: events.at(-1)?.sequence ?? value.cursor };
       }
+      case "runs.retry-failed":
+        return runs.retryFailed(
+          commandSchemas["runs.retry-failed"].parse(input),
+        );
       case "runs.control": {
         const value = commandSchemas["runs.control"].parse(input);
         const run = db.require("run", value.runId);
@@ -364,7 +434,86 @@ export async function createApplication(options: {
         return evaluations.review(commandSchemas["runs.review"].parse(input));
       case "runs.compare": {
         const value = commandSchemas["runs.compare"].parse(input);
-        return evaluations.compare(value.runIds, value.evaluatorRevisionId);
+        const comparison = evaluations.compare(
+          value.runIds,
+          value.evaluatorRevisionId,
+        );
+        if (value.evaluatorRevisionId) return comparison;
+        const fingerprints: string[] = [];
+        const rows = comparison.rows.map((row) => {
+          const run = db.require("run", row.runId);
+          const selectedId =
+            run.selectedAssessmentPassId ?? passes.list(row.runId)[0]!.id;
+          const pass = passes.get(row.runId, selectedId);
+          const results = db.list("result", { runId: row.runId });
+          const slots = (ids: string[]) =>
+            results
+              .filter((r) => ids.includes(r.id))
+              .map((r) => `${r.questionId}:${r.repetition}`)
+              .sort();
+          fingerprints.push(
+            digest({
+              source: pass.source,
+              settings: {
+                evaluator: pass.configuration.evaluator?.settings,
+                judge: pass.configuration.judge,
+                jev: pass.configuration.jevJudge
+                  ? {
+                      model: pass.configuration.jevJudge.model,
+                      settings: pass.configuration.jevJudge.profile.settings,
+                    }
+                  : undefined,
+              },
+              questions: run.manifest.questions
+                .map(({ expected: _expected, ...question }) => question)
+                .sort((a, b) => a.id.localeCompare(b.id)),
+              referenceHash: pass.basis.referenceHash,
+              eligible: slots(pass.basis.eligibleResultIds),
+              excluded: slots(pass.basis.excludedResultIds),
+            }),
+          );
+          return {
+            ...row,
+            accuracy: pass.accuracy,
+            graded: pass.coverage.judged,
+            unscorable: pass.coverage.excluded,
+            scoreSetId: pass.id,
+            questionDigest: digest({
+              publicQuestions: run.manifest.questions.map(
+                ({ expected: _expected, ...question }) => question,
+              ),
+              references: pass.basis.referenceHash,
+              eligible: slots(pass.basis.eligibleResultIds),
+            }),
+            evaluatorRevisionId: pass.basis.evaluatorRevisionId,
+            bankRevisionId: pass.basis.bankRevisionId,
+            assessmentPass: summarizePass(pass),
+            performance: runPerformance(db, row.runId, usage),
+          };
+        });
+        const warnings: string[] = [];
+        if (
+          rows.some(
+            (row) =>
+              row.status !== "completed" ||
+              row.assessmentPass.status === "running",
+          )
+        )
+          warnings.push("Some selected runs or assessments are incomplete.");
+        if (rows.some((row) => row.assessmentPass.coverage.eligible === 0))
+          warnings.push(
+            "No eligible question slots remain under the selected assessment policy.",
+          );
+        if (new Set(fingerprints).size > 1)
+          warnings.push(
+            "Selected assessment sources, settings, reference answers, or eligible question slots differ.",
+          );
+        return {
+          ...comparison,
+          rows,
+          warnings,
+          comparable: warnings.length === 0,
+        };
       }
       case "blueprints.save": {
         const value = commandSchemas["blueprints.save"].parse(input);

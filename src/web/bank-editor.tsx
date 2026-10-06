@@ -1,9 +1,10 @@
 import { useState } from "react";
+import { AnswerSize } from "./answer-size.js";
 import type { BankRevision, Question } from "../contracts.js";
 import { command } from "./api.js";
 import { parseQuestions, replaceExpectedAnswer } from "./drafts.js";
 import { AnswerFormatSummary } from "./answer-format.js";
-import { ErrorNotice, Field, Icon, Modal, json } from "./ui.js";
+import { ErrorNotice, Field, Icon, Modal, Tabs, json } from "./ui.js";
 
 export function BankEditor({
   source,
@@ -70,151 +71,149 @@ export function BankEditor({
           placeholder="Sales analytics"
         />
       </Field>
-      <div
-        className="tabs"
-        role="tablist"
-        aria-label="Question authoring method"
+      <Tabs
+        label="Question authoring method"
+        value={mode}
+        onChange={setMode}
+        items={[
+          { value: "author", label: "Write questions" },
+          { value: "import", label: "Import JSON or CSV" },
+        ]}
       >
-        {["author", "import"].map((value) => (
-          <button
-            key={value}
-            role="tab"
-            aria-selected={mode === value}
-            onClick={() => setMode(value)}
-          >
-            {value === "author" ? "Write questions" : "Import JSON or CSV"}
-          </button>
-        ))}
-      </div>
-      {mode === "import" ? (
-        <div className="stack">
-          <p className="subtle">
-            JSON accepts a questions array or a bank export. CSV requires
-            question and expected columns, with optional id and tags. Publishing
-            a typed answer shares its public format with the target. Expected
-            values and result counts stay private.
-          </p>
-          <input
-            aria-label="Import question file"
-            type="file"
-            accept=".json,.csv"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) void file.text().then(setImportText);
-            }}
-          />
-          <textarea
-            aria-label="Question import content"
-            className="code-input"
-            rows={13}
-            value={importText}
-            onChange={(event) => setImportText(event.target.value)}
-            placeholder={
-              "id,question,expected\nq1,What was total revenue?,12500"
-            }
-          />
-        </div>
-      ) : (
-        <div className="stack">
-          {questions.map((question, index) => (
-            <div key={index} className="question-editor">
-              <div className="row">
-                <span className="eyebrow">Question {index + 1}</span>
-                <button
-                  className="text-button danger"
-                  disabled={questions.length === 1}
-                  onClick={() =>
-                    setQuestions((items) =>
-                      items.filter((_, position) => index !== position),
-                    )
-                  }
+        {mode === "import" ? (
+          <div className="stack">
+            <p className="subtle">
+              JSON accepts a questions array or a bank export. CSV requires
+              question and expected columns, with optional id and tags.
+              Publishing a typed answer shares its public format with the
+              target. Expected values and result counts stay private.
+            </p>
+            <input
+              aria-label="Import question file"
+              type="file"
+              accept=".json,.csv"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void file.text().then(setImportText);
+              }}
+            />
+            <textarea
+              aria-label="Question import content"
+              className="code-input"
+              rows={13}
+              value={importText}
+              onChange={(event) => setImportText(event.target.value)}
+              placeholder={
+                "id,question,expected\nq1,What was total revenue?,12500"
+              }
+            />
+          </div>
+        ) : (
+          <div className="stack">
+            {questions.map((question, index) => (
+              <div key={index} className="question-editor">
+                <div className="row">
+                  <span className="eyebrow">Question {index + 1}</span>
+                  <button
+                    className="text-button danger"
+                    disabled={questions.length === 1}
+                    onClick={() =>
+                      setQuestions((items) =>
+                        items.filter((_, position) => index !== position),
+                      )
+                    }
+                  >
+                    Remove
+                  </button>
+                </div>
+                <Field label="Question">
+                  <textarea
+                    aria-label={`Question ${index + 1}`}
+                    value={question.text}
+                    rows={2}
+                    onChange={(event) =>
+                      update(index, { text: event.target.value })
+                    }
+                  />
+                </Field>
+                <Field
+                  label="Expected answer"
+                  help="Enter plain text, a number, or a JSON value. Expected values stay private. For typed tables, publication records the declared column names, types, and null rules as the public answer format."
                 >
-                  Remove
-                </button>
-              </div>
-              <Field label="Question">
-                <textarea
-                  aria-label={`Question ${index + 1}`}
-                  value={question.text}
-                  rows={2}
-                  onChange={(event) =>
-                    update(index, { text: event.target.value })
-                  }
-                />
-              </Field>
-              <Field
-                label="Expected answer"
-                help="Enter plain text, a number, or a JSON value. Expected values stay private. For typed tables, publication records the declared column names, types, and null rules as the public answer format."
-              >
-                <textarea
-                  aria-label={`Expected answer ${index + 1}`}
-                  defaultValue={
-                    typeof question.expected === "string"
-                      ? question.expected
-                      : json(question.expected)
-                  }
-                  rows={2}
-                  onBlur={(event) => {
-                    let value = event.target.value;
-                    try {
-                      value = JSON.parse(value);
-                    } catch {
-                      /* Preserve plain text. */
+                  <textarea
+                    aria-label={`Expected answer ${index + 1}`}
+                    defaultValue={
+                      typeof question.expected === "string"
+                        ? question.expected
+                        : json(question.expected)
                     }
-                    update(index, replaceExpectedAnswer(question, value));
-                  }}
-                />
-              </Field>
-              {question.answerFormat && (
-                <AnswerFormatSummary format={question.answerFormat} />
-              )}
-              <div className="form-grid">
-                <Field label="Question ID">
-                  <input
-                    aria-label={`Question ID ${index + 1}`}
-                    value={question.id}
-                    onChange={(event) =>
-                      update(index, { id: event.target.value })
-                    }
+                    rows={2}
+                    onBlur={(event) => {
+                      let value = event.target.value;
+                      try {
+                        value = JSON.parse(value);
+                      } catch {
+                        /* Preserve plain text. */
+                      }
+                      update(index, replaceExpectedAnswer(question, value));
+                    }}
                   />
                 </Field>
-                <Field label="Tags">
-                  <input
-                    aria-label={`Tags ${index + 1}`}
-                    value={question.tags.join(", ")}
-                    onChange={(event) =>
-                      update(index, {
-                        tags: event.target.value
-                          .split(",")
-                          .map((value) => value.trim())
-                          .filter(Boolean),
-                      })
-                    }
-                    placeholder="revenue, aggregation"
-                  />
-                </Field>
+                {question.answerFormat && (
+                  <AnswerFormatSummary format={question.answerFormat} />
+                )}
+                <AnswerSize answer={question.expected} />
+                <details className="disclosure">
+                  <summary>Question ID and tags</summary>
+                  <div className="form-grid">
+                    <Field label="Question ID">
+                      <input
+                        aria-label={`Question ID ${index + 1}`}
+                        value={question.id}
+                        onChange={(event) =>
+                          update(index, { id: event.target.value })
+                        }
+                      />
+                    </Field>
+                    <Field label="Tags">
+                      <input
+                        aria-label={`Tags ${index + 1}`}
+                        value={question.tags.join(", ")}
+                        onChange={(event) =>
+                          update(index, {
+                            tags: event.target.value
+                              .split(",")
+                              .map((value) => value.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                        placeholder="revenue, aggregation"
+                      />
+                    </Field>
+                  </div>
+                </details>
               </div>
-            </div>
-          ))}
-          <button
-            className="button secondary"
-            onClick={() =>
-              setQuestions((items) => [
-                ...items,
-                {
-                  id: `q${items.length + 1}`,
-                  text: "",
-                  expected: "",
-                  tags: [],
-                },
-              ])
-            }
-          >
-            <Icon name="plus" />
-            Add question
-          </button>
-        </div>
-      )}
+            ))}
+            <button
+              className="button secondary"
+              onClick={() =>
+                setQuestions((items) => [
+                  ...items,
+                  {
+                    id: `q${items.length + 1}`,
+                    text: "",
+                    expected: "",
+                    tags: [],
+                  },
+                ])
+              }
+            >
+              <Icon name="plus" />
+              Add question
+            </button>
+          </div>
+        )}
+      </Tabs>
       <footer className="modal-footer">
         <p>
           Publication creates an immutable revision. Existing runs keep their

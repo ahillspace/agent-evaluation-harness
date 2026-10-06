@@ -14,21 +14,3 @@ export function RunOutcomes({
     </>
   );
 }
-
-export function RunAccuracy({
-  accuracy,
-  graded,
-  unscorable = 0,
-}: Pick<RunSummary, "accuracy" | "graded"> & { unscorable?: number }) {
-  return (
-    <>
-      <span>
-        {accuracy === null ? "Not graded" : `${(accuracy * 100).toFixed(1)}%`}
-      </span>
-      <small>{`${graded} scored answer${graded === 1 ? "" : "s"}`}</small>
-      {unscorable > 0 && (
-        <small>{`${unscorable} unscorable answer${unscorable === 1 ? "" : "s"} excluded`}</small>
-      )}
-    </>
-  );
-}

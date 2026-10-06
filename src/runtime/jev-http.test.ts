@@ -116,6 +116,38 @@ it("keeps 422 capacity errors and invalid JSON provenance without retrying", asy
     response: "not JSON [REDACTED]",
   });
 });
+it.each([
+  {
+    error: {
+      code: "max_tokens_exceeded",
+      message: "The state exceeds 32000 tokens.",
+    },
+  },
+  {
+    detail: {
+      error_type: "max_tokens_exceeded",
+      message: "The state exceeds 32000 tokens.",
+    },
+  },
+])(
+  "records HTTP 400 max_tokens_exceeded as an unjudged token limit without truncating or retrying: %j",
+  async (body) => {
+    const server = await fixture((response) =>
+      response
+        .writeHead(400, { "x-request-id": "oversized-fixture" })
+        .end(JSON.stringify(body)),
+    );
+    await expect(invoke(server.endpoint)).rejects.toMatchObject({
+      code: "token_limit_exceeded",
+      httpStatus: 400,
+      response: body,
+      requestId: "oversized-fixture",
+      request: { state: { marker: "whole trace" } },
+      attempts: [{ status: 400, response: body }],
+    });
+    expect(server.requests).toHaveLength(1);
+  },
+);
 it("bounds response streams and honors cancellation and a shared retry deadline", async () => {
   const huge = await fixture((response) => response.end("x".repeat(2000)));
   await expect(

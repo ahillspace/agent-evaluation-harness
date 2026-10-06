@@ -1,3 +1,4 @@
+import { HARNESS_LABELS, supportsProvider } from "../contracts/harnesses.js";
 import type {
   AgentConfig,
   RuntimeCatalog,
@@ -10,8 +11,10 @@ export function RoleProvider({
   connections,
   value,
   onChange,
+  harness = "opencode",
 }: {
   label: string;
+  harness?: string;
   connections: WorkspaceView["connections"];
   value: string;
   onChange: (id: string, provider: string) => void;
@@ -19,7 +22,7 @@ export function RoleProvider({
   return (
     <Field
       label={label}
-      help="Use this role's local harness account, or select a saved provider API key independently of other roles."
+      help="Use a subscription or local account through the selected harness, or choose a saved API key or gateway token. Configure saved credentials in Settings, Connections."
     >
       <select
         aria-label={label}
@@ -32,17 +35,46 @@ export function RoleProvider({
           )
         }
       >
-        <option value="">Use local harness account</option>
+        <option value="">
+          {harness === "bedrock"
+            ? "Choose a saved Bedrock connection"
+            : "Subscription / local harness account"}
+        </option>
+        {value &&
+          !connections.some(
+            (item) =>
+              item.id === value && supportsProvider(harness, item.provider),
+          ) && (
+            <option value={value}>
+              Previously selected connection (unavailable or incompatible)
+            </option>
+          )}
         {connections
-          .filter((item) =>
-            ["openai", "anthropic", "openrouter"].includes(item.provider),
-          )
+          .filter((item) => supportsProvider(harness, item.provider))
           .map((item) => (
             <option key={item.id} value={item.id}>
-              {item.name} ({item.provider})
+              {item.name} (
+              {item.settings.authMode === "bearer" ? "bearer token" : "API key"}{" "}
+              / {item.provider})
             </option>
           ))}
       </select>
+      {harness === "bedrock" && (
+        <p className="subtle">
+          Uses non-streaming Converse with the saved gateway bearer token.
+          Subscription sign-in does not apply.
+        </p>
+      )}
+      {value &&
+        !connections.some(
+          (item) =>
+            item.id === value && supportsProvider(harness, item.provider),
+        ) && (
+          <p className="warning">
+            Choose a compatible saved connection. The previous selection has
+            been preserved.
+          </p>
+        )}
     </Field>
   );
 }
@@ -79,10 +111,13 @@ export function ModelFields({
               : [
                   { id: "codex", available: false },
                   { id: "opencode", available: false },
+                  { id: "claude", available: false },
+                  { id: "bedrock", available: true },
                 ]
             ).map((item) => (
               <option key={item.id} value={item.id}>
-                {item.id}
+                {HARNESS_LABELS[item.id as keyof typeof HARNESS_LABELS] ??
+                  item.id}
                 {item.available ? "" : " (not discovered)"}
               </option>
             ))}
@@ -112,13 +147,17 @@ export function ModelFields({
       {selected && (
         <p className={`runtime-note ${selected.available ? "" : "warning"}`}>
           {selected.available
-            ? `${selected.id} ${selected.version ?? ""} is installed.`
+            ? selected.id === "bedrock"
+              ? "Built-in non-streaming Bedrock Converse runtime. Select a saved gateway connection and enter its model ID."
+              : `${selected.id} ${selected.version ?? ""} is installed.`
             : (selected.error ?? `${selected.id} is unavailable.`)}
-          {selected.authenticated === true
-            ? " Local account detected."
-            : selected.authenticated === false
-              ? " Sign in through the harness CLI or choose a provider API key."
-              : " Account status is unknown."}
+          {selected.id === "bedrock"
+            ? ""
+            : selected.authenticated === true
+              ? " Local account detected."
+              : selected.authenticated === false
+                ? " Sign in through the harness CLI or choose a saved API key or gateway token."
+                : " Account status is unknown."}
         </p>
       )}
     </>

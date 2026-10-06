@@ -1,4 +1,23 @@
-﻿import { z } from "zod";
+import type {
+  AssessmentPass,
+  AssessmentPassSummary,
+  RunPerformance,
+  BankFinding,
+} from "./contracts/assessment-passes.js";
+export type {
+  AssessmentPass,
+  AssessmentPassSummary,
+  RunPerformance,
+  BankFinding,
+  PassJudgment,
+  JudgmentStatus,
+  AssessmentCoverage,
+  UsageReport,
+  UsageReporting,
+  UsageTotals,
+} from "./contracts/assessment-passes.js";
+import type { ExecutionFailure } from "./contracts/execution-failure.js";
+import { z } from "zod";
 
 import { jsonSchema, type Json } from "./contracts/json.js";
 export { jsonSchema, type Json } from "./contracts/json.js";
@@ -142,15 +161,23 @@ export const questionSchema = z
     tags: z.array(z.string()).default([]),
     context: z.string().max(100_000).optional(),
     answerFormat: answerFormatSchema.optional(),
+    evaluationGuidance: z.string().max(10000).optional(),
   })
   .strict();
 export type Question = z.infer<typeof questionSchema>;
 export type PublicQuestion = Pick<
   Question,
-  "id" | "text" | "tags" | "context" | "answerFormat"
+  "id" | "text" | "tags" | "context" | "answerFormat" | "evaluationGuidance"
 >;
 export const publicQuestionSchema = questionSchema
-  .pick({ id: true, text: true, tags: true, context: true, answerFormat: true })
+  .pick({
+    id: true,
+    text: true,
+    tags: true,
+    context: true,
+    answerFormat: true,
+    evaluationGuidance: true,
+  })
   .strict();
 const columnAliasesSchema = z
   .record(
@@ -211,6 +238,33 @@ const comparisonSettingsSchema = z
     mode: z
       .enum(["auto", "exact", "text", "numeric", "json", "custom"])
       .default("auto"),
+    representationPolicy: z
+      .enum(["compatible", "strict"])
+      .default("compatible"),
+    duplicateRows: z.enum(["preserve", "distinct"]).default("preserve"),
+    sortOrder: z
+      .array(
+        z
+          .object({
+            column: z.string().min(1),
+            direction: z.enum(["asc", "desc"]),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(100)
+      .optional(),
+    collation: z
+      .object({
+        locale: z.string().default("en-US"),
+        numeric: z.boolean().default(false),
+        ignorePunctuation: z.boolean().default(false),
+        sensitivity: z
+          .enum(["base", "accent", "case", "variant"])
+          .default("variant"),
+      })
+      .strict()
+      .optional(),
     caseSensitive: z.boolean().default(false),
     trimWhitespace: z.boolean().default(true),
     collapseWhitespace: z.boolean().default(true),
@@ -740,6 +794,8 @@ export type RunManifest = TargetSnapshot & {
   digest: string;
 };
 export interface RunRecord {
+  selectedAssessmentPassId?: string;
+  retryOf?: { runId: string; resultIds: string[] };
   id: string;
   name: string;
   createdAt: string;
@@ -751,7 +807,11 @@ export interface RunRecord {
   error?: string;
 }
 export interface AttemptRecord {
-  failure?: { code: string; transport?: Json };
+  failure?: {
+    code: string;
+    transport?: Json;
+    classification?: ExecutionFailure;
+  };
   remoteCompletion?: "not-dispatched" | "unknown" | "observed";
   adapterCheckpoint?: Json;
   id: string;
@@ -766,7 +826,7 @@ export interface AttemptRecord {
   evidenceHash?: string;
 }
 export type AttemptSummary = Omit<AttemptRecord, "output"> & {
-  usage?: TargetOutput["usage"];
+  usage?: TargetOutput["usage"] & { uncachedInputTokens?: number };
   hasOutput: boolean;
 };
 export interface ResultRecord {
@@ -786,6 +846,7 @@ export interface Verdict {
 export const usageSchema = z
   .object({
     inputTokens: z.number().finite().nonnegative().optional(),
+    cachedInputTokens: z.number().finite().nonnegative().optional(),
     outputTokens: z.number().finite().nonnegative().optional(),
     costUsd: z.number().finite().nonnegative().optional(),
   })
@@ -800,6 +861,8 @@ export const judgeVerdictSchema = z
   .strict();
 export type JudgeVerdict = z.infer<typeof judgeVerdictSchema>;
 export interface Assessment {
+  judgeRequest?: Json;
+  judgeResponse?: Json;
   resultId: string;
   attemptId: string;
   deterministic: Verdict;
@@ -816,7 +879,10 @@ export interface ScoreSet {
   assessments: Assessment[];
   published: boolean;
 }
-export type AssessmentSummary = Omit<Assessment, "deterministic" | "judge"> & {
+export type AssessmentSummary = Omit<
+  Assessment,
+  "deterministic" | "judge" | "judgeRequest" | "judgeResponse"
+> & {
   deterministic: Pick<Verdict, "status" | "explanation">;
   judge?: Pick<JudgeVerdict, "verdict" | "explanation">;
 };
@@ -897,7 +963,7 @@ export interface ConnectionInput {
   credentials?: Record<string, string>;
 }
 export interface HarnessInfo {
-  id: "codex" | "opencode";
+  id: "codex" | "claude" | "opencode" | "bedrock";
   available: boolean;
   version?: string;
   authenticated?: boolean;
@@ -920,6 +986,10 @@ export interface RecoveryReport {
   errors: string[];
 }
 export interface RuntimePort {
+  normalizeRecordedUsage?(
+    harness: string,
+    events: Json[],
+  ): TargetOutput["usage"];
   externalTargets: ExternalTargetCatalogPort;
   previewTarget(target: TargetConfig, question: PublicQuestion): Promise<Json>;
   recoverTarget(
@@ -985,6 +1055,11 @@ export const researchSchema = z
     researcher: agentSchema,
     objective: z.string().min(1).max(20_000),
     guidance: z.string().max(50_000).default(""),
+    allowResearcherStop: z.boolean().default(true),
+    stopGuidance: z.string().max(20_000).optional(),
+    selectionMetric: z
+      .enum(["deterministic", "llm", "jev"])
+      .default("deterministic"),
     allowedChanges: z
       .array(z.enum(["systemPrompt", "settings", "tools", "model"]))
       .min(1)
@@ -1034,6 +1109,9 @@ export type ResearchEvidenceRequest = {
   includeGold?: boolean;
 };
 export interface ResearchTurn {
+  disposition?: "keep" | "discard";
+  control?: "continue" | "stop";
+  stopCategory?: "complete" | "blocked";
   conversationId: string;
   message: string;
   proposal?: AgentConfig;
@@ -1066,6 +1144,15 @@ export interface ResearchRecord {
   stopReason?: string;
 }
 export interface RunView {
+  assessmentPasses?: AssessmentPass[];
+  selectedAssessmentPassId?: string;
+  performance?: RunPerformance;
+  retryEligibility?: {
+    available: boolean;
+    resultIds: string[];
+    requiresAcknowledgment: boolean;
+    reason?: string;
+  };
   run: RunRecord;
   results: ResultRecord[];
   attempts: AttemptSummary[];
@@ -1097,6 +1184,10 @@ export interface AttemptDetail {
   }>;
 }
 export interface RunSummary {
+  assessmentPasses?: AssessmentPassSummary[];
+  selectedAssessmentPassId?: string;
+  performance?: RunPerformance;
+  retryOf?: { runId: string; resultIds: string[] };
   unscorable?: number;
   id: string;
   name: string;
@@ -1115,6 +1206,7 @@ export interface RunSummary {
   researchSessionId?: string;
 }
 export interface WorkspaceView {
+  workspaceId?: string;
   banks: BankSummary[];
   runs: RunSummary[];
   totalRuns: number;
@@ -1222,6 +1314,14 @@ export const commandSchemas = {
       cursor: z.number().int().nonnegative().default(0),
     })
     .strict(),
+  "runs.retry-failed": z
+    .object({
+      runId: identifier,
+      resultIds: z.array(identifier).min(1).optional(),
+      acknowledgeDuplicateWork: z.boolean().default(false),
+      idempotencyKey: z.string().min(1).max(200),
+    })
+    .strict(),
   "runs.control": z
     .object({
       runId: identifier,
@@ -1255,6 +1355,73 @@ export const commandSchemas = {
       target: targetSchema.options[1],
       question: publicQuestionSchema,
       timeoutMs: z.number().int().min(1000).max(600000).default(120000),
+    })
+    .strict(),
+  "runs.assess": z
+    .object({
+      runId: identifier,
+      name,
+      source: z.enum(["deterministic", "llm", "jev"]),
+      evaluatorRevisionId: identifier.optional(),
+      bankRevisionId: identifier.optional(),
+      judge: judgeSchema.optional(),
+      jevJudge: jevJudgeSelectionSchema.optional(),
+    })
+    .strict(),
+  "runs.assessment": z
+    .object({ runId: identifier, passId: identifier })
+    .strict(),
+  "runs.export-assessment": z
+    .object({ runId: identifier, passId: identifier })
+    .strict(),
+  "runs.select-assessment": z
+    .object({ runId: identifier, passId: identifier })
+    .strict(),
+  "runs.retry-assessment": z
+    .object({ runId: identifier, passId: identifier, name: name.optional() })
+    .strict(),
+  "runs.review-assessment": z
+    .object({
+      runId: identifier,
+      parentPassId: identifier,
+      name,
+      reviewer: name.default("Local reviewer"),
+      overrides: z
+        .array(
+          z
+            .object({
+              resultId: identifier,
+              verdict: z.boolean().nullable(),
+              note: z.string().max(20000).default(""),
+              exclude: z.boolean().default(false),
+            })
+            .strict(),
+        )
+        .max(10000),
+    })
+    .strict(),
+  "banks.findings": z.object({ bankId: identifier }).strict(),
+  "banks.report-finding": z
+    .object({
+      bankId: identifier,
+      bankRevisionId: identifier,
+      questionId: identifier,
+      kind: z.enum(["reference", "ambiguity", "duplicates", "datasource"]),
+      title: name,
+      note: z.string().max(20000).default(""),
+      runId: identifier.optional(),
+      resultId: identifier.optional(),
+      passId: identifier.optional(),
+    })
+    .strict(),
+  "banks.resolve-finding": z
+    .object({
+      findingId: identifier,
+      status: z.enum(["accepted", "dismissed"]),
+      reviewer: name.default("Local reviewer"),
+      note: z.string().max(20000).default(""),
+      expected: jsonSchema.optional(),
+      exclude: z.boolean().default(false),
     })
     .strict(),
   "runs.rescore": z
@@ -1333,6 +1500,9 @@ export type ResearchSummary = Omit<
       ResearchTurn,
       | "conversationId"
       | "message"
+      | "disposition"
+      | "control"
+      | "stopCategory"
       | "decision"
       | "reason"
       | "usage"
@@ -1383,6 +1553,8 @@ export interface RunComparison {
   comparable: boolean;
   warnings: string[];
   rows: Array<{
+    assessmentPass?: AssessmentPassSummary;
+    performance?: RunPerformance;
     runId: string;
     name: string;
     status: RunStatus;
@@ -1403,6 +1575,19 @@ export interface RunComparison {
   }>;
 }
 export interface CommandResultMap {
+  "runs.assess": AssessmentPass;
+  "runs.assessment": AssessmentPass;
+  "runs.export-assessment": AssessmentPass;
+  "runs.select-assessment": { selectedAssessmentPassId: string };
+  "runs.retry-assessment": AssessmentPass;
+  "runs.review-assessment": AssessmentPass;
+  "banks.findings": BankFinding[];
+  "banks.report-finding": BankFinding;
+  "banks.resolve-finding": {
+    finding: BankFinding;
+    bankRevision?: BankRevision;
+    evaluator?: EvaluatorRevision;
+  };
   "targets.list": ExternalTargetRecord[];
   "targets.save": ExternalTargetRecord;
   "targets.delete": { ok: true };
@@ -1432,6 +1617,7 @@ export interface CommandResultMap {
   "runs.attempt": AttemptDetail;
   "runs.attempt-events": { events: ObservationEvent[]; cursor: number };
   "runs.control": RunView;
+  "runs.retry-failed": RunView;
   "runs.events": { events: ObservationEvent[]; cursor: number };
   "runs.export-agent": Json;
   "runs.rescore": ScoreSet;

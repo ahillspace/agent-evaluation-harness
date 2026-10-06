@@ -1,6 +1,9 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type {
   Assessment,
+  UsageReport,
+  AssessmentPass,
+  BankFinding,
   AttemptRecord,
   AttemptSummary,
   Bank,
@@ -23,10 +26,13 @@ import type {
   JevAssessmentRecord,
   JevAssessmentSummary,
 } from "../contracts.js";
+import { id } from "../domain/identity.js";
 import { AppError } from "../domain/errors.js";
 import { canonical, now } from "../domain/identity.js";
 
 export interface RecordMap {
+  assessmentPass: AssessmentPass;
+  bankFinding: BankFinding;
   bank: Bank;
   bankRevision: BankRevision;
   evaluator: EvaluatorRevision;
@@ -54,6 +60,33 @@ export interface RecordQuery {
   descending?: boolean;
 }
 const policies: Record<RecordKind, { appendOnly: boolean; fixed: string[] }> = {
+  assessmentPass: {
+    appendOnly: false,
+    fixed: [
+      "runId",
+      "name",
+      "source",
+      "createdAt",
+      "parentPassId",
+      "basis",
+      "configuration",
+    ],
+  },
+  bankFinding: {
+    appendOnly: false,
+    fixed: [
+      "bankId",
+      "bankRevisionId",
+      "questionId",
+      "kind",
+      "title",
+      "note",
+      "createdAt",
+      "runId",
+      "resultId",
+      "passId",
+    ],
+  },
   bank: { appendOnly: false, fixed: ["createdAt"] },
   bankRevision: { appendOnly: true, fixed: [] },
   evaluator: { appendOnly: true, fixed: [] },
@@ -115,7 +148,7 @@ const queryColumns = {
 } as const;
 
 function assessmentProjection(value: string): string {
-  const base = `json_set(json_remove(${value},'$.deterministic.details','$.judge.custom','$.judge.usage'),'$.deterministic.explanation',substr(json_extract(${value},'$.deterministic.explanation'),1,300))`;
+  const base = `json_set(json_remove(${value},'$.deterministic.details','$.judge.custom','$.judge.usage','$.judgeRequest','$.judgeResponse'),'$.deterministic.explanation',substr(json_extract(${value},'$.deterministic.explanation'),1,300))`;
   const judge = `CASE WHEN json_type(${value},'$.judge.explanation')='text' THEN json_set(${base},'$.judge.explanation',substr(json_extract(${value},'$.judge.explanation'),1,300)) ELSE ${base} END`;
   return `CASE WHEN json_type(${value},'$.judgeError')='text' THEN json_set(${judge},'$.judgeError',substr(json_extract(${value},'$.judgeError'),1,300)) ELSE ${judge} END`;
 }
@@ -146,7 +179,7 @@ export class Database {
       const version = Number(
         this.db.prepare("PRAGMA user_version").get()?.user_version ?? 0,
       );
-      if (version > 3)
+      if (version > 5)
         throw new AppError(
           "schema_version",
           "This catalog requires a newer application version.",
@@ -163,7 +196,7 @@ export class Database {
       PRAGMA foreign_keys=OFF;
       PRAGMA busy_timeout=5000;
       BEGIN IMMEDIATE;
-      CREATE TABLE IF NOT EXISTS ${version === 1 ? "records_v2" : "records"} (
+      CREATE TABLE IF NOT EXISTS ${version > 0 && version < 5 ? "records_v5" : "records"} (
         kind TEXT NOT NULL CHECK(kind IN (${Object.keys(policies)
           .map((kind) => `'${kind}'`)
           .join(",")})),
@@ -177,11 +210,11 @@ export class Database {
         UNIQUE(kind,id)
       );
     `);
-    if (version === 1)
+    if (version > 0 && version < 5)
       this.db.exec(`
-      INSERT INTO records_v2(kind,id,value,immutable,ordinal) SELECT kind,id,value,immutable,ordinal FROM records;
+      INSERT INTO records_v5(kind,id,value,immutable,ordinal) SELECT kind,id,value,immutable,ordinal FROM records;
       DROP TABLE records;
-      ALTER TABLE records_v2 RENAME TO records;
+      ALTER TABLE records_v5 RENAME TO records;
     `);
     if (version < 3)
       this.db.exec("DROP TRIGGER IF EXISTS immutable_blueprint_fields;");
@@ -213,6 +246,9 @@ export class Database {
       CREATE TRIGGER IF NOT EXISTS completed_attempts_are_sealed BEFORE UPDATE ON records
       WHEN OLD.kind='attempt' AND json_extract(OLD.value,'$.status')='completed' AND OLD.value!=NEW.value
       BEGIN SELECT RAISE(ABORT,'Completed attempt evidence is immutable.'); END;
+      CREATE TRIGGER IF NOT EXISTS assessment_passes_are_sealed BEFORE UPDATE ON records
+      WHEN OLD.kind='assessmentPass' AND json_extract(OLD.value,'$.status')!='running' AND OLD.value!=NEW.value
+      BEGIN SELECT RAISE(ABORT,'Completed assessment passes are immutable.'); END;
       CREATE TRIGGER IF NOT EXISTS score_publication_is_monotonic BEFORE UPDATE ON records
       WHEN OLD.kind='scoreSet' AND json_extract(OLD.value,'$.published')=1 AND json_extract(NEW.value,'$.published') IS NOT 1
       BEGIN SELECT RAISE(ABORT,'Published assessments cannot be unpublished.'); END;
@@ -242,7 +278,20 @@ export class Database {
         "schema_integrity",
         "Catalog references failed migration validation.",
       );
-    this.db.exec("PRAGMA user_version=3; COMMIT; PRAGMA foreign_keys=ON;");
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS workspace_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    );
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO workspace_metadata(key,value) VALUES ('id',?)",
+      )
+      .run(id("workspace"));
+    this.db.exec("PRAGMA user_version=5; COMMIT; PRAGMA foreign_keys=ON;");
+  }
+  workspaceId(): string {
+    return this.db
+      .prepare("SELECT value FROM workspace_metadata WHERE key='id'")
+      .get()!.value as string;
   }
   jevSummaries(runId: string): JevAssessmentSummary[] {
     return this.db
@@ -330,11 +379,44 @@ export class Database {
         .get(...parameters)?.total ?? 0,
     );
   }
+  assessmentPassObservations(runId: string): AssessmentPass[] {
+    return this.db
+      .prepare(
+        `SELECT json_set(json_remove(value,'$.configuration'),'$.configuration',json('{}'),'$.judgments',json(COALESCE((SELECT json_group_array(json_remove(item.value,'$.request','$.response','$.details')) FROM json_each(records.value,'$.judgments') item),'[]'))) AS value FROM records WHERE kind='assessmentPass' AND run_id=? ORDER BY ordinal`,
+      )
+      .all(runId)
+      .map((row) => JSON.parse(row.value as string) as AssessmentPass);
+  }
+  eventCounts(runId: string): Record<string, number> {
+    return Object.fromEntries(
+      this.db
+        .prepare(
+          "SELECT type, COUNT(*) AS total FROM events WHERE run_id=? GROUP BY type",
+        )
+        .all(runId)
+        .map((row) => [String(row.type), Number(row.total)]),
+    );
+  }
+  attemptUsageEvents(attemptId: string): Json[] | undefined {
+    const size = this.db
+      .prepare(
+        "SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(data AS BLOB))),0) AS bytes FROM events WHERE attempt_id=? AND type='usage'",
+      )
+      .get(attemptId)!;
+    if (Number(size.count) > 4096 || Number(size.bytes) > 1048576)
+      return undefined;
+    return this.db
+      .prepare(
+        "SELECT data FROM events WHERE attempt_id=? AND type='usage' ORDER BY sequence",
+      )
+      .all(attemptId)
+      .map((row) => (row.data ? (JSON.parse(String(row.data)) as Json) : null));
+  }
   attemptSummaries(runId: string): AttemptSummary[] {
     return this.db
       .prepare(
         `SELECT json_remove(value,'$.output','$.adapterCheckpoint','$.failure.transport') AS metadata,
-      json_extract(value,'$.output.usage') AS usage,
+      COALESCE(json_extract(value,'$.output.usage'),json_extract(value,'$.failure.classification.usage')) AS usage,
       json_type(value,'$.output') IS NOT NULL AS has_output
       FROM records WHERE kind='attempt' AND run_id=? ORDER BY ordinal`,
       )
@@ -394,6 +476,85 @@ export class Database {
         assessment: JSON.parse(row.assessment as string) as Assessment,
       }));
   }
+  judgeRequest(attemptId: string): Json | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT data FROM events WHERE attempt_id=? AND type='judge.request' ORDER BY sequence DESC LIMIT 1",
+      )
+      .get(attemptId);
+    return row?.data ? (JSON.parse(row.data as string) as Json) : undefined;
+  }
+  originalJudgeUsage(runId: string): UsageReport[] {
+    return this.db
+      .prepare(
+        `SELECT json_extract(value,'$.judge.usage') AS usage,0 AS pending FROM records WHERE kind='assessment' AND run_id=? AND (json_type(value,'$.judge') IS NOT NULL OR json_type(value,'$.judgeError') IS NOT NULL)
+    UNION ALL SELECT NULL AS usage,1 AS pending FROM events WHERE run_id=? AND type='judge.request' AND NOT EXISTS(SELECT 1 FROM records WHERE kind='assessment' AND run_id=events.run_id AND json_extract(value,'$.attemptId')=events.attempt_id) GROUP BY attempt_id`,
+      )
+      .all(runId, runId)
+      .map((row) => ({
+        ...(row.usage
+          ? { usage: JSON.parse(row.usage as string) as UsageReport["usage"] }
+          : {}),
+        pending: row.pending === 1,
+      }));
+  }
+  passJudgeUsage(runId: string): Array<UsageReport & { judgmentId: string }> {
+    return this.db
+      .prepare(
+        `SELECT json_extract(item.value,'$.judgmentId') AS judgment_id,json_extract(item.value,'$.usage') AS usage,json_extract(records.value,'$.status')='running' AND json_extract(item.value,'$.status')='unjudged' AND json_type(item.value,'$.response') IS NULL AS pending FROM records,json_each(records.value,'$.judgments') item WHERE records.kind='assessmentPass' AND records.run_id=? AND json_extract(records.value,'$.source')='llm' AND json_type(item.value,'$.judgmentId')='text'`,
+      )
+      .all(runId)
+      .map((row) => ({
+        judgmentId: String(row.judgment_id),
+        ...(row.usage
+          ? { usage: JSON.parse(row.usage as string) as UsageReport["usage"] }
+          : {}),
+        pending: row.pending === 1,
+      }));
+  }
+  researchUsage(sessionId: string): {
+    currentRunId: string;
+    pending: boolean;
+    interruptedTurns: number;
+    turns: Array<{
+      runId: string | null;
+      usage?: UsageReport["usage"];
+      usageScope?: string;
+    }>;
+  } {
+    const record = this.db
+      .prepare(
+        "SELECT json_extract(value,'$.currentRunId') AS current_run_id,json_type(value,'$.pendingTurn') IS NOT NULL AS pending,COALESCE(json_extract(value,'$.interruptedTurns'),0) AS interrupted FROM records WHERE kind='research' AND id=?",
+      )
+      .get(sessionId);
+    if (!record)
+      throw new AppError("not_found", "The research session does not exist.");
+    const turns = this.db
+      .prepare(
+        `SELECT CASE WHEN json_valid(json_extract(item.value,'$.input')) THEN COALESCE(json_extract(json_extract(item.value,'$.input'),'$.completedRun.runId'),json_extract(json_extract(item.value,'$.input'),'$.baselineRun.runId'),json_extract(json_extract(item.value,'$.input'),'$.runId')) ELSE NULL END AS run_id,json_extract(item.value,'$.output.usage') AS usage,json_extract(item.value,'$.output.usageScope') AS scope FROM records,json_each(records.value,'$.turns') item WHERE records.kind='research' AND records.id=?`,
+      )
+      .all(sessionId)
+      .map((row) => ({
+        runId: row.run_id as string | null,
+        ...(row.usage
+          ? {
+              usage: JSON.parse(row.usage as string) as {
+                inputTokens?: number;
+                cachedInputTokens?: number;
+                outputTokens?: number;
+                costUsd?: number;
+              },
+            }
+          : {}),
+        ...(row.scope ? { usageScope: String(row.scope) } : {}),
+      }));
+    return {
+      currentRunId: String(record.current_run_id),
+      pending: record.pending === 1,
+      interruptedTurns: Number(record.interrupted),
+      turns,
+    };
+  }
   researchSummary(sessionId: string): ResearchSummary {
     const row = this.db
       .prepare(
@@ -402,6 +563,9 @@ export class Database {
         'conversationId',json_extract(item.value,'$.output.conversationId'),
         'message',substr(json_extract(item.value,'$.output.message'),1,1000),
         'decision',json_extract(item.value,'$.output.decision'),
+        'disposition',json_extract(item.value,'$.output.disposition'),
+        'control',json_extract(item.value,'$.output.control'),
+        'stopCategory',json_extract(item.value,'$.output.stopCategory'),
         'reason',substr(json_extract(item.value,'$.output.reason'),1,1000),
         'usage',json(json_extract(item.value,'$.output.usage')),
         'usageScope',json_extract(item.value,'$.output.usageScope')))) FROM json_each(records.value,'$.turns') item) AS turns

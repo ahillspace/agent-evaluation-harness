@@ -29,7 +29,10 @@ export function researchBudgetReason(
     .filter((turn) => turn.output.usageScope === "conversation")
     .at(-1)?.output.usage;
   const usage = [
-    ...settled.map((attempt) => attempt.output?.usage),
+    ...settled.map(
+      (attempt) =>
+        attempt.output?.usage ?? attempt.failure?.classification?.usage,
+    ),
     ...turnUsage,
     ...(session.turns.some((turn) => turn.output.usageScope === "conversation")
       ? [conversationUsage]

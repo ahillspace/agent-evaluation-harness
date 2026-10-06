@@ -5,7 +5,7 @@ import { record } from "./harness.js";
 
 export async function discoverHarness(
   supervisor: ProcessSupervisor,
-  harness: "codex" | "opencode",
+  harness: "codex" | "claude" | "opencode",
   cwd: string,
 ): Promise<HarnessInfo> {
   await mkdir(cwd, { recursive: true });
@@ -22,6 +22,31 @@ export async function discoverHarness(
       throw new Error("The installed harness did not respond.");
     info.available = true;
     info.version = version.stdout.trim().slice(0, 100);
+    if (harness === "claude") {
+      const match = info.version.match(/(\d+)\.(\d+)\.(\d+)/);
+      if (
+        !match ||
+        Number(match[1]) < 2 ||
+        (Number(match[1]) === 2 &&
+          (Number(match[2]) < 1 ||
+            (Number(match[2]) === 1 && Number(match[3]) < 248)))
+      ) {
+        info.available = false;
+        throw new Error(
+          "Claude Code 2.1.248 or newer is required for isolated evaluation.",
+        );
+      }
+      const auth = await supervisor.run({
+        executable: harness,
+        args: ["auth", "status"],
+        cwd,
+        processLimit: 3,
+        timeoutMs: 15_000,
+      });
+      const status: unknown = JSON.parse(auth.stdout);
+      info.authenticated = record(status) && status.loggedIn === true;
+      return info;
+    }
     if (harness === "opencode") {
       const [models, auth] = await Promise.all([
         supervisor.run({

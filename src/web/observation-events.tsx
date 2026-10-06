@@ -27,10 +27,24 @@ export function EventList({
           </div>
           <div className="event-content">
             <div className="event-header">
-              <span>{event.type.replaceAll("_", " ")}</span>
-              <time>{new Date(event.createdAt).toLocaleTimeString()}</time>
+              <span>{event.type.replaceAll(/[._]/g, " ")}</span>
+              <time dateTime={event.createdAt}>
+                {new Date(event.createdAt).toLocaleTimeString()}
+              </time>
             </div>
-            <div className="event-message">{event.message}</div>
+            {event.message.length > 480 ? (
+              <div>
+                <div className="event-message">
+                  {event.message.slice(0, 240)}...
+                </div>
+                <details className="event-disclosure">
+                  <summary>Read full message</summary>
+                  <div className="event-message">{event.message}</div>
+                </details>
+              </div>
+            ) : (
+              <div className="event-message">{event.message}</div>
+            )}
             {event.data !== undefined && (
               <details>
                 <summary>Event details</summary>

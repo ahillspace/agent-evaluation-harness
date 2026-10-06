@@ -329,3 +329,97 @@ describe("typed analytical answers", () => {
     ).toBe("error");
   });
 });
+
+describe("large complete tables", () => {
+  const expected = (rows: Json[], type = "string", ordered = false): Json => ({
+    type: "table",
+    columns: [{ name: "value", type, nullable: true }],
+    rows,
+    ordered,
+  });
+  it("compares 10000 unordered rows while preserving duplicates and text rules", () => {
+    const rows = Array.from({ length: 10000 }, (_, i) => ({
+      value: `Item ${Math.floor(i / 2)}`,
+    }));
+    const answer = rows
+      .toReversed()
+      .map((row) => ({ value: `  ${row.value.toUpperCase()}  ` }));
+    expect(gradeTypedAnswer(expected(rows), answer, settings)?.status).toBe(
+      "correct",
+    );
+    answer[0] = { value: "Other" };
+    expect(gradeTypedAnswer(expected(rows), answer, settings)?.status).toBe(
+      "incorrect",
+    );
+    expect(
+      gradeTypedAnswer(expected(rows), rows.slice(1), settings)?.status,
+    ).toBe("incorrect");
+    expect(
+      gradeTypedAnswer(expected(rows), rows.toReversed(), {
+        ...settings,
+        caseSensitive: true,
+      })?.status,
+    ).toBe("correct");
+    expect(
+      gradeTypedAnswer(
+        expected(rows),
+        rows.toReversed().map((row) => ({ value: row.value.toUpperCase() })),
+        { ...settings, caseSensitive: true },
+      )?.status,
+    ).toBe("incorrect");
+  });
+  it("supports large reordered numeric tables without relaxing tolerance assignment", () => {
+    const rows = Array.from({ length: 10000 }, (_, i) => ({ value: i }));
+    expect(
+      gradeTypedAnswer(
+        expected(rows, "integer"),
+        rows.toReversed().map((row) => ({ value: String(row.value) })),
+        settings,
+      )?.status,
+    ).toBe("correct");
+    expect(
+      gradeTypedAnswer(
+        expected([{ value: 0 }, { value: 0.15 }], "decimal"),
+        [{ value: 0.1 }, { value: 0 }],
+        { ...settings, absoluteTolerance: 0.1 },
+      )?.status,
+    ).toBe("correct");
+  });
+  it("keeps ordered rows strict and rejects references above the shared limit", () => {
+    const rows = Array.from({ length: 10000 }, (_, i) => ({
+      value: String(i),
+    }));
+    expect(
+      gradeTypedAnswer(expected(rows, "string", true), rows, settings)?.status,
+    ).toBe("correct");
+    expect(
+      gradeTypedAnswer(
+        expected(rows, "string", true),
+        rows.toReversed(),
+        settings,
+      )?.status,
+    ).toBe("incorrect");
+    expect(
+      gradeTypedAnswer(expected([...rows, { value: "extra" }]), rows, settings)
+        ?.status,
+    ).toBe("error");
+  });
+});
+
+it("does not fast-pass unsafe integers through a submitted decimal column", () => {
+  const expected = {
+    type: "table",
+    columns: [{ name: "value", type: "integer" }],
+    rows: [{ value: "9007199254740992" }],
+    ordered: false,
+  };
+  const answer = {
+    type: "table",
+    columns: [{ name: "value", type: "decimal" }],
+    rows: [{ value: 9007199254740992 }],
+    ordered: false,
+  };
+  expect(gradeTypedAnswer(expected, answer, settings)?.status).toBe(
+    "incorrect",
+  );
+});

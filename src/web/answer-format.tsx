@@ -15,7 +15,7 @@ export function AnswerFormatSummary({ format }: { format?: AnswerFormat }) {
           </p>
           {format.type === "table" ? (
             <>
-              <table>
+              <table className="answer-format-table">
                 <thead>
                   <tr>
                     <th>Column</th>

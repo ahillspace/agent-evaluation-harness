@@ -1,8 +1,8 @@
 # Independent judges
 
 Deterministic grading remains the default assessment.
-Optional LLM and Jev judges record independent assessments of the same saved answer.
-Human reviews remain separate from both.
+Each Run supports named deterministic, LLM, Jev, and human assessment passes over its saved answers.
+Human review derives a new pass and preserves every untouched judgment.
 Enabling a judge does not replace the deterministic score or change the reference answer.
 
 ## Configure Jev
@@ -53,21 +53,48 @@ Provider errors, capacity errors, and uncertain judgments remain distinct from i
 
 ## Judge saved answers
 
-Select saved evidence and a judging configuration, then preview the assessment.
-Preview calls the judge and saves its result with its exact request and configuration.
-Publishing accepts that saved preview without another provider call.
-New assessments preserve all earlier results and never rerun the target agent.
-Reopening saved-answer judging restores completed unpublished previews for review and publication.
-For multiple selections, the interface requests one assessment at a time and reports progress.
-Closing the browser stops further selections from being submitted; assessments already recorded remain saved.
+Open a saved Run and add a named assessment using answer rules, an LLM judge, or Jev.
+Select the evaluator or judging configuration and save the assessment.
+The engine freezes its configuration and references, assesses the sealed answers, and saves the pass automatically.
+New passes preserve earlier judgments and never rerun the target agent.
+The saved score selector reopens any pass and remembers your selection for that Run.
 
-Each assessment records the source attempt, evidence hash, profile, model, provider response, and reported usage.
-These records make disagreements and changes in judging criteria inspectable.
-When cost is calculated from reported token usage and a published price, the assessment also preserves that pricing basis.
+Closing a dialog or browser does not cancel work already admitted by the engine.
+The engine records progress and saves each judgment before continuing.
+If the engine stops, restart marks the unfinished pass interrupted without silently repeating provider calls.
+Retry creates a new pass, carries completed judgments forward, and retries only failed or unfinished judgments with saved answers.
+Failed target executions need an execution retry, and a completed judge abstention remains an abstention.
+
+Human review starts from any saved pass and saves a named derived pass.
+Untouched judgments carry forward, and edits retain the reviewer, note, previous judgment, and review time.
+Questions without a sealed answer accept notes or explicit exclusions but cannot receive a correctness verdict.
+
+Accuracy is correct answers divided by completed judgments with a correctness verdict.
+Pending questions, execution failures, and judge errors do not count as incorrect judgments.
+The interface shows answered, judged, unjudged, failed, and excluded coverage separately.
+Research selection separately uses correct answers divided by fixed eligible slots and requires coverage that matches or exceeds the baseline.
+This research objective prevents failed answers and judge errors from improving candidate selection by shrinking its denominator.
+Comparisons use the selected passes and disclose differences in their effective evaluation bases.
+
+A deliberate pass read or export contains frozen references and available request, response, error, usage, and evidence-hash records.
+Jev records include the provider request and response; LLM records include the semantic request passed to its runtime and the returned verdict.
+Earlier records can lack request data that was not recorded at execution time.
+Large evidence payloads stay out of observation and Results summaries.
+
+## Read progress and usage
+
+Runs open on **Questions**, with **Summary**, optional **Research**, and **Configuration** available beside it.
+The shared score strip shows all saved scores and their judgment coverage.
+Usage keeps target, researcher, and judge totals separate.
+Reported subtotals remain visible while other calls are pending or have unreported usage.
+**Input** shows uncached tokens, **Output** shows generated tokens, and **Cache** shows reused input tokens.
+Stored inclusive input remains available in evidence and budget accounting.
+Older target evidence can recover its cache breakdown from matching provider usage records.
+When the breakdown is unavailable, uncached input remains unreported.
 
 ## Architecture
 
-The application layer builds evidence, freezes profiles, applies result policy, and owns assessment publication.
+The application layer builds evidence, freezes profiles, applies result policy, and owns named assessment creation and derivation.
 The runtime classifier port resolves credentials and performs the bounded HTTP request.
 The TypeSafe adapter translates the shared judging input into the provider's request format and validates its response.
 The browser and CLI use the same application operations.
@@ -77,7 +104,7 @@ The target harness has no access to the judge's reference answer or credentials.
 
 Use recorded fixtures to check rounding, tied rankings, incorrect reference answers, missing evidence, contradictory tool results, and instructions embedded in traces.
 Exercise malformed responses, authentication errors, rate limits, oversized traces, timeout, and cancellation.
-Verify that publication makes no second call and that rejudging makes no target call.
+Verify that reopening and exporting saved passes makes no provider call and that reassessment makes no target call.
 Include judge usage in research spending checks.
 Never use Astra models for test or validation runs.
 

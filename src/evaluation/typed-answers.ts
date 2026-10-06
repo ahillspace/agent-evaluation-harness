@@ -1,3 +1,4 @@
+import { MAX_ANSWER_ITEMS } from "../contracts/answer-limits.js";
 import type {
   AnswerFormat,
   EvaluatorSettings,
@@ -16,6 +17,7 @@ import { rowsMatch } from "./row-matching.js";
 import { columnAliasMap, renameSubmittedColumns } from "./column-aliases.js";
 import { validateEvaluationFormat } from "./submission-format.js";
 import { referenceAnswerValue } from "../contracts/answer-format.js";
+import { scalarRepresentation } from "./answer-policy.js";
 
 type ObjectValue = { [key: string]: Json };
 type Settings = EvaluatorSettings;
@@ -82,10 +84,10 @@ function readTable(value: ObjectValue): Table {
     !value.columns.length ||
     value.columns.length > 100 ||
     !Array.isArray(value.rows) ||
-    value.rows.length > 1000
+    value.rows.length > MAX_ANSWER_ITEMS
   ) {
     throw new Error(
-      "A typed table requires 1-100 columns and at most 1,000 rows.",
+      "A typed table requires 1-100 columns and at most 10,000 rows.",
     );
   }
   const names = new Set<string>();
@@ -170,6 +172,71 @@ function cellMatches(
   return expected === actual;
 }
 
+/** Whole-group equality is sufficient even when numeric tolerances overlap.
+ * Never consume a partial exact assignment before the tolerance matcher. */
+function exactRowKey(
+  row: ObjectValue,
+  columns: Column[],
+  settings: Settings,
+): string | undefined {
+  const values: Json[] = [];
+  for (const column of columns) {
+    const value = row[column.name]!;
+    const policy = { ...settings, ...settings.columnRules?.[column.name] };
+    if (value === null) {
+      values.push(null);
+      continue;
+    }
+    if (
+      policy.dateComparison &&
+      ["string", "date", "datetime"].includes(column.type)
+    ) {
+      const temporal = temporalValue(value, policy.dateComparison);
+      if (temporal === undefined) return undefined;
+      values.push(temporal);
+    } else if (column.type === "string")
+      values.push(normalized(value as string, policy));
+    else if (column.type === "integer" || column.type === "decimal") {
+      if (column.type === "integer" && !isIntegerDecimal(value))
+        return undefined;
+      const decimal = parseDecimal(value);
+      if (!decimal) return undefined;
+      let { coefficient, scale } = decimal;
+      while (scale > 0 && coefficient % 10n === 0n) {
+        coefficient /= 10n;
+        scale--;
+      }
+      values.push(`${coefficient}:${scale}`);
+    } else if (column.type === "date" || column.type === "datetime") {
+      const temporal = dateValue(value, column.type === "date");
+      if (temporal === undefined) return undefined;
+      values.push(temporal);
+    } else values.push(value);
+  }
+  return JSON.stringify(values);
+}
+function exactRowsMatch(
+  left: ObjectValue[],
+  right: ObjectValue[],
+  columns: Column[],
+  settings: Settings,
+): boolean | undefined {
+  const counts = new Map<string, number>();
+  for (const row of left) {
+    const key = exactRowKey(row, columns, settings);
+    if (key === undefined) return undefined;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  for (const row of right) {
+    const key = exactRowKey(row, columns, settings);
+    if (key === undefined) return undefined;
+    const remaining = counts.get(key) ?? 0;
+    if (!remaining) return false;
+    counts.set(key, remaining - 1);
+  }
+  return [...counts.values()].every((value) => value === 0);
+}
+
 function compareTables(
   expected: ObjectValue,
   answer: ObjectValue,
@@ -215,6 +282,21 @@ function compareTables(
       { reason: "invalid_submission", path: "" },
     );
   }
+  if (settings.duplicateRows === "distinct") {
+    const distinct = (rows: ObjectValue[], columns: Column[]) => {
+      const seen = new Set<string>();
+      return rows.filter((row) => {
+        const key = exactRowKey(row, columns, settings);
+        if (key === undefined)
+          throw new Error("Cannot establish the declared distinct row grain.");
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    };
+    gold.rows = distinct(gold.rows, gold.columns);
+    actual.rows = distinct(actual.rows, actual.columns);
+  }
   if (!settings.topK && gold.rows.length !== actual.rows.length)
     return verdict(
       false,
@@ -259,7 +341,7 @@ function compareTables(
       "The submitted columns differ from the expected names, types, or order.",
       { reason: "column_schema", path: "" },
     );
-  let remainingChecks = 250_000;
+  let remainingChecks = gold.rows.length * gold.columns.length + 250_000;
   const matchRow = (left: ObjectValue, right: ObjectValue) =>
     gold.columns.every((column, index) => {
       if (--remainingChecks < 0)
@@ -273,11 +355,43 @@ function compareTables(
         settings,
       );
     });
+  const matchGroup = (left: ObjectValue[], right: ObjectValue[]): boolean => {
+    const exact = exactRowsMatch(left, right, gold.columns, settings);
+    if (exact === true) return true;
+    // Nonnumeric cells have equivalence-based comparison. A mismatched multiset is definitive.
+    if (
+      exact === false &&
+      gold.columns.every(
+        (column) => !["decimal", "integer"].includes(column.type),
+      )
+    )
+      return false;
+    return rowsMatch(left.length, (a, b) => matchRow(left[a]!, right[b]!));
+  };
   const ordered =
     settings.tableOrder === "ordered" ||
     (settings.tableOrder !== "unordered" && expected.ordered === true);
   const keys = settings.orderBy ?? expected.order_by;
   if (settings.topK) return compareTopK(gold, actual, settings, matchRow);
+  if (settings.sortOrder?.length) {
+    if (!matchGroup(gold.rows, actual.rows))
+      return verdict(
+        false,
+        "The submitted rows differ from the reference collection.",
+        { reason: "row_membership", path: "" },
+      );
+    const rank = rowComparator(gold, settings, settings.sortOrder);
+    const mismatch = actual.rows.findIndex(
+      (row, index) => index > 0 && rank(actual.rows[index - 1]!, row) > 0,
+    );
+    return verdict(
+      mismatch < 0,
+      mismatch < 0
+        ? "All rows match and follow the declared ordering and collation."
+        : "The rows match, but their order violates the declared ordering and collation.",
+      { reason: "sort_order", path: `/${mismatch}`, row: mismatch },
+    );
+  }
   if (
     keys !== undefined &&
     (!Array.isArray(keys) ||
@@ -292,9 +406,7 @@ function compareTables(
     throw new Error("Ordering keys must name unique declared columns.");
   if (!ordered)
     return verdict(
-      rowsMatch(gold.rows.length, (left, right) =>
-        matchRow(gold.rows[left]!, actual.rows[right]!),
-      ),
+      matchGroup(gold.rows, actual.rows),
       "Compared the full table as an unordered collection, preserving duplicate rows.",
       {
         reason: "row_membership",
@@ -337,11 +449,7 @@ function compareTables(
       )
     )
       end++;
-    if (
-      !rowsMatch(end - start, (left, right) =>
-        matchRow(gold.rows[start + left]!, actual.rows[start + right]!),
-      )
-    )
+    if (!matchGroup(gold.rows.slice(start, end), actual.rows.slice(start, end)))
       return verdict(
         false,
         "Values or ranking differ outside the allowed tied groups.",
@@ -360,8 +468,22 @@ function compareTables(
   );
 }
 
-function normalizeSubmittedAnswer(expected: ObjectValue, answer: Json): Json {
-  if (expected.type === "table" && typeof answer === "string") {
+function normalizeSubmittedAnswer(
+  expected: ObjectValue,
+  answer: Json,
+  settings: Settings,
+): Json {
+  if (
+    settings.representationPolicy !== "strict" &&
+    ["numeric", "string"].includes(String(expected.type)) &&
+    answer !== expected.value
+  )
+    answer = scalarRepresentation(answer);
+  if (
+    settings.representationPolicy !== "strict" &&
+    expected.type === "table" &&
+    typeof answer === "string"
+  ) {
     try {
       const parsed = JSON.parse(answer) as Json;
       if (
@@ -421,35 +543,7 @@ function compareTopK(
   matches: (left: ObjectValue, right: ObjectValue) => boolean,
 ): Verdict {
   const policy = settings.topK!;
-  const rank = (left: ObjectValue, right: ObjectValue): number => {
-    for (const key of policy.orderBy) {
-      const column = gold.columns.find((item) => item.name === key.column)!;
-      const a = left[key.column]!,
-        b = right[key.column]!;
-      if (a === null || b === null)
-        throw new Error("Top-k ordering keys cannot contain null values.");
-      let order: number;
-      if (["integer", "decimal"].includes(column.type))
-        order = compareDecimals(a, b);
-      else {
-        const temporalMode =
-          settings.columnRules?.[column.name]?.dateComparison ??
-          (column.type === "date" || column.type === "datetime"
-            ? column.type
-            : undefined);
-        const temporalRank = (value: Json) =>
-          temporalValue(value, temporalMode!)!.replace(
-            /\.(\d+)Z$/,
-            (_match, fraction: string) => `.${fraction.padEnd(9, "0")}Z`,
-          );
-        const x = temporalMode ? temporalRank(a) : String(a);
-        const y = temporalMode ? temporalRank(b) : String(b);
-        order = x < y ? -1 : x > y ? 1 : 0;
-      }
-      if (order) return key.direction === "asc" ? order : -order;
-    }
-    return 0;
-  };
+  const rank = rowComparator(gold, settings, policy.orderBy);
   const pool = [...gold.rows].sort(rank);
   const count = Math.min(policy.count, pool.length);
   if (actual.rows.length !== count)
@@ -485,10 +579,79 @@ function compareTopK(
   );
 }
 
+function rowComparator(
+  gold: Table,
+  settings: Settings,
+  keys: Array<{ column: string; direction: "asc" | "desc" }>,
+) {
+  const collator = settings.collation
+    ? new Intl.Collator(settings.collation.locale, settings.collation)
+    : undefined;
+  return (left: ObjectValue, right: ObjectValue): number => {
+    for (const key of keys) {
+      const column = gold.columns.find((item) => item.name === key.column)!;
+      const a = left[key.column]!,
+        b = right[key.column]!;
+      if (a === null || b === null) {
+        const order = a === b ? 0 : a === null ? -1 : 1;
+        if (order) return key.direction === "asc" ? order : -order;
+        continue;
+      }
+      let order: number;
+      if (["integer", "decimal"].includes(column.type))
+        order = compareDecimals(a, b);
+      else {
+        const temporalMode =
+          settings.columnRules?.[column.name]?.dateComparison ??
+          (column.type === "date" || column.type === "datetime"
+            ? column.type
+            : undefined);
+        const temporalRank = (value: Json) =>
+          temporalValue(value, temporalMode!)!.replace(
+            /\.(\d+)Z$/,
+            (_match, fraction: string) => `.${fraction.padEnd(9, "0")}Z`,
+          );
+        const x = temporalMode ? temporalRank(a) : String(a);
+        const y = temporalMode ? temporalRank(b) : String(b);
+        order =
+          !temporalMode && collator
+            ? collator.compare(x, y)
+            : x < y
+              ? -1
+              : x > y
+                ? 1
+                : 0;
+      }
+      if (order) return key.direction === "asc" ? order : -order;
+    }
+    return 0;
+  };
+}
+
 /** Validate private reference structure and policy before publication or comparison. */
 export function validateReference(expected: Json, settings: Settings): void {
   const typed = record(expected) ? expected : undefined;
   const table = typed?.type === "table" ? readTable(typed) : undefined;
+  if (settings.collation)
+    new Intl.Collator(settings.collation.locale, settings.collation);
+  if (settings.sortOrder) {
+    if (
+      !table ||
+      !settings.sortOrder.length ||
+      new Set(settings.sortOrder.map((key) => key.column)).size !==
+        settings.sortOrder.length ||
+      settings.sortOrder.some(
+        (key) => !table.columns.some((column) => column.name === key.column),
+      )
+    )
+      throw new Error(
+        "Explicit ordering requires unique declared table columns.",
+      );
+    if (settings.tableOrder === "unordered" || settings.topK)
+      throw new Error(
+        "Explicit ordering cannot combine with unordered tables or top-k ordering.",
+      );
+  }
   if (table && settings.unwrapSingleton)
     throw new Error(
       "Singleton unwrapping cannot apply to a typed table; its outer array represents rows.",
@@ -681,7 +844,11 @@ export function gradeTypedAnswer(
       throw new Error("The expected numeric value is invalid.");
     if (expected.type === "string" && typeof expected.value !== "string")
       throw new Error("The expected string value is invalid.");
-    answer = normalizeSubmittedAnswer(expected, answer);
+    if (settings.representationPolicy === "strict" && format) {
+      const invalid = validateEvaluationFormat(format, answer, settings);
+      if (invalid) return invalid;
+    }
+    answer = normalizeSubmittedAnswer(expected, answer, settings);
     if (!record(answer) || answer.type !== expected.type)
       return verdict(
         false,

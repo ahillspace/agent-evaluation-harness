@@ -22,8 +22,8 @@ Each candidate uses the ordinary Run contract.
 - Record deterministic grading independently of optional model judging and human review.
 - Support independent LLM and Jev judges, including editable bank-level Jev profiles and complete recorded attempt evidence.
 - Preserve judge requests, responses, configuration, and model provenance when judging saved evidence.
-- Publish a saved judging preview without another provider or target invocation.
-- Preserve original evidence and score sets when rescoring.
+- Save named assessment passes automatically and reopen their evidence without another provider or target invocation.
+- Preserve original evidence and assessment passes when reevaluating saved answers.
 - Preview evaluator drafts before publishing; activation and reversion never rewrite existing runs.
 - Support graceful Pause, immediate Halt, resumable interruption, and terminal Cancel.
 - Persist live observation and cursor-based event history before publishing updates.

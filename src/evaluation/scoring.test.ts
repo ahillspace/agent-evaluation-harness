@@ -7,7 +7,7 @@ describe("deterministic scoring", () => {
     const values = Array.from({ length: 501 }, (_, index) => index);
     const result = await grade(
       values,
-      values,
+      values.map((value) => value + 0.0000001),
       evaluatorSettingsSchema.parse({ mode: "json", arrayOrderMatters: false }),
     );
     expect(result.status).toBe("error");
@@ -45,4 +45,15 @@ describe("deterministic scoring", () => {
     const loop = await grade(1, 1, { ...settings, code: "while (true) {}" });
     expect(loop.status).toBe("error");
   });
+});
+
+it("supports large unordered JSON lists through complete exact matching", async () => {
+  const expected = Array.from({ length: 10000 }, (_, id) => ({
+    id,
+    label: String(id),
+  }));
+  const settings = evaluatorSettingsSchema.parse({ arrayOrderMatters: false });
+  expect((await grade(expected, expected.toReversed(), settings)).status).toBe(
+    "correct",
+  );
 });

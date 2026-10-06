@@ -4,8 +4,20 @@ import { useResource } from "./api.js";
 import { BankEditor } from "./bank-editor.js";
 import { AnswerFormatSummary } from "./answer-format.js";
 import { BankEvaluator } from "./bank-evaluator.js";
+import { BankFindings } from "./bank-findings.js";
+import { AnswerSize } from "./answer-size.js";
 import { JevProfileEditor } from "./jev-profile.js";
-import { DownloadButton, Empty, Icon, PageHeading, date, json } from "./ui.js";
+import {
+  DownloadButton,
+  Empty,
+  ErrorNotice,
+  Icon,
+  PageHeading,
+  SectionIntro,
+  Tabs,
+  date,
+  json,
+} from "./ui.js";
 
 export function Banks({
   workspace,
@@ -35,15 +47,22 @@ export function Banks({
   return (
     <>
       <PageHeading
-        eyebrow="Evaluation library"
         title="Question banks"
-        description="Define the questions and evidence that make a useful answer."
+        description="Questions, expected answers, and grading rules."
       >
-        <button className="button primary" onClick={() => setEditing("new")}>
-          <Icon name="plus" size={16} />
-          Create bank
-        </button>
+        {bank && (
+          <button className="button primary" onClick={() => setEditing("new")}>
+            <Icon name="plus" size={16} />
+            Create bank
+          </button>
+        )}
       </PageHeading>
+      <SectionIntro
+        title="Question banks"
+        description="Create the questions your agent should answer and define how answers are checked."
+        details="The agent receives each question, its public format, and applicable comparison requirements. Expected answers stay private. Published revisions keep earlier runs reproducible."
+      />
+      <ErrorNotice error={detail.error} />
       {!bank ? (
         <Empty
           title="Start with the questions that matter"
@@ -69,12 +88,16 @@ export function Banks({
               <button
                 key={item.id}
                 className={`collection-item ${item.id === bank.id ? "selected" : ""}`}
+                aria-pressed={item.id === bank.id}
                 onClick={() => setSelected(item.id)}
               >
                 <Icon name="bank" />
                 <span>
                   <strong>{item.name}</strong>
-                  <small>{item.questionCount} questions</small>
+                  <small>
+                    {item.questionCount}{" "}
+                    {item.questionCount === 1 ? "question" : "questions"}
+                  </small>
                 </span>
               </button>
             ))}
@@ -99,114 +122,140 @@ export function Banks({
                 )}
                 <button
                   className="button secondary"
+                  disabled={!revision}
                   onClick={() => revision && setEditing(revision)}
                 >
                   Edit questions
                 </button>
               </div>
             </div>
-            <div className="tabs" role="tablist" aria-label="Bank sections">
-              {["questions", "evaluator", "Jev criteria", "history"].map(
-                (value) => (
-                  <button
-                    role="tab"
-                    aria-selected={tab === value}
-                    key={value}
-                    onClick={() => setTab(value)}
-                  >
-                    {value[0]?.toUpperCase()}
-                    {value.slice(1)}
-                  </button>
-                ),
-              )}
-            </div>
-            {tab === "questions" && (
-              <div className="question-table">
-                <div className="table-caption">
-                  Expected values stay private to the evaluator. The target
-                  receives the question, public context, and recorded answer
-                  format.
-                </div>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Question</th>
-                      <th>Expected answer</th>
-                      <th>Tags</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {revision?.questions.map((question) => (
-                      <tr key={question.id}>
-                        <td>
-                          <span className="mono subtle">{question.id}</span>
-                          <p>{question.text}</p>
-                          <AnswerFormatSummary format={question.answerFormat} />
-                        </td>
-                        <td>
-                          <code>
-                            {typeof question.expected === "string"
-                              ? question.expected
-                              : json(question.expected)}
-                          </code>
-                        </td>
-                        <td>
-                          {question.tags.map((tag) => (
-                            <span className="tag" key={tag}>
-                              {tag}
-                            </span>
-                          ))}
-                        </td>
+            <Tabs
+              label="Bank sections"
+              value={tab}
+              onChange={setTab}
+              items={[
+                "questions",
+                "findings",
+                "evaluator",
+                "Jev criteria",
+                "history",
+              ].map((value) => ({
+                value,
+                label: value[0]?.toUpperCase() + value.slice(1),
+              }))}
+            >
+              {tab === "questions" && (
+                <div className="question-table">
+                  <div className="table-caption">
+                    Expected values stay private to the evaluator. The target
+                    receives the question, public context, and recorded answer
+                    format.
+                  </div>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Question</th>
+                        <th>Expected answer</th>
+                        <th>Tags</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-            {tab === "evaluator" && detail.data?.bank.id === bank.id && (
-              <BankEvaluator
-                key={bank.id}
-                workspace={{
-                  ...workspace,
-                  evaluatorRevisions: detail.data?.evaluatorRevisions ?? [],
-                  evaluatorDrafts: detail.data?.evaluatorDrafts ?? [],
-                  revisions: detail.data.revisions,
-                }}
-                bankId={bank.id}
-                refresh={refreshBank}
-              />
-            )}
-            {tab === "Jev criteria" && detail.data?.bank.id === bank.id && (
-              <JevProfileEditor
-                key={bank.id}
-                bankId={bank.id}
-                profiles={detail.data.jevProfiles}
-                activeId={detail.data.bank.activeJevProfileRevisionId}
-                onSaved={refreshBank}
-              />
-            )}
-            {tab === "history" && (
-              <div className="panel-body">
-                <h3>Published question revisions</h3>
-                {(detail.data?.revisions ?? [])
-                  .filter((item) => item.bankId === bank.id)
-                  .map((item) => (
-                    <div className="history-row" key={item.id}>
-                      <div>
-                        <strong>Revision {item.number}</strong>
-                        <p>
-                          {item.questions.length} questions ·{" "}
-                          {date(item.createdAt)}
-                        </p>
+                    </thead>
+                    <tbody>
+                      {revision?.questions.map((question) => (
+                        <tr key={question.id}>
+                          <td>
+                            <span className="mono subtle">{question.id}</span>
+                            <p>{question.text}</p>
+                            <AnswerFormatSummary
+                              format={question.answerFormat}
+                            />
+                          </td>
+                          <td>
+                            <details className="answer-preview">
+                              <summary
+                                aria-label={`Expected answer for ${question.id}`}
+                              >
+                                {Array.isArray(question.expected)
+                                  ? `${question.expected.length} items`
+                                  : question.expected !== null &&
+                                      typeof question.expected === "object"
+                                    ? "Structured answer"
+                                    : String(question.expected).slice(0, 80) ||
+                                      "Empty answer"}
+                              </summary>
+                              <pre>
+                                {typeof question.expected === "string"
+                                  ? question.expected
+                                  : json(question.expected)}
+                              </pre>
+                            </details>
+                            <AnswerSize answer={question.expected} />
+                          </td>
+                          <td>
+                            {question.tags.map((tag) => (
+                              <span className="tag" key={tag}>
+                                {tag}
+                              </span>
+                            ))}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {tab === "evaluator" && detail.data?.bank.id === bank.id && (
+                <BankEvaluator
+                  key={bank.id}
+                  workspace={{
+                    ...workspace,
+                    evaluatorRevisions: detail.data?.evaluatorRevisions ?? [],
+                    evaluatorDrafts: detail.data?.evaluatorDrafts ?? [],
+                    revisions: detail.data.revisions,
+                  }}
+                  bankId={bank.id}
+                  refresh={refreshBank}
+                />
+              )}
+              {tab === "findings" && (
+                <BankFindings
+                  key={bank.id}
+                  bankId={bank.id}
+                  revision={revision}
+                  onSaved={refreshBank}
+                />
+              )}
+              {tab === "Jev criteria" && detail.data?.bank.id === bank.id && (
+                <JevProfileEditor
+                  key={bank.id}
+                  bankId={bank.id}
+                  profiles={detail.data.jevProfiles}
+                  activeId={detail.data.bank.activeJevProfileRevisionId}
+                  onSaved={refreshBank}
+                />
+              )}
+              {tab === "history" && (
+                <div className="panel-body">
+                  <h3>Published question revisions</h3>
+                  {(detail.data?.revisions ?? [])
+                    .filter((item) => item.bankId === bank.id)
+                    .map((item) => (
+                      <div className="history-row" key={item.id}>
+                        <div>
+                          <strong>Revision {item.number}</strong>
+                          <p>
+                            {item.questions.length} questions ·{" "}
+                            {date(item.createdAt)}
+                          </p>
+                        </div>
+                        <DownloadButton
+                          filename={`${item.name}-r${item.number}.json`}
+                          value={item}
+                        />
                       </div>
-                      <DownloadButton
-                        filename={`${item.name}-r${item.number}.json`}
-                        value={item}
-                      />
-                    </div>
-                  ))}
-              </div>
-            )}
+                    ))}
+                </div>
+              )}
+            </Tabs>
           </section>
         </div>
       )}

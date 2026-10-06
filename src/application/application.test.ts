@@ -791,6 +791,7 @@ describe("shared application", () => {
     const compared = await app.execute("runs.compare", {
       runIds: [run.run.id, other.run.id],
     });
+    expect(compared.rows[0]?.assessmentPass?.judgedAccuracy).toBe(1);
     expect(compared.rows[0]).toMatchObject({
       completed: 1,
       failed: 1,
@@ -1095,4 +1096,201 @@ describe("shared application", () => {
     expect(view.session.conversationId).toBe("first");
     expect(view.session.error).toContain("conversation ID");
   });
+});
+
+it("retains safe transient attempts and does not retry a wrong answer", async () => {
+  let calls = 0;
+  const { app, bank } = await setup(
+    runtime(async () => {
+      calls++;
+      if (calls === 1)
+        throw Object.assign(new Error("Provider busy"), {
+          code: "target_failure",
+          executionFailure: {
+            category: "rate-limit",
+            transient: true,
+            retrySafety: "not-started",
+            usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+          },
+        });
+      return { answer: 41, text: "41" };
+    }),
+  );
+  const run = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+  });
+  await app.waitForIdle();
+  const view = await app.execute("runs.get", { runId: run.run.id });
+  expect(calls).toBe(2);
+  expect(view.attempts.map((a) => a.status)).toEqual(["failed", "completed"]);
+  expect(view.scoreSets[0]?.assessments[0]?.deterministic.status).toBe(
+    "incorrect",
+  );
+});
+it("creates an acknowledged linked retry of failed slots without changing the original", async () => {
+  let fail = true;
+  const { app, bank } = await setup(
+    runtime(async () => {
+      if (fail)
+        throw Object.assign(new Error("Unknown failure"), {
+          code: "target_failure",
+        });
+      return { answer: 42, text: "42" };
+    }),
+  );
+  const original = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+  });
+  await app.waitForIdle();
+  await expect(
+    app.execute("runs.retry-failed", {
+      runId: original.run.id,
+      idempotencyKey: "retry",
+    }),
+  ).rejects.toThrow(/duplicate/i);
+  fail = false;
+  const retry = await app.execute("runs.retry-failed", {
+    runId: original.run.id,
+    idempotencyKey: "retry",
+    acknowledgeDuplicateWork: true,
+  });
+  await app.waitForIdle();
+  expect(retry.run.manifest).toEqual(original.run.manifest);
+  expect(retry.run.retryOf?.runId).toBe(original.run.id);
+  expect(
+    (await app.execute("runs.get", { runId: original.run.id })).attempts,
+  ).toHaveLength(1);
+  expect(
+    (await app.execute("runs.get", { runId: retry.run.id })).results[0]?.status,
+  ).toBe("completed");
+});
+
+it("caps transient retries at three physical attempts", async () => {
+  let calls = 0;
+  const { app, bank } = await setup(
+    runtime(async () => {
+      calls++;
+      throw Object.assign(new Error("Busy"), {
+        code: "target_failure",
+        executionFailure: {
+          category: "provider-capacity",
+          transient: true,
+          retrySafety: "not-started",
+        },
+      });
+    }),
+  );
+  const run = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+  });
+  await app.waitForIdle();
+  expect(calls).toBe(3);
+  expect(
+    (await app.execute("runs.get", { runId: run.run.id })).results[0]?.status,
+  ).toBe("failed");
+});
+it("does not retry after observed tool activity even if a runtime claims safety", async () => {
+  let calls = 0;
+  const { app, bank } = await setup(
+    runtime(async (input) => {
+      calls++;
+      input.onEvent({ type: "tool.started", message: "Tool admitted" });
+      throw Object.assign(new Error("Busy"), {
+        code: "target_failure",
+        executionFailure: {
+          category: "rate-limit",
+          transient: true,
+          retrySafety: "not-started",
+        },
+      });
+    }),
+  );
+  const run = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+  });
+  await app.waitForIdle();
+  expect(calls).toBe(1);
+  expect(
+    (await app.execute("runs.get", { runId: run.run.id })).attempts[0]?.failure
+      ?.classification?.retrySafety,
+  ).toBe("unsafe");
+});
+it("cancels retry waiting without another invocation", async () => {
+  let calls = 0;
+  const { app, bank } = await setup(
+    runtime(async () => {
+      calls++;
+      throw Object.assign(new Error("Busy"), {
+        code: "target_failure",
+        executionFailure: {
+          category: "rate-limit",
+          transient: true,
+          retrySafety: "not-started",
+          retryAfterMs: 30000,
+        },
+      });
+    }),
+  );
+  const run = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+  });
+  for (let i = 0; i < 100; i++) {
+    const view = await app.execute("runs.get", { runId: run.run.id });
+    if (view.events.some((event) => event.type === "question.retry.waiting"))
+      break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  await app.execute("runs.control", { runId: run.run.id, action: "cancel" });
+  await app.waitForIdle();
+  expect(calls).toBe(1);
+  expect(
+    (await app.execute("runs.get", { runId: run.run.id })).run.status,
+  ).toBe("cancelled");
+});
+
+it("applies reduced shared admission to concurrent automatic retries", async () => {
+  let calls = 0,
+    active = 0,
+    peak = 0;
+  let release!: () => void;
+  const firstPair = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const { app, bank } = await setup(
+    runtime(async () => {
+      const number = ++calls;
+      if (number <= 2) {
+        if (number === 2) release();
+        await firstPair;
+        throw Object.assign(new Error("Busy"), {
+          code: "target_failure",
+          executionFailure: {
+            category: "rate-limit",
+            transient: true,
+            retrySafety: "not-started",
+            retryAfterMs: 1000,
+          },
+        });
+      }
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      active--;
+      return { answer: 42, text: "42" };
+    }),
+  );
+  await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+    repetitions: 2,
+    limits: { concurrency: 2 },
+  });
+  await app.waitForIdle();
+  expect(calls).toBe(4);
+  expect(peak).toBe(1);
 });

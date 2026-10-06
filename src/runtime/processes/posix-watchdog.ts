@@ -39,9 +39,9 @@ async function finish(code: number) {
         );
       }
       if (lease) await persist({ ...lease, state: "cleaned" });
-    } catch {
+    } catch (error) {
       process.stderr.write(
-        "Containment: Managed process cleanup could not be verified.\n",
+        `Containment: Managed process cleanup could not be verified: ${error instanceof Error ? error.message : "Unknown cleanup error"}.\n`,
       );
       code = 125;
     }

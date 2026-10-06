@@ -36,12 +36,12 @@ export async function runCli(args: string[]): Promise<unknown> {
     if (arg === "--help" || arg === "-h")
       return {
         usage:
-          "aeh <operation> [--json <JSON> | --file <path> | --stdin] [--url <local endpoint>]",
-        discovery: "aeh discover",
+          "node dist/cli.js <operation> [--json <JSON> | --file <path> | --stdin] [--url <local endpoint>]",
+        discovery: "node dist/cli.js discover",
         examples: [
-          "aeh workspace.get",
-          "aeh runs.launch --file launch.json",
-          'aeh runs.control --json "{"runId":"run_...","action":"pause"}"',
+          "node dist/cli.js workspace.get",
+          "node dist/cli.js runs.launch --file launch.json",
+          "node dist/cli.js runs.control --file control.json",
         ],
       };
     if (arg.startsWith("-")) throw new Error(`Unknown option: ${arg}`);

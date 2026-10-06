@@ -6,8 +6,8 @@ import { command, navigate, useResource } from "./api.js";
 import {
   createLaunch,
   objectJson,
+  roleSettings,
   initialSetup,
-  restoreSetup,
   type SetupDraft,
 } from "./drafts.js";
 import { parseToolCatalog, type ToolChoice } from "./tools.js";
@@ -18,6 +18,14 @@ import { RunQuestions } from "./run-questions.js";
 import { RunTools } from "./run-tools.js";
 import { ResearchSettings } from "./research-settings.js";
 import { Empty, ErrorNotice, Field, Help, Icon, PageHeading } from "./ui.js";
+import {
+  setupDraftKey,
+  decodeSetupDraft,
+  encodeSetupDraft,
+  selectedQuestionIds,
+} from "./setup-draft.js";
+import { useRoleCatalog } from "./setup-discovery.js";
+import { hydrateSetupSource } from "./setup-source.js";
 
 const sections = [
   ["agent", "Agent under test", "Choose what to evaluate"],
@@ -45,54 +53,193 @@ export function Setup({
   sourceRunId?: string;
   blueprintId?: string;
 }) {
-  const [draft, setDraft] = useState<SetupDraft>(initialSetup);
-  const [section, setSection] = useState<string>("agent");
+  const storageKey = setupDraftKey(workspace.workspaceId);
+  const source = sourceRunId
+    ? `run:${sourceRunId}`
+    : blueprintId
+      ? `blueprint:${blueprintId}`
+      : "";
+  const [saved] = useState(() => {
+    try {
+      return storageKey
+        ? decodeSetupDraft(sessionStorage.getItem(storageKey))
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  });
+  const restoreSaved = !!saved && (!source || saved.source === source);
+  const [draft, setDraft] = useState<SetupDraft>(() =>
+    restoreSaved ? saved!.draft : initialSetup(),
+  );
+  const [section, setSection] = useState<string>(() =>
+    restoreSaved ? saved!.section : "agent",
+  );
+  const [draftSource, setDraftSource] = useState(source || saved?.source || "");
+  const [draftReady, setDraftReady] = useState(!source || restoreSaved);
+  const [storageError, setStorageError] = useState<unknown>(null);
   const [runtime, setRuntime] = useState<RuntimeCatalog | undefined>(
     workspace.runtime,
   );
   const [discoveredTools, setDiscoveredTools] = useState<ToolChoice[]>([]);
   const [discoveringTools, setDiscoveringTools] = useState(false);
+  const [toolsError, setToolsError] = useState<unknown>(null);
+  const [modelsError, setModelsError] = useState<unknown>(null);
   const [error, setError] = useState<unknown>(null);
   const [pending, setPending] = useState(false);
-  const [loadingSource, setLoadingSource] = useState(!!sourceRunId);
+  const [loadingSource, setLoadingSource] = useState(!!source && !restoreSaved);
+  const [toolsRefresh, setToolsRefresh] = useState(0);
+  const [modelsRefresh, setModelsRefresh] = useState(0);
+  const [discoveringModels, setDiscoveringModels] = useState(false);
+  const agentCatalog = useRoleCatalog(
+    runtime,
+    draft.harness,
+    draft.providerConnectionId,
+    draft.providerConnectionProvider,
+    draftReady && draft.targetKind === "managed",
+  );
+  const judgeCatalog = useRoleCatalog(
+    runtime,
+    draft.judgeHarness,
+    draft.judgeProviderConnectionId,
+    draft.judgeProviderConnectionProvider,
+    draftReady && draft.judge,
+  );
+  const researchCatalog = useRoleCatalog(
+    runtime,
+    draft.researcherHarness,
+    draft.researcherProviderConnectionId,
+    draft.researcherProviderConnectionProvider,
+    draftReady && draft.research && draft.targetKind === "managed",
+  );
   const set = <K extends keyof SetupDraft>(key: K, value: SetupDraft[K]) =>
     setDraft((previous) => ({ ...previous, [key]: value }));
   const discoverTools = async () => {
-    setDiscoveringTools(true);
-    setError(null);
-    try {
-      const response = await command("connections.test", {
-        connectionId: draft.connectionId,
-      });
-      if (!response.ok) throw new Error(response.message);
-      const tools = parseToolCatalog(response.tools);
-      setDiscoveredTools(tools);
-      if (!tools.length)
-        throw new Error(
-          "The connection returned no tools. Inspect connection discovery in Settings.",
-        );
-    } catch (cause) {
-      setError(cause);
-    } finally {
-      setDiscoveringTools(false);
-    }
+    setToolsRefresh((value) => value + 1);
   };
   useEffect(() => {
-    if (draft.judge)
-      void command("runtime.discover", {}).then(setRuntime).catch(setError);
-  }, [draft.judge]);
-  useEffect(() => {
-    if (sourceRunId)
-      void command("runs.get", { runId: sourceRunId })
-        .then((value) => setDraft(restoreSetup(value.run)))
-        .catch(setError)
-        .finally(() => setLoadingSource(false));
-    else if (blueprintId) {
-      const blueprint = workspace.blueprints.find(
-        (item) => item.id === blueprintId,
-      );
-      if (blueprint) setDraft(restoreSetup(blueprint));
+    const controller = new AbortController();
+    setToolsError(null);
+    setDiscoveredTools([]);
+    if (!draft.connectionId || draft.targetKind !== "managed" || !draftReady) {
+      setDiscoveringTools(false);
+      return;
     }
+    setDiscoveringTools(true);
+    void (async () => {
+      try {
+        const response = await command(
+          "connections.test",
+          { connectionId: draft.connectionId },
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
+        if (!response.ok) throw new Error(response.message);
+        const tools = parseToolCatalog(response.tools);
+        setDiscoveredTools(tools);
+        if (!tools.length)
+          throw new Error(
+            "The connection returned no tools. Inspect connection discovery in Settings.",
+          );
+      } catch (cause) {
+        if (!controller.signal.aborted) setToolsError(cause);
+      } finally {
+        if (!controller.signal.aborted) setDiscoveringTools(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [draft.connectionId, draft.targetKind, draftReady, toolsRefresh]);
+  useEffect(() => {
+    setModelsError(null);
+    if (!draftReady || (draft.targetKind !== "managed" && !draft.judge)) {
+      setDiscoveringModels(false);
+      return;
+    }
+    const controller = new AbortController();
+    setDiscoveringModels(true);
+    void command("runtime.discover", {}, controller.signal)
+      .then((value) => {
+        if (!controller.signal.aborted) setRuntime(value);
+      })
+      .catch((cause) => {
+        if (!controller.signal.aborted) setModelsError(cause);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDiscoveringModels(false);
+      });
+    return () => controller.abort();
+  }, [
+    draft.targetKind,
+    draft.harness,
+    draft.judge,
+    draft.judgeHarness,
+    draft.research,
+    draft.researcherHarness,
+    draftReady,
+    modelsRefresh,
+  ]);
+  useEffect(() => {
+    if (!draftReady) return;
+    if (!storageKey) {
+      setStorageError(
+        new Error(
+          "Setup cannot be saved until the workspace identity is available.",
+        ),
+      );
+      return;
+    }
+    try {
+      if (
+        JSON.stringify(draft) === JSON.stringify(initialSetup()) &&
+        section === "agent"
+      )
+        sessionStorage.removeItem(storageKey);
+      else
+        sessionStorage.setItem(
+          storageKey,
+          encodeSetupDraft(draft, section, draftSource),
+        );
+      setStorageError(null);
+    } catch (cause) {
+      setStorageError(
+        new Error(
+          cause instanceof Error && cause.message.includes("credentials")
+            ? cause.message
+            : "This browser could not save the setup draft. Keep this page open until you start the run.",
+        ),
+      );
+    }
+  }, [draft, section, draftSource, draftReady, storageKey]);
+  useEffect(() => {
+    if (restoreSaved || !source) return;
+    const controller = new AbortController();
+    setLoadingSource(true);
+    const blueprint = blueprintId
+      ? workspace.blueprints.find((item) => item.id === blueprintId)
+      : undefined;
+    void hydrateSetupSource(
+      { runId: sourceRunId, blueprint },
+      {
+        run: async (runId) =>
+          (await command("runs.get", { runId }, controller.signal)).run,
+        research: async (sessionId) =>
+          (await command("research.get", { sessionId }, controller.signal))
+            .session.configuration,
+      },
+    )
+      .then((restored) => {
+        if (!controller.signal.aborted) {
+          setDraft(restored);
+          setDraftReady(true);
+        }
+      })
+      .catch((cause) => {
+        if (!controller.signal.aborted) setError(cause);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingSource(false);
+      });
+    return () => controller.abort();
   }, [sourceRunId, blueprintId]);
   const selectedBankId =
     draft.bankId ||
@@ -139,22 +286,38 @@ export function Setup({
           researcher: {
             harness: draft.researcherHarness,
             model: draft.researcherModel,
-            systemPrompt: draft.researcherPrompt,
-            settings: objectJson(draft.researcherSettings),
-            tools: [],
+            systemPrompt: initialSetup().researcherPrompt,
+            settings: roleSettings(
+              draft.researcherSettings,
+              draft.researcherProviderConnectionId,
+            ),
+            tools: draft.originalResearcher?.tools ?? [],
             connections: draft.researcherProviderConnectionId
               ? [
                   {
                     connectionId: draft.researcherProviderConnectionId,
                     provider: draft.researcherProviderConnectionProvider,
-                    settings: {},
-                    credentialFields: [],
+                    settings:
+                      draft.originalResearcher?.connections.find(
+                        (item) =>
+                          item.connectionId ===
+                          draft.researcherProviderConnectionId,
+                      )?.settings ?? {},
+                    credentialFields:
+                      draft.originalResearcher?.connections.find(
+                        (item) =>
+                          item.connectionId ===
+                          draft.researcherProviderConnectionId,
+                      )?.credentialFields ?? [],
                   },
                 ]
               : [],
           },
-          objective: draft.objective,
-          guidance: draft.guidance,
+          objective: draft.researchInstructions,
+          guidance: "",
+          allowResearcherStop: draft.allowResearcherStop,
+          stopGuidance: draft.stopGuidance || undefined,
+          selectionMetric: draft.selectionMetric,
           maxCandidates: draft.maxCandidates,
           maxDurationMs: draft.maxMinutes * 60_000,
           maxTargetInvocations: draft.maxTargetInvocations,
@@ -167,11 +330,21 @@ export function Setup({
             : undefined,
           idempotencyKey: input.idempotencyKey,
         });
+        try {
+          if (storageKey) sessionStorage.removeItem(storageKey);
+        } catch {
+          /* The run is already saved by the engine. */
+        }
         navigate(
           `/observe/${result.session.currentRunId}?session=${result.session.id}`,
         );
       } else {
         const result = await command("runs.launch", input);
+        try {
+          if (storageKey) sessionStorage.removeItem(storageKey);
+        } catch {
+          /* The run is already saved by the engine. */
+        }
         navigate(`/observe/${result.run.id}`);
       }
       refresh();
@@ -186,11 +359,40 @@ export function Setup({
   return (
     <>
       <PageHeading
-        eyebrow="Run / Setup"
-        title="Design your next evaluation"
-        description="One agent configuration. A fixed question set. Evidence you can inspect."
-      />
+        title="New evaluation"
+        description="Choose an agent and question bank, then review your evaluation settings."
+      >
+        <button
+          className="button secondary"
+          disabled={pending}
+          onClick={() => {
+            if (!window.confirm("Discard this setup draft and start fresh?"))
+              return;
+            try {
+              if (storageKey) sessionStorage.removeItem(storageKey);
+            } catch {
+              /* Reported by the persistence effect. */
+            }
+            setDraft(initialSetup());
+            setSection("agent");
+            setDraftSource("");
+            setDraftReady(true);
+            setError(null);
+            navigate("/run");
+          }}
+        >
+          Reset setup
+        </button>
+      </PageHeading>
       <ErrorNotice error={error} />
+      <ErrorNotice error={storageError} />
+      <ErrorNotice error={toolsError} />
+      <ErrorNotice error={modelsError} />
+      <ErrorNotice
+        error={draft.targetKind === "managed" ? agentCatalog.error : undefined}
+      />
+      <ErrorNotice error={draft.judge ? judgeCatalog.error : undefined} />
+      <ErrorNotice error={draft.research ? researchCatalog.error : undefined} />
       {!workspace.banks.length ? (
         <Empty
           title="Create a question bank first"
@@ -213,13 +415,14 @@ export function Setup({
                   draft.targetKind === "managed" ||
                   !["tools", "research"].includes(id),
               )
-              .map(([id, label, description], index) => (
+              .map(([id, label, description]) => (
                 <button
                   key={id}
                   className={section === id ? "active" : ""}
+                  aria-current={section === id ? "step" : undefined}
+                  aria-controls="setup-section"
                   onClick={() => setSection(id)}
                 >
-                  <span className="step-number">{index + 1}</span>
                   <span>
                     <strong>{label}</strong>
                     <small>{description}</small>
@@ -237,7 +440,11 @@ export function Setup({
               </p>
             </div>
           </nav>
-          <section className="panel setup-main">
+          <section
+            className="panel setup-main"
+            id="setup-section"
+            aria-label="Selected setup section"
+          >
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">
@@ -251,15 +458,17 @@ export function Setup({
                 {
                   {
                     questions:
-                      "Choose a published bank revision and the questions to evaluate. Expected answers stay private to the evaluator.",
+                      "Choose a question bank and the questions to test. Expected answers stay private to the evaluator.",
                     agent:
-                      "Select your harness and model, then define the instructions that every question receives.",
+                      draft.targetKind === "external"
+                        ? "Select a deployed HTTP agent. Its own system controls models, instructions, and tools. This app evaluates the answers."
+                        : "Configure the agent that answers your questions. Choose its model, sign-in method, and instructions. This is separate from the researcher and judges.",
                     tools:
-                      "Only selected tools are available to the target. Tool access and connection bindings are frozen into the run.",
+                      "Choose a saved Tableau connection and the actions the agent can use. The app manages the MCP server. A resource ID guides the agent; it does not restrict access.",
                     evaluation:
-                      "Repetitions evaluate every selected question again. Deterministic grading always runs. Optional judging remains a separate assessment.",
+                      "Choose how often to repeat each question and how long to wait. Deterministic grading always runs. Optional judges record separate assessments.",
                     research:
-                      "A persistent researcher evaluates a baseline, proposes ordinary agent configurations, and compares their runs. Candidate count and time bound this work.",
+                      "Optionally let a researcher improve the tested agent after its baseline run. Questions stay fixed. Choose what the researcher can change and when it must stop.",
                   }[section]
                 }
               </Help>
@@ -280,16 +489,23 @@ export function Setup({
                   {draft.targetKind === "managed" && (
                     <button
                       className="button"
+                      disabled={discoveringModels}
                       onClick={() => {
-                        void command("runtime.discover", {})
-                          .then(setRuntime)
-                          .catch(setError);
+                        setModelsRefresh((value) => value + 1);
+                        agentCatalog.refresh();
+                        judgeCatalog.refresh();
+                        researchCatalog.refresh();
                       }}
                     >
-                      Discover installed harnesses and models
+                      {discoveringModels
+                        ? "Discovering models..."
+                        : "Refresh available models"}
                     </button>
                   )}
-                  <Field label="Agent ownership">
+                  <Field
+                    label="Agent type"
+                    help="Configure a local agent here, or evaluate answers from an agent deployed behind an HTTP endpoint."
+                  >
                     <select
                       aria-label="Agent ownership"
                       value={draft.targetKind}
@@ -317,7 +533,7 @@ export function Setup({
                     <AgentSettings
                       draft={draft}
                       set={set}
-                      catalog={runtime}
+                      catalog={agentCatalog.catalog}
                       connections={workspace.connections}
                     />
                   )}
@@ -340,7 +556,7 @@ export function Setup({
                   draft={draft}
                   set={set}
                   setDraft={setDraft}
-                  catalog={runtime}
+                  catalog={judgeCatalog.catalog}
                   bankRecord={bankRecord}
                   evaluatorRevisions={detail.data?.evaluatorRevisions ?? []}
                   connections={workspace.connections}
@@ -351,7 +567,7 @@ export function Setup({
                   draft={draft}
                   set={set}
                   setDraft={setDraft}
-                  catalog={runtime}
+                  catalog={researchCatalog.catalog}
                   connections={workspace.connections}
                 />
               )}
@@ -359,14 +575,17 @@ export function Setup({
             <footer className="setup-footer">
               <span>
                 {bank
-                  ? `${draft.questionIds.length || bank.questions.length} questions × ${draft.repetitions} repetitions`
+                  ? `${selectedQuestionIds(draft, bank.questions).length} questions × ${draft.repetitions} repetitions`
                   : "Choose a question bank"}
               </span>
               <button
                 className="button primary"
                 disabled={
                   pending ||
+                  !draftReady ||
                   !bank ||
+                  (draft.questionSelection === "selected" &&
+                    !draft.questionIds.length) ||
                   (draft.targetKind === "external"
                     ? !draft.externalTarget
                     : !draft.model.trim())

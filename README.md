@@ -1,18 +1,28 @@
 # Agent Evaluation Harness
 
-Evaluate local analytics agents through one headless engine and a React workspace.
-Run one frozen configuration against a question bank, inspect evidence, revise grading, and compare saved results.
-Optional research proposes configurations through one persistent provider conversation and launches ordinary Runs.
+Agent Evaluation Harness helps you measure how reliably an agent answers your questions, understand its failures, and improve its configuration.
+Evaluate the same question bank across models, prompts, tools, and external agents, then compare saved answers and evidence.
+Revise scoring and add independent judgments without paying to run the target agent again.
+
+The app combines a local web workspace with a discoverable JSON CLI.
+Both use the same engine, saved runs, and evaluation rules.
+Tableau MCP supplies analytics tools for managed agents; a generic HTTP adapter supports agents you operate elsewhere.
+
+## What you can do
+
+- Build question banks with expected answers, public context, and versioned grading rules.
+- Evaluate managed agents through Codex, Claude Code, OpenCode, or Amazon Bedrock Converse.
+- Compare subscription accounts, API connections, and compatible company gateways using the same questions.
+- Inspect submitted answers, tool activity, execution failures, scores, and token usage.
+- Score saved answers with deterministic rules, an LLM judge, Jev, or an attributed human review.
+- Correct disputed references and publish new scores while preserving the original evidence.
+- Run bounded research that proposes and evaluates candidate agent configurations.
+- Reuse a tested configuration, save a blueprint, or export configuration JSON with credential placeholders.
 
 ## Start the app
 
-Use Node.js 22.13.0 or newer.
-The runtime has Windows and macOS implementations behind the same engine contracts.
-Native Mac acceptance, including Keychain access and authenticated provider execution, remains pending.
-Linux runs core tests but does not enable live provider execution.
-Install Codex or OpenCode separately and sign in on each machine, or configure a supported API-key connection.
-Keep Node.js, npm, and the selected provider executable available on `PATH` when starting the engine.
-macOS uses the built-in Keychain and process utilities without a Go runtime or native compiler requirement.
+Use Node.js 22.13.0 or newer and npm.
+From this repository, run:
 
 ```sh
 npm install
@@ -20,171 +30,106 @@ npm run build
 npm start
 ```
 
-Open `http://127.0.0.1:4381`.
-The engine stores its local workspace in `.aeh`.
-Set `AEH_DATA_DIRECTORY` to select another workspace and `PORT` to select another port.
-Only one engine can own a workspace.
-Connection credentials use Windows DPAPI or macOS Keychain through a separate secret store.
-Copying or moving a workspace preserves evidence but requires entering connection credentials again.
-Provider account sign-in also remains local to each machine.
+Open [the local workspace](http://127.0.0.1:4381).
+The default workspace directory is `.aeh`.
+Set `AEH_DATA_DIRECTORY` to choose another directory, or `PORT` to choose another server port.
+Only one engine can own a workspace at a time.
 
-For development, run `npm run dev` and `npm run dev:web` in separate terminals.
-The Vite interface uses port 5181 and forwards API requests to port 4381.
+For a local provider harness, install its CLI separately and make it available on `PATH`.
+Sign in through that CLI for subscription access, or save a compatible provider connection in **Settings**.
+The built-in Bedrock Converse harness uses a saved Bedrock connection without another agent CLI.
 
-## Run an evaluation
+Windows supports native credential storage and provider process management.
+macOS implementations are present, but native Mac acceptance remains pending.
+Linux supports core tests; live managed-provider execution is not enabled.
+See [platform support and remaining checks](docs/macos-support.md).
 
-1. Open **Settings** and discover installed Codex or OpenCode harnesses.
-2. Add a Tableau connection or a model provider connection when needed.
-3. Open **Question banks** and author or import questions with expected answers.
-4. Open **Run**, choose the bank, agent configuration, tools, and repetitions, then start.
-5. Inspect **Observe** for saved activity, answers, deterministic grading, and optional judge assessments.
-6. Open **Results** to compare Runs, add human reviews, rescore, reuse configurations, or export the tested agent JSON.
+## Run your first evaluation
 
-Target agents receive public question text, context, and any published answer format.
-New typed table questions derive a public format from declared column names and types, permitting nulls by default.
-Typed string and numeric references also derive scalar formats.
-Empty-table references expose a generic collection format without revealing that the answer is empty.
-Reference rows cannot establish whether the source contains nulls.
-JSON imports can supply an explicit `answerFormat`; its null rules cannot exclude nulls allowed by the reference declaration.
-Expected values, row counts, and ordering rules remain private, and public nullability does not relax deterministic grading.
-Publishing a new bank revision leaves existing revisions and frozen Runs unchanged.
-A frozen Run preserves its questions, agent settings, connection settings, evaluator, and limits.
-Its manifest does not freeze a live Tableau datasource.
+1. Open **Settings** to inspect installed harnesses and configure any required connections.
+2. Open **Question banks** to create or import questions and expected answers.
+3. Open **Run** and choose your agent, bank, question selection, and tools.
+4. Keep deterministic grading as the default, or enable independent judges under **Evaluation**.
+5. Start the run and inspect its questions, recorded answers, and scores in **Observe**.
+6. Open **Results** to compare runs, reuse a configuration, or export it.
+
+For Tableau questions, select a saved Tableau connection and the tools the agent needs.
+An empty tool selection provides no Tableau tools.
+The agent receives question text, public context, and published answer requirements; expected values remain private.
+
+Each run freezes its selected questions, target configuration, evaluator, and limits.
+A run does not freeze a live datasource, so source changes can affect later comparisons.
+
+See [configure and operate evaluations](docs/configuration-guide.md) for accounts, question selection, scoring, human review, recovery, and research.
+
+## Improve answers and scoring
+
+Choose **Score saved answers** to create a named score from recorded answers using different evaluation rules or judges.
+Deterministic scoring uses no model calls.
+LLM and Jev judging can incur provider usage, but do not rerun the target agent.
+Choose **Review judgments** to create an attributed human score while retaining earlier judgments.
+
+Accuracy means correct answers divided by completed correct-or-incorrect judgments.
+Completion, judgment coverage, execution failures, and unavailable judgments remain separate.
+Research uses a fixed eligible question count and rejects reduced coverage, so failed questions cannot improve selection by shrinking the denominator.
+
+Performance separates **Input tokens (uncached)**, **Output tokens (generated)**, and **Cache tokens (reused input)**.
+Reported subtotals remain visible while other requests are pending or lack usage reports.
+Repeated conversation context counts each time the provider processes it, so a run can use more tokens than one question's context limit.
 
 ## Use the CLI
 
-The CLI connects to the same local engine as the web interface.
-Build the project before using the compiled entry point.
-Every command returns JSON; failures return an `error` object and exit with code 1.
+The CLI connects to the running local engine.
+Start with help and the command catalog:
 
 ```sh
+npm run cli -- --help
+npm run cli -- discover
+npm run cli -- workspace.get
+```
+
+For scripts, use the compiled entry point to receive JSON without npm's script banner:
+
+```sh
+node dist/cli.js --help
 node dist/cli.js discover
-node dist/cli.js workspace.get
 node dist/cli.js banks.create --file bank.json
 node dist/cli.js runs.launch --file launch.json
 node dist/cli.js runs.get --file run-reference.json
-node dist/cli.js runs.export-agent --file run-reference.json
 ```
 
-Use `--json`, `--file`, or `--stdin` for command input.
-Use `--url http://127.0.0.1:4381` to select an engine endpoint.
 `discover` returns operation names and validated JSON input schemas.
-The HTTP equivalent is `POST /api/commands/<operation>` with the same JSON input.
+Use `--file`, `--json`, or `--stdin` for input, and `--url` or `AEH_URL` to choose a local engine.
+See [CLI examples](docs/cli.md) for bank, launch, control, scoring, review, research, and export workflows.
 
-A minimal `bank.json` is:
+## Local data and credentials
 
-```json
-{
-  "name": "Sales analytics",
-  "questions": [
-    { "id": "revenue", "text": "What is total revenue?", "expected": 12500 }
-  ]
-}
-```
+Runs, answers, and evidence are saved in the local workspace.
+Provider and external-agent requests still leave your machine according to your configuration.
+Treat saved traces and exports as potentially sensitive business data.
 
-A minimal `launch.json` is:
+Store credentials in **Settings**, rather than prompts or advanced JSON.
+Connection secrets use Windows DPAPI or macOS Keychain through a separate machine-local store.
+Moving a workspace preserves its evidence but requires entering credentials again.
+Provider subscription sign-in also belongs to each machine.
+Configuration exports use credential placeholders and omit the question bank and expected answers.
 
-```json
-{
-  "name": "Baseline",
-  "bankRevisionId": "bankrev_REPLACE_WITH_SAVED_ID",
-  "agent": {
-    "harness": "codex",
-    "model": "REPLACE_WITH_DISCOVERED_MODEL",
-    "systemPrompt": "Answer the analytics question accurately using the available tools.",
-    "tools": [],
-    "connections": []
-  },
-  "repetitions": 1,
-  "idempotencyKey": "baseline-request-1"
-}
-```
+## Documentation
 
-An empty tool list exposes no external analytics tools.
-Select Tableau tools and a connection binding for analytics work.
-Reusing an idempotency key with the same input returns the original Run.
-Reusing it with different input is an error.
-A run reference contains `{ "runId": "run_REPLACE_WITH_SAVED_ID" }`.
-Controls use the same reference plus `"action": "pause"`, `"halt"`, `"resume"`, or `"cancel"`.
+- [Configure and operate evaluations](docs/configuration-guide.md): accounts, runs, scoring, review, research, and reuse.
+- [CLI examples](docs/cli.md): discovery and automation through the shared engine.
+- [Independent judges](docs/judging.md): LLM and Jev assessments, evidence, and published profiles.
+- [External HTTP agents](docs/http-targets.md): endpoint configuration, mapping, and remote-work limits.
+- [Evaluator design](docs/evaluator-design.md): comparison policies and calibration.
+- [Architecture](docs/architecture.md): engine boundaries, immutable evidence, and lifecycle ownership.
+- [Validation record](docs/observation-redesign-validation.md): executed checks and known limitations.
 
-## Understand controls and recovery
+## Develop and validate
 
-**Pause** stops new admissions and lets active work finish.
-**Halt** interrupts active work and preserves unfinished questions for **Resume**.
-**Cancel** interrupts work and makes the owning Run or research session terminal after cleanup.
-Controls from a research-owned Run apply to its research session.
-Resume starts fresh physical attempts for interrupted questions and preserves completed evidence.
-It does not resume an operating-system process.
+Run `npm run dev` and `npm run dev:web` in separate terminals.
+The development interface uses port 5181 and forwards API requests to port 4381.
 
-After a restart, process recovery precedes new admissions.
-The engine recovers deterministic assessments from sealed answers when necessary.
-Active work becomes paused, halted, or cancelled according to its recorded intent.
-A cleanup failure blocks runtime admission and remains visible.
-
-## Revise evaluations
-
-Default grading supports text, exact JSON, decimal numbers, typed answers, and tables.
-Typed expected answers also accept equivalent natural JSON numbers, strings, table rows, nulls, and empty arrays.
-Typed tables accept lossless JSON-encoded table answers; a declared one-column table also accepts a primitive array as its rows.
-These normalizations preserve cell types, values, row counts, duplicates, and configured ordering.
-Explicit unanswerable and clarification states remain distinct.
-Published evaluator revisions include tolerances, ordering rules, and optional question-specific overrides.
-Use reviewed `columnAliases` to map submitted column names to canonical reference names when rescoring saved table answers.
-For example, `"columnAliases": { "billing_country": ["country"] }` accepts `country` as an alias for `billing_country`.
-Aliases require explicit configuration and cannot excuse wrong values, missing rows, or ambiguous column mappings.
-Preview a draft against saved answers before publication.
-Configure explicit decimal precision, date semantics, answer extraction, singleton unwrapping, and field-specific rules when the question requires them.
-Top-k comparison requires an explicitly complete reference pool and ranking keys.
-Calibration cases test accepted variants and wrong answers without another target run.
-Publication validates configured cases against the latest bank revision.
-Mark a disputed reference as needing review to retain its evidence while excluding it from scored accuracy.
-Corrected-reference rescoring accepts an explicit bank revision and records that provenance separately from the original run.
-Activation selects the revision for future launches.
-Reactivation of an older revision provides reversion without rewriting history.
-Rescoring adds another score set and preserves the original evidence and decisions.
-Human reviews and optional LLM judge verdicts remain separate from deterministic accuracy.
-When a rescore has no new LLM judge assessment, Observe retains the original verdict with the label **Original run judge**.
-That verdict uses the original run's judging basis; it does not assess the revised deterministic criteria.
-
-Optional Jev classification adds independent answer, evidence, and reference-quality checks.
-Published judging profiles contain editable instructions and criteria.
-Saved answers can receive new Jev assessments without another target run.
-See [independent judges](docs/judging.md) for evidence handling, profile revisions, and saved-answer judging.
-
-Custom evaluator code is a function body receiving `input.expected` and `input.answer`.
-It returns `{ verdict: boolean, explanation?: string, details?: JSON }`.
-QuickJS enforces a 100 ms computation limit, 16 MB memory limit, and 64 KB output limit.
-The context has no filesystem, network, process, or credential access.
-Integrated AI authoring of evaluator criteria is deferred.
-
-## Understand research limits
-
-A research session completes a baseline before opening its provider conversation.
-Its initial instructions contain configuration, objective, mutation rules, budgets, and baseline references.
-Questions, transcripts, and gold answers require explicit evidence retrieval.
-Gold retrieval creates an audit event.
-Every subsequent turn retains the exact provider conversation ID.
-Unavailable continuity fails the session instead of creating another conversation.
-
-Candidate, invocation, duration, token, and cost limits control further admissions.
-Token and cost ceilings are checked between invocations; an active provider request can consume additional usage before returning.
-Unknown usage stops research when a configured spending ceiling cannot be evaluated.
-Interrupted researcher turns with unknown spending also prevent further admission under a spending ceiling.
-Pausing does not reset the session duration budget.
-
-## Maintain the project
-
-Read [the build charter](docs/build-charter.md), [architecture](docs/architecture.md), and [acceptance criteria](docs/acceptance.md).
-See [external evaluation targets](docs/external-targets.md) for the proposed HTTP specification, UI design, implementation plan, and future runtime adapter boundary.
-Generic HTTP targets are implemented.
-Agentforce and other first-class external runtimes remain deferred.
-See `docs/http-targets.md` for endpoint configuration and `docs/target-adapters.md` for the internal adapter contract.
-See [macOS support](docs/macos-support.md) for the portability specification, implementation plan, and acceptance evidence.
-Run `npm run validate` before handing off a substantial change.
-It checks formatting, dependency boundaries, types, lint, tests, and the production build.
-The architecture check rejects browser imports of backend services and application imports of runtime implementations.
-It also separates credential storage from process ownership and confines platform wiring to runtime composition.
-CI is configured for Windows, Linux core checks, and macOS 15 on Apple Silicon and Intel with Node.js 22.13.0 and 24.
-Configured Mac CI and local POSIX fixtures do not establish native Mac acceptance until those checks run successfully.
-Provider tests use bounded calls or local fixtures; ordinary tests do not spend model tokens.
+Run `npm run validate` for formatting, architecture boundaries, types, lint, tests, and the production build.
+Ordinary tests use local fixtures and do not spend model tokens.
+Read the [build charter](docs/build-charter.md), [architecture](docs/architecture.md), and [acceptance criteria](docs/acceptance.md) before substantial changes.
 The previous repository is reference material only and is not a dependency.

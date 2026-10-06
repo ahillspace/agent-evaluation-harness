@@ -1,3 +1,4 @@
+import { JsonEditor } from "./json-editor.js";
 import { useState } from "react";
 import {
   jevProfileSettingsSchema,
@@ -5,7 +6,7 @@ import {
   type JevProfileSettings,
 } from "../contracts.js";
 import { command } from "./api.js";
-import { ErrorNotice, Field, Status, date } from "./ui.js";
+import { ErrorNotice, Field, Status, date, SectionIntro } from "./ui.js";
 import { answerOnlyJevSettings } from "../contracts/answer-only-judge.js";
 
 const checkTitles = {
@@ -66,6 +67,11 @@ export function JevProfileEditor({
           assessments keep their original version.
         </p>
       </div>
+      <SectionIntro
+        title="Jev criteria"
+        description="Tell Jev how to assess answers, supporting evidence, and possible problems in the expected answer."
+        details="These instructions apply only to the independent judge. Publishing saves a new version for future assessments; previous runs keep their recorded criteria."
+      />
       <ErrorNotice error={error} />
       <Field label="Profile name">
         <input
@@ -180,16 +186,41 @@ export function JevProfileEditor({
       )}
       <details className="disclosure">
         <summary>Question-specific criteria</summary>
-        <p className="subtle">
-          JSON keyed by question ID. Each entry can override shared instructions
-          or check settings.
-        </p>
-        <textarea
-          aria-label="Jev question overrides"
-          className="code-input"
-          rows={6}
+        <JsonEditor
+          label="Jev question overrides"
           value={overrides}
-          onChange={(event) => setOverrides(event.target.value)}
+          onChange={setOverrides}
+          validate={(value) => {
+            jevProfileSettingsSchema.shape.questionOverrides.parse(value);
+          }}
+          guide={{
+            description:
+              "Override judging instructions for specific question IDs. Omitted fields inherit the bank's criteria.",
+            example: {
+              q001: {
+                instructions:
+                  "Accept equivalent representations supported by the recorded evidence.",
+              },
+            },
+            fields: [
+              {
+                key: "Question ID",
+                description: "An existing question ID mapped to its overrides.",
+                values: "object",
+              },
+              {
+                key: "instructions",
+                description: "Additional instructions for this question.",
+                values: "string",
+              },
+              {
+                key: "checks",
+                description:
+                  "Override answer, evidence, or reference check instructions and criteria.",
+                values: "objects matching the corresponding bank check",
+              },
+            ],
+          }}
         />
       </details>
       <button

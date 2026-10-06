@@ -24,6 +24,7 @@ export interface SetupDraft {
   bankRevisionId: string;
   evaluatorRevisionId: string;
   questionIds: string[];
+  questionSelection: "all" | "selected";
   harness: AgentConfig["harness"];
   model: string;
   prompt: string;
@@ -49,10 +50,15 @@ export interface SetupDraft {
   jevEnabled: boolean;
   jevSelection: JevJudgeSelection;
   research: boolean;
+  researchInstructions: string;
+  allowResearcherStop: boolean;
+  stopGuidance: string;
+  selectionMetric: "deterministic" | "llm" | "jev";
   researcherHarness: AgentConfig["harness"];
   researcherModel: string;
   researcherPrompt: string;
   researcherSettings: string;
+  originalResearcher?: AgentConfig;
   researchSettings: string;
   researcherProviderConnectionId: string;
   researcherProviderConnectionProvider: string;
@@ -74,6 +80,7 @@ export function initialSetup(): SetupDraft {
     bankRevisionId: "",
     evaluatorRevisionId: "",
     questionIds: [],
+    questionSelection: "all",
     harness: "codex",
     model: "",
     prompt:
@@ -100,6 +107,11 @@ export function initialSetup(): SetupDraft {
     jevEnabled: false,
     jevSelection: { connectionId: "", model: "jev-1.13.0" },
     research: false,
+    researchInstructions:
+      "Improve answer accuracy without question-specific rules. Use saved evidence to propose focused changes within the allowed mutation space.",
+    allowResearcherStop: true,
+    stopGuidance: "",
+    selectionMetric: "deterministic",
     researcherHarness: "codex",
     researcherModel: "",
     researcherPrompt:
@@ -135,6 +147,15 @@ export function objectJson(source: string): Record<string, Json> {
     throw new Error("Enter a JSON object for advanced settings.");
   return value as Record<string, Json>;
 }
+export function roleSettings(
+  source: string,
+  connectionId: string,
+): Record<string, Json> {
+  return {
+    ...objectJson(source),
+    authSource: connectionId ? "connection" : "local",
+  };
+}
 export function replaceExpectedAnswer(
   question: Question,
   expected: Json,
@@ -147,8 +168,12 @@ export function replaceExpectedAnswer(
   };
 }
 export function createLaunch(draft: SetupDraft): LaunchInput {
+  if (draft.questionSelection === "selected" && !draft.questionIds.length)
+    throw new Error("Select at least one question before starting a run.");
   const settings =
-    draft.targetKind === "external" ? {} : objectJson(draft.settings);
+    draft.targetKind === "external"
+      ? {}
+      : roleSettings(draft.settings, draft.providerConnectionId);
   const originalTableau = draft.originalConnections.find(
     (item) => item.provider === "tableau",
   );
@@ -230,7 +255,10 @@ export function createLaunch(draft: SetupDraft): LaunchInput {
               tools: [],
               ...draft.originalJudge?.agent,
               connections: judgeConnections,
-              settings: objectJson(draft.judgeSettings),
+              settings: roleSettings(
+                draft.judgeSettings,
+                draft.judgeProviderConnectionId,
+              ),
               harness: draft.judgeHarness,
               model: draft.judgeModel,
               systemPrompt:
@@ -259,6 +287,7 @@ export function restoreSetup(source: Blueprint | RunRecord): SetupDraft {
           bankRevisionId: source.manifest.bank.id,
           evaluatorRevisionId: source.manifest.evaluator.id,
           questionIds: source.manifest.questions.map((question) => question.id),
+          questionSelection: "selected" as const,
         }
       : {}),
     harness: agent?.harness ?? "codex",

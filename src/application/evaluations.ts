@@ -92,6 +92,8 @@ export class EvaluationService {
       const attempt = this.db.require("attempt", result.completedAttemptId);
       const assessment = await this.assess(run, result, attempt);
       if (run.manifest.judge.enabled)
+        assessment.judgeRequest = this.db.judgeRequest(attempt.id);
+      if (run.manifest.judge.enabled)
         assessment.judgeError =
           "The engine stopped before the judge assessment was saved. Deterministic grading was recovered without another model call.";
       this.db.insert(
@@ -420,6 +422,9 @@ export class EvaluationService {
         harness: target.kind === "managed" ? target.agent.harness : null,
         bankRevisionId: run.manifest.bank.id,
         questionDigest: digest({
+          slots: results
+            .map((result) => `${result.questionId}:${result.repetition}`)
+            .sort(),
           targetQuestions: run.manifest.questions.map(
             ({ expected: _expected, ...question }) => question,
           ),

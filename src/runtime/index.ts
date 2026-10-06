@@ -1,3 +1,12 @@
+import { invokeBedrock, BedrockFailure } from "./bedrock.js";
+import { supportsProvider } from "../contracts/harnesses.js";
+import type { ExecutionFailure } from "../contracts/execution-failure.js";
+import {
+  providerExecutionFailure,
+  toolEventRejected,
+} from "./execution-failure.js";
+import { validateModelSettings } from "../contracts/model-settings.js";
+import { providerProbe } from "./model-providers.js";
 import { createHash, randomUUID } from "node:crypto";
 import { HarnessUsage } from "./usage.js";
 import { createServer } from "node:http";
@@ -31,6 +40,7 @@ import { ConnectionService } from "./connections.js";
 import { discoverHarness } from "./discovery.js";
 import {
   buildHarnessCommand,
+  codexCapacityNotAdmitted,
   buildTargetPrompt,
   normalizeEvent,
   record,
@@ -66,6 +76,8 @@ export class RuntimeFailure extends Error {
   constructor(
     public readonly code: string,
     message: string,
+    public readonly executionFailure?: ExecutionFailure,
+    public readonly evidence?: Json,
   ) {
     super(message);
     this.name = "RuntimeFailure";
@@ -77,6 +89,9 @@ const researchTurn = z
     message: z.string().default(""),
     proposal: agentSchema.optional(),
     decision: z.enum(["keep", "discard", "stop"]).optional(),
+    disposition: z.enum(["keep", "discard"]).optional(),
+    control: z.enum(["continue", "stop"]).optional(),
+    stopCategory: z.enum(["complete", "blocked"]).optional(),
     reason: z.string().optional(),
   })
   .strict();
@@ -95,6 +110,11 @@ export function createRuntime(options: {
 }
 
 class LocalRuntime implements RuntimePort {
+  normalizeRecordedUsage(harness: string, events: Json[]) {
+    const usage = new HarnessUsage(harness);
+    for (const event of events) usage.add(event);
+    return usage.value();
+  }
   readonly externalTargets: ExternalTargetCatalog;
   private readonly targets: TargetRegistry;
   private localReady?: Promise<unknown>;
@@ -188,7 +208,7 @@ class LocalRuntime implements RuntimePort {
   async discover() {
     await this.ensureLocal();
     const harnesses = await Promise.all(
-      (["codex", "opencode"] as const).map((harness) =>
+      (["codex", "claude", "opencode"] as const).map((harness) =>
         discoverHarness(
           this.supervisor,
           harness,
@@ -197,7 +217,10 @@ class LocalRuntime implements RuntimePort {
       ),
     );
     return {
-      harnesses,
+      harnesses: [
+        ...harnesses,
+        { id: "bedrock" as const, available: true, models: [] },
+      ],
       connectionProviders: this.connections.providers(),
       maxConcurrency: this.maxConcurrency,
     };
@@ -214,26 +237,23 @@ class LocalRuntime implements RuntimePort {
 
   async resolveAgent(input: AgentConfig): Promise<AgentConfig> {
     const agent = agentSchema.parse(input);
-    if (!["codex", "opencode"].includes(agent.harness))
+    if (!["codex", "claude", "opencode", "bedrock"].includes(agent.harness))
       throw new RuntimeFailure(
         "configuration_error",
         `Unsupported harness: ${agent.harness}.`,
       );
-    const settings = settingsSchema.parse(agent.settings);
-    if (
-      agent.harness === "codex" &&
-      (settings.temperature !== undefined ||
-        settings.maxOutputTokens !== undefined)
-    )
-      throw new RuntimeFailure(
-        "configuration_error",
-        "Codex does not support temperature or maxOutputTokens in this adapter.",
-      );
+    const settings = validateModelSettings(agent.harness, agent.settings);
     const bindings = await Promise.all(
       agent.connections.map((binding) => this.connections.freeze(binding)),
     );
     const provider =
-      agent.harness === "codex" ? "openai" : agent.model.split("/")[0];
+      agent.harness === "codex"
+        ? "openai"
+        : agent.harness === "claude"
+          ? "anthropic"
+          : agent.harness === "bedrock"
+            ? "amazon-bedrock"
+            : agent.model.split("/")[0];
     if (agent.harness === "opencode" && !agent.model.includes("/"))
       throw new RuntimeFailure(
         "configuration_error",
@@ -244,11 +264,20 @@ class LocalRuntime implements RuntimePort {
     );
     if (
       modelBindings.length > 1 ||
-      modelBindings.some((binding) => binding.provider !== provider)
+      modelBindings.some(
+        (binding) =>
+          !supportsProvider(agent.harness, binding.provider) ||
+          binding.provider !== provider,
+      )
     )
       throw new RuntimeFailure(
         "configuration_error",
         "Choose at most one model credential connection that matches the selected model provider.",
+      );
+    if (agent.harness === "bedrock" && modelBindings.length !== 1)
+      throw new RuntimeFailure(
+        "configuration_error",
+        "Select a saved Bedrock bearer connection.",
       );
     const frozen: AgentConfig = {
       ...agent,
@@ -302,23 +331,28 @@ class LocalRuntime implements RuntimePort {
   private async probeConnection(
     connection: ConnectionRecord,
     secrets: Record<string, string>,
-  ) {
+  ): ReturnType<RuntimePort["testConnection"]> {
     if (connection.provider !== "tableau") {
       const key = secrets.apiKey;
-      const defaults: Record<string, string> = {
-        openai: "https://api.openai.com/v1",
-        anthropic: "https://api.anthropic.com/v1",
-        openrouter: "https://openrouter.ai/api/v1",
-      };
-      const endpoint = String(
-        connection.settings.baseUrl ?? defaults[connection.provider],
+      const probe = providerProbe(
+        connection.provider,
+        connection.settings,
+        key!,
       );
-      const headers: Record<string, string> =
-        connection.provider === "anthropic"
-          ? { "x-api-key": key!, "anthropic-version": "2023-06-01" }
-          : { authorization: `Bearer ${key}` };
-      const response = await fetch(`${endpoint.replace(/\/$/, "")}/models`, {
-        headers,
+      if (!probe)
+        return {
+          ok: true,
+          message:
+            "Bedrock configuration is valid. The runtime endpoint does not offer model discovery; enter a model ID. Credentials are verified only when a run invokes that model.",
+          resources: {
+            models: [],
+            modelDiscovery: "unavailable",
+            credentialsVerified: false,
+          },
+        };
+      const response = await fetch(probe.url, {
+        redirect: "error",
+        headers: probe.headers,
         signal: AbortSignal.timeout(20_000),
       });
       let models: Json[] = [];
@@ -454,6 +488,7 @@ class LocalRuntime implements RuntimePort {
       if (answerFormatPath)
         await writeFile(answerFormatPath, JSON.stringify(format), "utf8");
       const prompt = buildTargetPrompt(input.agent, input.question);
+      let rejectedTool = false;
       const output = await this.invoke({
         agent: input.agent,
         directory,
@@ -462,7 +497,10 @@ class LocalRuntime implements RuntimePort {
         timeoutMs: input.timeoutMs,
         maxOutputBytes: input.maxOutputBytes,
         signal: input.signal,
-        onEvent: input.onEvent,
+        onEvent: (event) => {
+          if (toolEventRejected(event)) rejectedTool = true;
+          input.onEvent(event);
+        },
         answerFormatPath,
       });
       let answer: Json;
@@ -479,9 +517,49 @@ class LocalRuntime implements RuntimePort {
         if (format && !validateSubmittedAnswer(format, answer).ok)
           throw new Error();
       } catch {
+        let rejection: Json | undefined;
+        try {
+          rejection = jsonSchema.parse(
+            JSON.parse(
+              redact(
+                await readFile(
+                  path.join(directory, "answer.json.rejection.json"),
+                  "utf8",
+                ),
+                output.secrets,
+              ),
+            ),
+          );
+        } catch {
+          /* An absent journal means no rejected submission was recorded. */
+        }
         throw new RuntimeFailure(
-          "evidence_failure",
-          "The target completed without a valid submit_answer tool call.",
+          rejection
+            ? "submission_rejected"
+            : rejectedTool
+              ? "tool_rejected"
+              : "answer_missing",
+          rejection
+            ? "The target submitted an answer that failed public format validation and stopped before correcting it. Review the recorded rejection and final response."
+            : rejectedTool
+              ? "A connected tool rejected a request, and the target stopped without submitting an answer. Review the recorded tool error and final response before retrying."
+              : "The target stopped without calling submit_answer successfully. Its final response and transcript remain available; text alone does not record an answer.",
+          {
+            category: rejection
+              ? "submission"
+              : rejectedTool
+                ? "tool"
+                : "missing-answer",
+            transient: false,
+            retrySafety: "unknown",
+            usage: output.usage,
+          },
+          {
+            text: output.text,
+            transcript: output.transcript ?? null,
+            rejection: rejection ?? null,
+            toolRejectionObserved: rejectedTool,
+          },
         );
       }
       return {
@@ -490,6 +568,7 @@ class LocalRuntime implements RuntimePort {
         usage: output.usage,
         transcript: output.transcript,
         terminalReason: "completed",
+        cleanup: output.cleanup,
       };
     } finally {
       await rm(directory, { recursive: true, force: true, maxRetries: 3 });
@@ -582,7 +661,7 @@ class LocalRuntime implements RuntimePort {
         connections: input.configuration.connections.filter(
           (binding) => binding.provider !== "tableau",
         ),
-        systemPrompt: `${input.configuration.systemPrompt}\nResearch by requesting evidence explicitly with read_evidence. ${input.configuration.harness === "codex" ? "Use functions.exec with await tools.mcp__evidence__read_evidence({runId: RUN_ID, includeGold: BOOLEAN}) to read evidence." : ""} Return only JSON: {"message":string,"proposal":optional complete agent configuration,"decision":optional "keep"|"discard"|"stop","reason":optional string}. Preserve the frozen limits and change only allowed fields.`,
+        systemPrompt: `${input.configuration.systemPrompt}\nResearch by requesting evidence explicitly with read_evidence. ${input.configuration.harness === "codex" ? "Use functions.exec with await tools.mcp__evidence__read_evidence({runId: RUN_ID, includeGold: BOOLEAN}) to read evidence." : ""} Return only JSON: {"message":string,"proposal":optional complete agent configuration,"disposition":"keep"|"discard","control":"continue"|"stop","stopCategory":optional "complete"|"blocked","reason":string}. Disposition applies to the evaluated configuration independently of whether research continues. Keep and stop can appear together. Follow the session early-stop policy. Preserve the frozen limits and change only allowed fields.`,
       };
       const output = await this.invoke({
         agent,
@@ -629,7 +708,7 @@ class LocalRuntime implements RuntimePort {
       input.agent.connections,
       input.agent.tools,
     );
-    if (input.agent.harness === "codex")
+    if (["codex", "claude"].includes(input.agent.harness))
       await writeFile(
         path.join(input.directory, "instructions.txt"),
         input.agent.systemPrompt,
@@ -642,6 +721,51 @@ class LocalRuntime implements RuntimePort {
         .filter(([key]) => /TOKEN|KEY|SECRET/.test(key))
         .map(([, value]) => value),
     ];
+    if (input.agent.harness === "bedrock") {
+      const release = await this.connectionGate.acquire(
+        material.mcp
+          .filter((binding) => binding.env.AUTH === "pat")
+          .map((binding) =>
+            tableauSessionKey(binding.env.SERVER!, binding.env.PAT_VALUE!),
+          ),
+        input.signal,
+        () =>
+          input.onEvent?.({
+            type: "runtime.waiting",
+            message:
+              "Waiting for another invocation using this Tableau connection to finish.",
+          }),
+      );
+      try {
+        return {
+          ...(await invokeBedrock({
+            ...input,
+            mcp: material.mcp,
+            env,
+            supervisor: this.supervisor,
+            signal: input.signal!,
+            sanitize: (value) => redact(value, secrets),
+          })),
+          secrets,
+        };
+      } catch (error) {
+        if (error instanceof BedrockFailure)
+          throw new RuntimeFailure(
+            error.code,
+            error.message,
+            providerExecutionFailure({
+              status: error.status,
+              toolFree:
+                input.role === "target" && input.agent.tools.length === 0,
+              toolActivity: error.toolActivity,
+              usage: error.usage,
+            }),
+          );
+        throw error;
+      } finally {
+        release();
+      }
+    }
     const command = buildHarnessCommand({
       agent: input.agent,
       cwd: input.directory,
@@ -653,10 +777,14 @@ class LocalRuntime implements RuntimePort {
       answerFormatPath: input.answerFormatPath,
     });
     const transcript: Json[] = [];
+    let transcriptComplete = true;
     let text = "",
       conversationId: string | undefined,
       providerError: string | undefined,
       providerStatus: number | undefined,
+      providerCode: string | undefined,
+      providerRetryAfterMs: number | undefined,
+      toolActivity = false,
       toolCalls = 0;
     const invocationUsage = new HarnessUsage(input.agent.harness);
     const limits = settingsSchema.parse(input.agent.settings);
@@ -687,16 +815,22 @@ class LocalRuntime implements RuntimePort {
           try {
             raw = JSON.parse(redact(line, secrets));
           } catch {
+            transcriptComplete = false;
             return;
           }
-          if (!record(raw)) return;
+          if (!record(raw)) {
+            transcriptComplete = false;
+            return;
+          }
           transcript.push(raw as Json);
           const id =
             typeof raw.thread_id === "string"
               ? raw.thread_id
               : typeof raw.sessionID === "string"
                 ? raw.sessionID
-                : undefined;
+                : typeof raw.session_id === "string"
+                  ? raw.session_id
+                  : undefined;
           if (id && !conversationId) {
             if (input.conversationId && id !== input.conversationId)
               throw new RuntimeFailure(
@@ -715,15 +849,40 @@ class LocalRuntime implements RuntimePort {
               "The provider changed conversations during a turn.",
             );
           const event = normalizeEvent(input.agent.harness, raw);
+          if (
+            input.agent.harness === "claude" &&
+            raw.type === "result" &&
+            event?.type === "error" &&
+            record(raw.usage)
+          ) {
+            const usage = { ...raw.usage, cost: raw.total_cost_usd };
+            invocationUsage.add(usage);
+            input.onEvent?.({
+              type: "usage",
+              message: "Provider usage before failure.",
+              data: usage as Json,
+            });
+          }
           if (event?.type === "message")
             text =
               input.agent.harness === "opencode"
                 ? text + event.message
                 : event.message;
+          if (event?.type.startsWith("tool.")) toolActivity = true;
           if (event?.type === "error") {
             providerError = event.message;
+            if (
+              record(event.data) &&
+              typeof event.data.providerCode === "string"
+            )
+              providerCode = event.data.providerCode;
             if (record(event.data) && typeof event.data.statusCode === "number")
               providerStatus = event.data.statusCode;
+            if (
+              record(event.data) &&
+              typeof event.data.retryAfterMs === "number"
+            )
+              providerRetryAfterMs = event.data.retryAfterMs;
           }
           if (event?.type === "tool.completed" && ++toolCalls > limits.maxTurns)
             throw new RuntimeFailure(
@@ -742,16 +901,34 @@ class LocalRuntime implements RuntimePort {
       throw new RuntimeFailure(
         "interrupted",
         "The invocation was interrupted.",
+        {
+          category: "unknown",
+          transient: false,
+          retrySafety: "unknown",
+          usage: invocationUsage.value(),
+        },
       );
     if (result.timedOut)
       throw new RuntimeFailure(
         "timeout",
         "The invocation exceeded its time limit.",
+        {
+          category: "timeout",
+          transient: false,
+          retrySafety: "unknown",
+          usage: invocationUsage.value(),
+        },
       );
     if (result.outputLimited)
       throw new RuntimeFailure(
         "output_limit",
         "The invocation exceeded its output limit.",
+        {
+          category: "harness",
+          transient: false,
+          retrySafety: "unknown",
+          usage: invocationUsage.value(),
+        },
       );
     if (result.exitCode !== 0 || providerError) {
       const message = redact(
@@ -764,9 +941,32 @@ class LocalRuntime implements RuntimePort {
         /auth|credential|api.?key|unauthorized|forbidden|mcp.*(?:fail|unavailable)|failed.*mcp|rate.?limit|free tier|connection.*(?:refused|failed)|model.*(?:not found|unavailable|does not exist)/i.test(
           message,
         );
+      const admissionRejected = codexCapacityNotAdmitted({
+        harness: input.agent.harness,
+        role: input.role,
+        conversationId: input.conversationId,
+        transcript,
+        complete: transcriptComplete && result.exitCode !== null,
+      });
       throw new RuntimeFailure(
         infrastructure ? "infrastructure_failure" : "target_failure",
         message,
+        providerExecutionFailure({
+          status: providerStatus,
+          providerCode,
+          toolFree: input.role === "target" && input.agent.tools.length === 0,
+          toolActivity,
+          admissionRejected,
+          retryAfterMs: providerRetryAfterMs,
+          usage: invocationUsage.value(),
+        }),
+        {
+          transcript,
+          text,
+          admissionRejected,
+          providerCode: providerCode ?? null,
+          statusCode: providerStatus ?? null,
+        },
       );
     }
     return {
@@ -774,6 +974,7 @@ class LocalRuntime implements RuntimePort {
       conversationId,
       transcript,
       usage: invocationUsage.value(),
+      cleanup: "complete" as const,
       secrets,
     };
   }

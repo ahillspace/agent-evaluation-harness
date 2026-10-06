@@ -34,6 +34,7 @@ export function useResource<K extends CommandName>(
   const [data, setData] = useState<CommandResultMap[K] | null>(null);
   const [loadedKey, setLoadedKey] = useState("");
   const [error, setError] = useState<Error | null>(null);
+  const [failedKey, setFailedKey] = useState("");
   const [version, setVersion] = useState(0);
   const refresh = useCallback(() => setVersion((value) => value + 1), []);
   useEffect(() => {
@@ -53,8 +54,10 @@ export function useResource<K extends CommandName>(
           setError(null);
         }
       } catch (cause) {
-        if (!controller.signal.aborted)
+        if (!controller.signal.aborted) {
           setError(cause instanceof Error ? cause : new Error(String(cause)));
+          setFailedKey(`${operation}:${key}`);
+        }
       }
       if (!controller.signal.aborted && interval)
         timer = setTimeout(() => {
@@ -69,7 +72,7 @@ export function useResource<K extends CommandName>(
   }, [operation, key, version, interval, enabled]);
   return {
     data: enabled && loadedKey === `${operation}:${key}` ? data : null,
-    error,
+    error: enabled && failedKey === `${operation}:${key}` ? error : null,
     refresh,
   };
 }

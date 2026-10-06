@@ -4,6 +4,7 @@ import { record } from "./harness.js";
 type KnownUsage = {
   inputTokens: number;
   outputTokens: number;
+  cachedInputTokens?: number;
   costUsd?: number;
 };
 const tokens = (value: unknown): value is number =>
@@ -16,6 +17,7 @@ export function normalizeHarnessUsage(
   if (!record(data)) return undefined;
   let inputTokens: number;
   let outputTokens: number;
+  let cachedInputTokens: number | undefined;
   if (harness === "opencode") {
     const usage = data.tokens;
     if (
@@ -33,6 +35,7 @@ export function normalizeHarnessUsage(
     // https://github.com/anomalyco/opencode/blob/v1.18.32/packages/opencode/src/session/session.ts
     inputTokens = usage.input + usage.cache.read + usage.cache.write;
     outputTokens = usage.output + usage.reasoning;
+    cachedInputTokens = usage.cache.read;
     if (
       usage.total !== undefined &&
       (!tokens(usage.total) || usage.total !== inputTokens + outputTokens)
@@ -44,11 +47,32 @@ export function normalizeHarnessUsage(
     // Codex reports inclusive input/output counts; cache and reasoning are subsets.
     inputTokens = data.input_tokens;
     outputTokens = data.output_tokens;
+    if (
+      tokens(data.cached_input_tokens) &&
+      data.cached_input_tokens <= inputTokens
+    )
+      cachedInputTokens = data.cached_input_tokens;
+  } else if (harness === "claude") {
+    if (
+      !tokens(data.input_tokens) ||
+      !tokens(data.output_tokens) ||
+      !tokens(data.cache_read_input_tokens ?? 0) ||
+      !tokens(data.cache_creation_input_tokens ?? 0)
+    )
+      return undefined;
+    inputTokens =
+      data.input_tokens +
+      Number(data.cache_read_input_tokens ?? 0) +
+      Number(data.cache_creation_input_tokens ?? 0);
+    outputTokens = data.output_tokens;
+    if (tokens(data.cache_read_input_tokens))
+      cachedInputTokens = data.cache_read_input_tokens;
   } else return undefined;
   if (!tokens(inputTokens + outputTokens)) return undefined;
   return {
     inputTokens,
     outputTokens,
+    ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
     ...(typeof data.cost === "number" &&
     Number.isFinite(data.cost) &&
     data.cost >= 0
@@ -66,6 +90,8 @@ export class HarnessUsage {
   private inputTokens = 0;
   private outputTokens = 0;
   private costUsd = 0;
+  private cachedInputTokens = 0;
+  private unknownCache = false;
   constructor(private readonly harness: string) {}
 
   add(data: unknown): void {
@@ -93,6 +119,8 @@ export class HarnessUsage {
     this.observed = true;
     this.inputTokens += usage.inputTokens;
     this.outputTokens += usage.outputTokens;
+    if (usage.cachedInputTokens === undefined) this.unknownCache = true;
+    else this.cachedInputTokens += usage.cachedInputTokens;
     if (usage.costUsd === undefined) this.unknownCost = true;
     else this.costUsd += usage.costUsd;
   }
@@ -107,6 +135,9 @@ export class HarnessUsage {
     return {
       inputTokens: this.inputTokens,
       outputTokens: this.outputTokens,
+      ...(!this.unknownCache && tokens(this.cachedInputTokens)
+        ? { cachedInputTokens: this.cachedInputTokens }
+        : {}),
       ...(!this.unknownCost && Number.isFinite(this.costUsd)
         ? { costUsd: this.costUsd }
         : {}),

@@ -1,4 +1,83 @@
-import { useId, useState, useEffect, useRef, type ReactNode } from "react";
+import {
+  useId,
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  type ReactNode,
+} from "react";
+import { createPortal } from "react-dom";
+import { helpPosition } from "./help-position.js";
+
+export function tabIndexForKey(key: string, index: number, count: number) {
+  if (!count) return undefined;
+  if (key === "ArrowRight") return (index + 1) % count;
+  if (key === "ArrowLeft") return (index + count - 1) % count;
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  return undefined;
+}
+
+export function Tabs<T extends string>({
+  label,
+  value,
+  onChange,
+  items,
+  children,
+  panelClassName,
+}: {
+  label: string;
+  value: T;
+  onChange: (value: T) => void;
+  items: ReadonlyArray<{ value: T; label: ReactNode }>;
+  children: ReactNode;
+  panelClassName?: string;
+}) {
+  const id = useId();
+  const buttons = useRef<Array<HTMLButtonElement | null>>([]);
+  const selectedIndex = items.findIndex((item) => item.value === value);
+  return (
+    <>
+      <div className="tabs" role="tablist" aria-label={label}>
+        {items.map((item, index) => (
+          <button
+            type="button"
+            key={item.value}
+            ref={(element) => {
+              buttons.current[index] = element;
+            }}
+            id={`${id}-tab-${index}`}
+            role="tab"
+            aria-selected={item.value === value}
+            aria-controls={`${id}-panel`}
+            tabIndex={item.value === value ? 0 : -1}
+            onClick={() => onChange(item.value)}
+            onKeyDown={(event) => {
+              const next = tabIndexForKey(event.key, index, items.length);
+              const target = next === undefined ? undefined : items[next];
+              if (target && next !== undefined) {
+                event.preventDefault();
+                onChange(target.value);
+                buttons.current[next]?.focus();
+              }
+            }}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+      <div
+        id={`${id}-panel`}
+        role="tabpanel"
+        aria-labelledby={`${id}-tab-${selectedIndex}`}
+        tabIndex={0}
+        className={panelClassName}
+      >
+        {children}
+      </div>
+    </>
+  );
+}
 
 export function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const paths: Record<string, ReactNode> = {
@@ -71,21 +150,74 @@ export function Help({
   tooltip?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const [visible, setVisible] = useState(false);
+  const anchor = useRef<HTMLButtonElement>(null);
+  const popup = useRef<HTMLSpanElement>(null);
+  const [position, setPosition] = useState({ left: 12, top: 12 });
   const id = useId();
+  useLayoutEffect(() => {
+    if (!visible || open) return;
+    const place = () => {
+      if (!anchor.current || !popup.current) return;
+      setPosition(
+        helpPosition(
+          anchor.current.getBoundingClientRect(),
+          popup.current.getBoundingClientRect(),
+          { width: window.innerWidth, height: window.innerHeight },
+        ),
+      );
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [visible, open]);
+  const showing = visible && !open;
   return (
-    <span className="help">
+    <span
+      className="help"
+      onMouseEnter={() => setVisible(true)}
+      onMouseLeave={() => setVisible(false)}
+    >
       <button
+        ref={anchor}
         type="button"
         aria-haspopup="dialog"
         aria-describedby={id}
         aria-label={`About ${label}`}
-        onClick={() => setOpen(true)}
+        onFocus={() => setVisible(true)}
+        onBlur={() => setVisible(false)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setVisible(false);
+        }}
+        onClick={() => {
+          setVisible(false);
+          setOpen(true);
+        }}
       >
         ?
       </button>
-      <span id={id} className="help-popover" role="tooltip">
-        {tooltip ?? children}
-      </span>
+      {!showing && (
+        <span id={id} className="sr-only" role="tooltip">
+          {tooltip ?? children}
+        </span>
+      )}
+      {showing &&
+        createPortal(
+          <span
+            ref={popup}
+            id={id}
+            className="help-popover"
+            role="tooltip"
+            style={position}
+          >
+            {tooltip ?? children}
+          </span>,
+          document.body,
+        )}
       {open && (
         <Modal title={label} onClose={() => setOpen(false)}>
           <div className="help-body">{children}</div>
@@ -95,6 +227,26 @@ export function Help({
         </Modal>
       )}
     </span>
+  );
+}
+
+export function SectionIntro({
+  title,
+  description,
+  details,
+}: {
+  title: string;
+  description: string;
+  details?: string;
+}) {
+  return (
+    <div className="section-intro">
+      <p>{description}</p>
+      <Help label={title} tooltip={description}>
+        <p>{description}</p>
+        {details && <p>{details}</p>}
+      </Help>
+    </div>
   );
 }
 
@@ -245,12 +397,10 @@ export function ErrorNotice({ error }: { error: unknown }) {
 }
 
 export function PageHeading({
-  eyebrow,
   title: heading,
   description,
   children,
 }: {
-  eyebrow?: string;
   title: string;
   description?: string;
   children?: ReactNode;
@@ -258,7 +408,6 @@ export function PageHeading({
   return (
     <header className="page-heading">
       <div>
-        {eyebrow && <div className="eyebrow">{eyebrow}</div>}
         <h1>{heading}</h1>
         {description && <p>{description}</p>}
       </div>
@@ -287,7 +436,7 @@ export function Modal({
       ?.focus();
     return () => previous?.focus();
   }, []);
-  return (
+  const content = (
     <div
       className="modal-backdrop"
       onClick={(event) => {
@@ -335,6 +484,9 @@ export function Modal({
       </section>
     </div>
   );
+  return typeof document === "undefined"
+    ? content
+    : createPortal(content, document.body);
 }
 
 export function JsonView({ value }: { value: unknown }) {

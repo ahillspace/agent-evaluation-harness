@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { RunAccuracy, RunOutcomes } from "./run-outcomes.js";
+import { RunOutcomes } from "./run-outcomes.js";
 
 it("shows execution failures separately from answered questions", () => {
   const html = renderToStaticMarkup(
@@ -16,22 +16,4 @@ it("does not label pending or interrupted questions as execution failures", () =
   );
   expect(html).toContain("1 execution failure");
   expect(html).toContain("18 unanswered");
-});
-it("labels accuracy with its actual scored-answer denominator", () => {
-  const html = renderToStaticMarkup(
-    <RunAccuracy accuracy={13 / 17} graded={17} />,
-  );
-  expect(html).toContain("76.5%");
-  expect(html).toContain("17 scored answers");
-  expect(
-    renderToStaticMarkup(<RunAccuracy accuracy={null} graded={0} />),
-  ).toContain("Not graded");
-});
-it("shows excluded answers without counting them as failures", () => {
-  const html = renderToStaticMarkup(
-    <RunAccuracy accuracy={0.5} graded={2} unscorable={3} />,
-  );
-  expect(html).toContain("50.0%");
-  expect(html).toContain("3 unscorable answers excluded");
-  expect(html).toContain("2 scored answers");
 });

@@ -51,6 +51,31 @@ async function fixture() {
 }
 
 const cleanup: Array<() => Promise<void>> = [];
+it("freezes provider authentication and materializes only its selected secret", async () => {
+  const { service } = await fixture();
+  const saved = await service.save({
+    name: "Gateway",
+    provider: "anthropic",
+    settings: { authMode: "bearer", baseUrl: "https://gateway.example/v1" },
+    credentials: { apiKey: "fixture-token" },
+  });
+  const binding = await service.freeze({
+    connectionId: saved.id,
+    provider: "anthropic",
+    settings: {},
+    credentialFields: [],
+  });
+  expect(binding.settings).toEqual({
+    authMode: "bearer",
+    baseUrl: "https://gateway.example/v1",
+  });
+  const material = await service.materialize([binding], []);
+  expect(material.env).toEqual({
+    ANTHROPIC_AUTH_TOKEN: "fixture-token",
+    ANTHROPIC_BASE_URL: "https://gateway.example/v1",
+  });
+  expect(JSON.stringify(binding)).not.toContain("fixture-token");
+});
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });

@@ -1,30 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ConnectionEditor } from "./settings.js";
-import { JevAssessment } from "./jev-assessment.js";
+import { ConnectionEditor } from "./connection-editor.js";
+import { JevAssessment, jevErrorLabel } from "./jev-assessment.js";
 import { RoleProvider } from "./model-fields.js";
 import { JevProfileEditor } from "./jev-profile.js";
 import { JudgeSavedAnswers } from "./judge-saved.js";
 import { AgentSettings } from "./agent-settings.js";
 import { initialSetup } from "./drafts.js";
-import { restoreJevPreviews } from "./jev-previews.js";
 import type { JevAssessmentSummary } from "../contracts.js";
 
 describe("Jev presentation boundaries", () => {
-  it("recovers completed unpublished previews after reopening without replacing published local results", () => {
-    const preview = {
-      id: "p",
-      status: "completed",
-      kind: "rejudge",
-      published: false,
-    } as JevAssessmentSummary;
-    const original = { ...preview, id: "o", kind: "original" as const };
-    const pending = { ...preview, id: "pending", status: "pending" as const };
-    expect(restoreJevPreviews([], [preview, original, pending])).toEqual([
-      preview,
-    ]);
-    const published = { ...preview, published: true };
-    expect(restoreJevPreviews([published], [preview])).toEqual([published]);
+  it("distinguishes provider token capacity from an incorrect answer", () => {
+    expect(jevErrorLabel("token_limit_exceeded")).toBe(
+      "Not judged: token limit exceeded",
+    );
+    expect(jevErrorLabel("capacity_exceeded")).toBe(
+      "Not judged: request limit exceeded",
+    );
   });
   it("exposes versioned instructions, three check criteria, and question overrides", () => {
     const html = renderToStaticMarkup(
@@ -37,7 +29,7 @@ describe("Jev presentation boundaries", () => {
     expect(html).toContain('aria-label="Jev question overrides"');
     expect(html).toContain('aria-label="Jev confidence threshold"');
   });
-  it("discloses paid full-trace classification before preview", () => {
+  it("loads saved evidence before offering a new assessment", () => {
     const html = renderToStaticMarkup(
       <JudgeSavedAnswers
         runId="r"
@@ -53,10 +45,8 @@ describe("Jev presentation boundaries", () => {
         onSaved={() => {}}
       />,
     );
-    expect(html).toContain(
-      "full recorded traces to TypeSafe for paid classification",
-    );
-    expect(html).toContain("without another judge call");
+    expect(html).toContain("Score saved answers");
+    expect(html).toContain("Loading saved answers");
   });
   it("renders three independent classifications and probabilities without creating a pass verdict", () => {
     const value = {

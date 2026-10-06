@@ -1,7 +1,7 @@
 import type { WorkspaceView } from "../contracts.js";
 import type { SetupDraftProps } from "./setup-types.js";
 import { ToolCatalog, type ToolChoice } from "./tools.js";
-import { Field, Icon } from "./ui.js";
+import { Field } from "./ui.js";
 
 export function RunTools({
   draft,
@@ -16,11 +16,12 @@ export function RunTools({
   discoveringTools: boolean;
   discoverTools: () => Promise<void>;
 }) {
+  const connections = workspace.connections;
   return (
     <>
       <Field
         label="Tableau connection"
-        help="The connection binds the agent to your Tableau site. Its credentials stay in runtime storage."
+        help="Connect the agent to your Tableau site. Credentials stay private."
       >
         <select
           aria-label="Tableau connection"
@@ -28,7 +29,7 @@ export function RunTools({
           onChange={(event) => set("connectionId", event.target.value)}
         >
           <option value="">No Tableau connection</option>
-          {workspace.connections
+          {connections
             .filter((item) => item.provider === "tableau")
             .map((item) => (
               <option key={item.id} value={item.id}>
@@ -37,15 +38,16 @@ export function RunTools({
             ))}
         </select>
       </Field>
-      {!workspace.connections.some((item) => item.provider === "tableau") && (
-        <a className="inline-link" href="#/settings">
-          Set up a Tableau connection <Icon name="arrow" size={14} />
+      <p className="subtle">
+        <a href="#/settings/connections">
+          Manage Tableau connections in Settings
         </a>
-      )}
+        . Your setup draft stays saved when you leave this page.
+      </p>
       {draft.connectionId && (
         <Field
           label="Datasource or resource ID"
-          help="Scope analytics tools to this Tableau resource. Leave blank when your tools support choosing resources per question."
+          help="Suggest this Tableau resource to the agent. This guides its questions and does not restrict which resources the connection can access."
         >
           <input
             aria-label="Datasource or resource ID"
@@ -55,10 +57,6 @@ export function RunTools({
           />
         </Field>
       )}
-      <div className="notice">
-        <Icon name="tool" />
-        Give the agent only the capabilities required by your questions.
-      </div>
       <div className="row">
         <div>
           <h3>Available connection tools</h3>
@@ -78,7 +76,7 @@ export function RunTools({
       </div>
       {!draft.connectionId && (
         <p className="subtle">
-          Choose a connection under Questions & data to discover its tools.
+          Choose a connection above to discover its tools.
         </p>
       )}
       {discoveredTools.length > 0 && (
@@ -91,29 +89,27 @@ export function RunTools({
           onChange={(names) => set("tools", names.join("\n"))}
         />
       )}
-      <Field
-        label="Tool allowlist"
-        required
-        help="Enter tool names, one per line or separated by commas. Tools outside the allowlist stay unavailable. Empty means no tools."
-      >
-        <textarea
-          aria-label="Tool allowlist"
-          rows={9}
-          className="code-input"
-          value={draft.tools}
-          onChange={(event) => set("tools", event.target.value)}
-          placeholder="Enter the exact tool names from connection discovery"
-        />
-      </Field>
-      <p className="subtle">
-        Test your connection in <a href="#/settings">Settings</a> to inspect its
-        available tools. Tool names are preserved in exported agent JSON.
-      </p>
+      <details className="disclosure" open={!discoveredTools.length}>
+        <summary>Edit tool names manually</summary>
+        <Field
+          label="Tool allowlist"
+          help="Enter tool names, one per line or separated by commas. Tools outside the allowlist stay unavailable. Empty means no tools."
+        >
+          <textarea
+            aria-label="Tool allowlist"
+            rows={9}
+            className="code-input"
+            value={draft.tools}
+            onChange={(event) => set("tools", event.target.value)}
+            placeholder="Enter the exact tool names from connection discovery"
+          />
+        </Field>
+      </details>
       <details className="disclosure">
         <summary>Tool configuration details</summary>
         <p className="subtle">
           Connection settings and the selected resource are frozen at launch.
-          Review these under Questions & data.
+          Exported agent JSON preserves these settings.
         </p>
         <p className="subtle">
           Local harness tools also require explicit names in this allowlist.

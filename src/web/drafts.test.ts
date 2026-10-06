@@ -132,7 +132,10 @@ describe("form submission boundaries", () => {
     });
     expect(managedAgent(input.target).connections).toEqual([]);
     expect(input.judge.agent?.connections[0]?.connectionId).toBe("judge-key");
-    expect(input.judge.agent?.settings).toEqual({ temperature: 0.1 });
+    expect(input.judge.agent?.settings).toEqual({
+      temperature: 0.1,
+      authSource: "connection",
+    });
   });
   it("reuses all saved agent settings, connection bindings, and output limits", () => {
     const launch = launchSchema.parse({
@@ -171,9 +174,21 @@ describe("form submission boundaries", () => {
       },
     } as unknown as RunRecord;
     const restored = createLaunch(restoreSetup(run));
-    expect(managedAgent(restored.target)).toEqual(managedAgent(launch.target));
+    expect(managedAgent(restored.target)).toEqual({
+      ...managedAgent(launch.target),
+      settings: {
+        ...managedAgent(launch.target).settings,
+        authSource: "local",
+      },
+    });
     expect(restored.limits).toEqual(launch.limits);
-    expect(restored.judge).toEqual(launch.judge);
+    expect(restored.judge).toEqual({
+      ...launch.judge,
+      agent: {
+        ...launch.judge.agent,
+        settings: { ...launch.judge.agent?.settings, authSource: "local" },
+      },
+    });
   });
 });
 

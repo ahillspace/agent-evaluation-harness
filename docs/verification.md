@@ -1,5 +1,8 @@
 # Build verification
 
+This historical record covers earlier build checkpoints.
+See [observation redesign validation](observation-redesign-validation.md) for the latest recorded delivery checks.
+
 Verification took place on Windows on October 3, 2026, using Node.js 25.6.1 and the minimum supported Node.js 22.13.0.
 The checks below distinguish live provider behavior from isolated regression tests.
 The CI definition covers Node.js 22.13.0 and 24 on Windows, Linux, macOS 15 ARM64, and macOS 15 Intel, but remote CI has not been run.

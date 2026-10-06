@@ -18,7 +18,7 @@ import {
   isTerminal,
 } from "../domain/lifecycle.js";
 import { Database } from "../storage/database.js";
-import { accuracy, EvaluationService } from "./evaluations.js";
+import { EvaluationService } from "./evaluations.js";
 import { RunService } from "./runs.js";
 import { checkResearchBudget } from "./research-budget.js";
 import { validateResearchProposal } from "../domain/research-proposal.js";
@@ -69,6 +69,14 @@ export class ResearchService {
     }
   }
   async launch(input: ResearchInput): Promise<ResearchView> {
+    if (
+      (input.selectionMetric === "llm" && !input.baseline.judge.enabled) ||
+      (input.selectionMetric === "jev" && !input.baseline.jevJudge)
+    )
+      throw new AppError(
+        "invalid_input",
+        "The research selection metric requires its judge to be enabled for the baseline and every candidate.",
+      );
     if (input.baseline.target.kind !== "managed")
       throw new AppError(
         "invalid_input",
@@ -323,6 +331,82 @@ export class ResearchService {
     );
     return validateResearchProposal(session.configuration, baseline, proposal);
   }
+  private metrics(session: ResearchRecord, runId: string) {
+    const baseline = this.db.require("run", session.baselineRunId);
+    const settings = baseline.manifest.evaluator.settings;
+    const eligibleQuestions = new Set(
+      baseline.manifest.questions
+        .filter(
+          (question) =>
+            ({ ...settings, ...settings.questionOverrides[question.id] })
+              .referenceDisposition !== "needs_review",
+        )
+        .map((question) => question.id),
+    );
+    const eligible = eligibleQuestions.size * baseline.manifest.repetitions;
+    const results = this.db
+      .list("result", { runId })
+      .filter((result) => eligibleQuestions.has(result.questionId));
+    const assessments = this.evaluations.original(runId).assessments;
+    const metric = session.configuration.selectionMetric ?? "deterministic";
+    const jev =
+      metric === "jev"
+        ? this.db
+            .list("jevAssessment", { runId })
+            .filter((item) => item.kind === "original")
+        : [];
+    let correct = 0,
+      judged = 0;
+    for (const result of results) {
+      const assessment = assessments.find(
+        (item) => item.resultId === result.id,
+      );
+      let verdict: boolean | undefined;
+      if (metric === "deterministic") {
+        const status = assessment?.deterministic.status;
+        verdict =
+          status === "correct"
+            ? true
+            : status === "incorrect"
+              ? false
+              : undefined;
+      } else if (metric === "llm")
+        verdict = assessment?.judge?.verdict ?? undefined;
+      else {
+        const saved = jev.find(
+          (item) =>
+            item.resultId === result.id &&
+            item.attemptId === result.completedAttemptId,
+        );
+        const choice =
+          saved?.status === "completed" && !saved.reviewRequired
+            ? saved.checks?.answer.choice
+            : undefined;
+        verdict =
+          choice === "acceptable"
+            ? true
+            : choice === "incorrect"
+              ? false
+              : undefined;
+      }
+      if (verdict !== undefined) judged++;
+      if (verdict) correct++;
+    }
+    return {
+      runId,
+      metric,
+      correct,
+      judged,
+      eligible,
+      accuracy: judged ? correct / judged : null,
+      eligibleOutcome: eligible ? correct / eligible : null,
+      judgedAccuracy: judged ? correct / judged : null,
+      coverage: eligible ? judged / eligible : 0,
+      completed: results.filter((result) => result.status === "completed")
+        .length,
+      failed: results.filter((result) => result.status === "failed").length,
+    };
+  }
   private async drive(sessionId: string): Promise<void> {
     let session = this.db.require("research", sessionId);
     this.db.update("research", {
@@ -403,19 +487,23 @@ export class ResearchService {
           message:
             "Resuming the acknowledged provider conversation after interruption.",
         });
-      const summary = {
-        runId: current.id,
-        accuracy: accuracy(this.evaluations.original(current.id).assessments),
-        completed: this.runs.view(current.id).progress.completed,
-      };
+      const summary = this.metrics(session, current.id);
       const message = initial
         ? JSON.stringify({
             instructions:
-              "Optimize the agent configuration. Retrieve run evidence through the provided read interface. Request gold answers only explicitly when necessary. Return a decision to keep or discard the evaluated configuration, an optional complete proposed agent configuration, and a reason. Use stop to finish. Do not change evaluation rules or exceed mutation limits.",
+              "Optimize the agent configuration. Retrieve run evidence through the provided read interface. Request gold answers only explicitly when necessary. Return disposition keep or discard for the evaluated configuration independently of control continue or stop. Include a complete new proposal when continuing. Accuracy uses completed correctness judgments. Selection uses eligibleOutcome with the fixed eligible baseline denominator; missing executions and unavailable judgments do not shrink it. A candidate cannot replace the best run with worse eligibleOutcome or reduced coverage. Do not change evaluation rules or exceed mutation limits.",
             objective: session.configuration.objective,
             objectiveMetrics: session.configuration.objectiveMetrics,
             objectiveMode: session.configuration.objectiveMode,
             guidance: session.configuration.guidance,
+            stopping: {
+              allowed: session.configuration.allowResearcherStop,
+              guidance: session.configuration.stopGuidance ?? "",
+              rule:
+                session.configuration.allowResearcherStop === false
+                  ? "Do not stop solely because improvement seems unlikely. Propose a distinct candidate until a hard budget is reached. A technical blocker permits control stop with stopCategory blocked and a concrete reason."
+                  : "Use control stop to finish, and still give the evaluated candidate a disposition.",
+            },
             startingAgent: managedAgent(savedTarget(current.manifest)),
             allowedChanges: session.configuration.allowedChanges,
             searchSpace: session.configuration.searchSpace,
@@ -431,8 +519,14 @@ export class ResearchService {
           })
         : JSON.stringify({
             completedRun: summary,
+            bestRun: this.metrics(session, session.bestRunId),
+            remainingCandidates: Math.max(
+              0,
+              session.configuration.maxCandidates - (session.runIds.length - 1),
+            ),
+            allowResearcherStop: session.configuration.allowResearcherStop,
             decisionNeeded:
-              "Keep or discard this configuration, then propose the next configuration or stop.",
+              "Return disposition keep or discard, independently of control continue or stop. To continue, propose a distinct unevaluated configuration. If early stopping is disabled, stop only for a concrete technical blocker or an exhausted hard budget.",
           });
       this.db.update("research", {
         ...session,
@@ -523,14 +617,39 @@ export class ResearchService {
       const proposed = output.proposal
         ? this.validateProposal(latest, output.proposal)
         : undefined;
+      const disposition =
+        output.disposition ??
+        (output.decision === "keep" || output.decision === "discard"
+          ? output.decision
+          : undefined);
+      const control =
+        output.control ??
+        (output.decision === "stop" || !proposed ? "stop" : "continue");
+      const best = this.metrics(latest, latest.bestRunId);
+      const keepEligible =
+        summary.eligibleOutcome !== null &&
+        (best.eligibleOutcome === null ||
+          summary.eligibleOutcome >= best.eligibleOutcome) &&
+        summary.coverage >= best.coverage;
+      const repeated =
+        proposed &&
+        latest.runIds.some(
+          (runId) =>
+            digest(proposed) ===
+            digest(
+              managedAgent(savedTarget(this.db.require("run", runId).manifest)),
+            ),
+        );
       session = {
         ...latest,
         conversationId: output.conversationId,
         phase: "evaluating",
         pendingTurn: undefined,
         turns: [...latest.turns, { input: message, output, createdAt: now() }],
-        ...(output.decision === "keep" ? { bestRunId: current.id } : {}),
-        pendingProposal: proposed,
+        ...(disposition === "keep" && keepEligible
+          ? { bestRunId: current.id }
+          : {}),
+        pendingProposal: repeated || control === "stop" ? undefined : proposed,
         updatedAt: now(),
       };
       this.db.update("research", session);
@@ -540,23 +659,35 @@ export class ResearchService {
         message: output.reason ?? output.message,
         data: {
           decision: output.decision ?? null,
+          disposition: disposition ?? null,
+          control,
+          acceptedKeep: disposition === "keep" && keepEligible,
+          selection: summary,
           runId: current.id,
           hasProposal: Boolean(proposed),
         },
       });
       if (session.intent !== "run") return this.settle(sessionId);
-      if (output.decision === "stop" || !proposed)
+      if (
+        control === "stop" &&
+        (session.configuration.allowResearcherStop !== false ||
+          (output.stopCategory === "blocked" && Boolean(output.reason?.trim())))
+      )
         return this.stop(
           session,
           output.reason ?? "The researcher finished without another candidate.",
         );
-      if (
-        digest(proposed) === digest(managedAgent(savedTarget(current.manifest)))
-      )
-        return this.stop(
-          session,
-          "The researcher proposed the current configuration without changes.",
-        );
+      if (session.runIds.length - 1 >= session.configuration.maxCandidates)
+        return this.stop(session, "Candidate budget reached.");
+      if (!session.pendingProposal) {
+        this.db.append({
+          sessionId,
+          type: "research.continuation.required",
+          message: repeated
+            ? "The proposed configuration has already been evaluated. Requesting a distinct candidate in the same conversation."
+            : "Early stopping is disabled or no candidate was provided. Requesting the next candidate in the same conversation.",
+        });
+      }
     }
     this.settle(sessionId);
   }

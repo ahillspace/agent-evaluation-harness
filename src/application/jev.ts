@@ -2,6 +2,8 @@ import {
   jsonSchema,
   jevProfileSettingsSchema,
   type CommandInput,
+  type EvaluatorRevision,
+  type BankRevision,
   type FrozenJevJudge,
   type JudgeEvidence,
   type JevAssessmentRecord,
@@ -130,7 +132,11 @@ export class JevService {
       ),
     };
   }
-  private evidence(runId: string, attemptId: string): JudgeEvidence {
+  private evidence(
+    runId: string,
+    attemptId: string,
+    basis?: { evaluator: EvaluatorRevision; referenceBank?: BankRevision },
+  ): JudgeEvidence {
     const run = this.db.require("run", runId);
     const attempt = this.db.require("attempt", attemptId);
     if (
@@ -149,9 +155,9 @@ export class JevService {
         "The sealed attempt evidence hash does not match.",
       );
     const result = this.db.require("result", attempt.resultId);
-    const question = run.manifest.questions.find(
-      (item) => item.id === result.questionId,
-    );
+    const question = (
+      basis?.referenceBank?.questions ?? run.manifest.questions
+    ).find((item) => item.id === result.questionId);
     if (!question)
       throw new AppError(
         "evidence_unavailable",
@@ -196,7 +202,9 @@ export class JevService {
       }
       trace = { format: "recorded_events", entries };
     }
-    const { questionOverrides, ...base } = run.manifest.evaluator.settings;
+    const { questionOverrides, ...base } = (
+      basis?.evaluator ?? run.manifest.evaluator
+    ).settings;
     const effective = { ...base, ...questionOverrides[question.id] };
     const { code: _code, ...referenceCriteria } = effective;
     return {
@@ -276,8 +284,9 @@ export class JevService {
     signal: AbortSignal,
     admissionError?: { code: string; message: string },
     idempotency?: { key: string; hash: string },
+    basis?: { evaluator: EvaluatorRevision; referenceBank?: BankRevision },
   ): Promise<JevAssessmentRecord> {
-    const evidence = this.evidence(runId, attemptId);
+    const evidence = this.evidence(runId, attemptId, basis);
     const override =
       configuration.profile.settings.questionOverrides[evidence.question.id];
     const criteria = jevProfileSettingsSchema.parse({
@@ -327,8 +336,8 @@ export class JevService {
         evidenceHash: digest(evidence),
         attemptEvidenceHash: this.db.require("attempt", attemptId)
           .evidenceHash!,
-        bankRevisionId: run.manifest.bank.id,
-        evaluatorRevisionId: run.manifest.evaluator.id,
+        bankRevisionId: basis?.referenceBank?.id ?? run.manifest.bank.id,
+        evaluatorRevisionId: basis?.evaluator.id ?? run.manifest.evaluator.id,
         evidence,
         criteria,
       });

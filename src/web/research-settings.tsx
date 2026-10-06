@@ -1,3 +1,7 @@
+import { researchSchema } from "../contracts.js";
+import { JsonEditor } from "./json-editor.js";
+import { modelSettingsGuide, researchGuide } from "./json-guides.js";
+import { validateModelSettings } from "../contracts/model-settings.js";
 import type { Dispatch, SetStateAction } from "react";
 import type { RuntimeCatalog, WorkspaceView } from "../contracts.js";
 import type { SetupDraft } from "./drafts.js";
@@ -43,23 +47,21 @@ export function ResearchSettings({
             onHarness={(value) => set("researcherHarness", value)}
             onModel={(value) => set("researcherModel", value)}
           />
-          <Field label="Research objective">
-            <textarea
-              aria-label="Research objective"
-              rows={3}
-              value={draft.objective}
-              onChange={(event) => set("objective", event.target.value)}
-            />
-          </Field>
-          <Field label="Researcher instructions">
+          <Field
+            label="Researcher instructions"
+            help="Describe the goal, constraints, and useful context in one place. The researcher evaluates each candidate against the same frozen questions and selection metric."
+          >
             <textarea
               aria-label="Researcher instructions"
-              rows={4}
-              value={draft.researcherPrompt}
-              onChange={(event) => set("researcherPrompt", event.target.value)}
+              rows={6}
+              value={draft.researchInstructions}
+              onChange={(event) =>
+                set("researchInstructions", event.target.value)
+              }
             />
           </Field>
           <RoleProvider
+            harness={draft.researcherHarness}
             label="Researcher authentication"
             connections={connections}
             value={draft.researcherProviderConnectionId}
@@ -71,17 +73,68 @@ export function ResearchSettings({
               }))
             }
           />
-          <Field label="Guidance">
-            <textarea
-              aria-label="Research guidance"
-              rows={3}
-              value={draft.guidance}
-              onChange={(event) => set("guidance", event.target.value)}
-              placeholder="Constraints and useful context for the researcher"
-            />
+          <Field
+            label="Selection metric"
+            help="The selected assessment source stays fixed throughout research. Accuracy uses every eligible question, including failed executions; coverage stays visible."
+          >
+            <select
+              aria-label="Selection metric"
+              value={draft.selectionMetric}
+              onChange={(event) =>
+                set(
+                  "selectionMetric",
+                  event.target.value as SetupDraft["selectionMetric"],
+                )
+              }
+            >
+              <option value="deterministic">Deterministic accuracy</option>
+              <option value="llm" disabled={!draft.judge}>
+                LLM judgment accuracy
+                {!draft.judge ? " - enable the LLM judge first" : ""}
+              </option>
+              <option value="jev" disabled={!draft.jevEnabled}>
+                Jev judgment accuracy
+                {!draft.jevEnabled ? " - enable Jev first" : ""}
+              </option>
+            </select>
           </Field>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={draft.allowResearcherStop}
+              onChange={(event) =>
+                set("allowResearcherStop", event.target.checked)
+              }
+            />
+            <span>
+              <strong>Allow researcher to stop early</strong>
+              <small>
+                When enabled, the researcher can finish before the candidate
+                budget. When disabled, lack of improvement alone cannot end
+                research. Hard limits, cancellation, and technical blockers
+                still stop work.
+              </small>
+            </span>
+          </label>
+          {draft.allowResearcherStop && (
+            <Field
+              label="Early stopping guidance"
+              help="Optional instructions for when the researcher should finish. This guidance is sent to the researcher and does not change hard limits."
+            >
+              <textarea
+                aria-label="Early stopping guidance"
+                rows={2}
+                value={draft.stopGuidance}
+                onChange={(event) => set("stopGuidance", event.target.value)}
+                placeholder="For example: stop after two distinct candidates show no improvement."
+              />
+            </Field>
+          )}
           <div className="form-grid">
-            <Field label="Maximum candidates">
+            <Field
+              label="Maximum candidates"
+              help="Maximum proposed configurations after the baseline. Each candidate runs the full selected question set and repetition count."
+            >
               <input
                 aria-label="Maximum candidates"
                 type="number"
@@ -93,7 +146,10 @@ export function ResearchSettings({
                 }
               />
             </Field>
-            <Field label="Maximum duration (minutes)">
+            <Field
+              label="Maximum duration (minutes)"
+              help="Time budget for the research session, including the baseline and candidate evaluations."
+            >
               <input
                 aria-label="Maximum research duration"
                 type="number"
@@ -174,28 +230,36 @@ export function ResearchSettings({
                 </Field>
               </div>
               <Field label="Researcher model settings">
-                <textarea
-                  aria-label="Researcher model settings"
-                  className="code-input"
-                  rows={5}
+                <JsonEditor
+                  label="Researcher model settings"
                   value={draft.researcherSettings}
-                  onChange={(event) =>
-                    set("researcherSettings", event.target.value)
-                  }
+                  onChange={(value) => set("researcherSettings", value)}
+                  guide={modelSettingsGuide(draft.researcherHarness)}
+                  validate={(value) => {
+                    validateModelSettings(draft.researcherHarness, value);
+                  }}
                 />
               </Field>
               <Field
                 label="Mutation space and objective configuration"
                 help="allowedChanges lists systemPrompt, settings, tools, or model. searchSpace can bound models, tools, setting values, and maxSystemPromptLength. objectiveMetrics uses accuracy, tokens, or duration with direction maximize/minimize and a weight; objectiveMode is lexicographic or weighted."
               >
-                <textarea
-                  aria-label="Research mutation and objective settings"
-                  className="code-input"
-                  rows={13}
+                <JsonEditor
+                  label="Research mutation and objective settings"
                   value={draft.researchSettings}
-                  onChange={(event) =>
-                    set("researchSettings", event.target.value)
-                  }
+                  onChange={(value) => set("researchSettings", value)}
+                  guide={researchGuide}
+                  validate={(value) => {
+                    researchSchema
+                      .pick({
+                        allowedChanges: true,
+                        searchSpace: true,
+                        objectiveMode: true,
+                        objectiveMetrics: true,
+                      })
+                      .strict()
+                      .parse(value);
+                  }}
                 />
               </Field>
             </div>

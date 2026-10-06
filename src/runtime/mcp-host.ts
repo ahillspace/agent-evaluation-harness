@@ -174,6 +174,14 @@ if (mode === "connection") {
               jsonSchema.parse(args.answer),
             );
             if (!validation.ok) {
+              await writeFile(
+                `${process.argv[3]!}.rejection.json`,
+                JSON.stringify({
+                  error: validation.error,
+                  answer: args.answer,
+                }),
+                "utf8",
+              );
               reply(request.id, {
                 isError: true,
                 content: [

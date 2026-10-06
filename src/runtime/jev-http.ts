@@ -190,8 +190,29 @@ export async function jevHttp(input: {
             continue;
           }
           if (!response.ok) {
-            const code =
-              status === 422
+            const body =
+              lastResponse &&
+              typeof lastResponse === "object" &&
+              !Array.isArray(lastResponse)
+                ? lastResponse
+                : {};
+            const structuredCodes = [body.error, body.detail, body].flatMap(
+              (value) =>
+                value && typeof value === "object" && !Array.isArray(value)
+                  ? [value.code, value.error_type, value.type]
+                  : [],
+            );
+            const tokenLimit =
+              [400, 413, 422].includes(status) &&
+              structuredCodes.some(
+                (value) =>
+                  value === "max_tokens_exceeded" ||
+                  value === "context_length_exceeded" ||
+                  value === "token_limit_exceeded",
+              );
+            const code = tokenLimit
+              ? "token_limit_exceeded"
+              : status === 422
                 ? /context|token|length|capacity|too (?:long|large)/i.test(text)
                   ? "capacity_exceeded"
                   : "invalid_request"
@@ -202,7 +223,9 @@ export async function jevHttp(input: {
                     : "provider_failure";
             throw new JevFailure(
               code,
-              `TypeSafe rejected the request (HTTP ${status}).${status === 422 ? " Check the preserved response for context capacity or request validation details; evidence was not truncated." : ""}`,
+              tokenLimit
+                ? `TypeSafe did not judge this answer because the complete request exceeded its token limit (HTTP ${status}). The full request and response remain available; evidence was not truncated.`
+                : `TypeSafe rejected the request (HTTP ${status}).${status === 422 ? " Check the preserved response for context capacity or request validation details; evidence was not truncated." : ""}`,
             );
           }
           if (!validJson)

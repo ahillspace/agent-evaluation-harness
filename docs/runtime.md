@@ -15,10 +15,11 @@ Windows uses Data Protection API for the current account; macOS uses the login K
 Codex uses its installed CLI, strict configuration validation, and a replacement instructions file containing the configured system prompt.
 Its target task includes the typed answer submission protocol required by code mode.
 OpenCode uses an isolated configuration with external plugins disabled.
-Both harnesses deny default host tools and expose only the selected MCP tools and `submit_answer`.
+Claude uses its installed CLI with the same selected-tool and typed-submission contracts.
+Managed harnesses deny default host tools and expose only the selected MCP tools and `submit_answer`.
 The submission server accepts one JSON answer and rejects overwrites.
 
-`maxTurns` limits completed tool calls in both adapters.
+`maxTurns` limits completed tool calls in managed adapters.
 OpenCode also applies this value to its native agent step limit.
 Timeouts cover credential and process admission waits, provider execution, and interruption requests.
 Cleanup completes before an invocation settles, even when that takes longer than the requested timeout.
@@ -74,7 +75,7 @@ Unlock the login Keychain and grant access when required before retrying a headl
 Codex discovery uses the installed app server's account and model catalog methods.
 OpenCode discovery uses its installed model and authentication commands.
 A catalog entry does not guarantee that the current account can run that model.
-Model credential connections support OpenAI, Anthropic, and OpenRouter API keys.
+Model credential connections support OpenAI, Anthropic, OpenRouter, and Bedrock API keys.
 Testing these connections authenticates a model catalog request and returns the provider's model IDs.
 Testing Tableau authenticates to the selected site, signs out of the probe session, and discovers the installed MCP tool schemas.
 No model inference is required for discovery.
@@ -105,3 +106,19 @@ The engine must not acquire provider-specific query or authentication logic.
 A new platform supplies process ownership and secret storage implementations through runtime composition and passes the shared lifecycle contracts.
 Its documented guarantees must distinguish managed cleanup from hard containment and include native crash, recovery, and credential tests.
 See [macOS support](macos-support.md) for the portability specification, implementation plan, and acceptance evidence.
+
+## Token accounting and presentation
+
+Provider normalization preserves inclusive input and generated output for immutable evidence and spending limits.
+Codex already includes cached input in its input total.
+Claude and OpenCode require adding their disjoint cache components to obtain inclusive input.
+The recorded cached count means reused input, not cache writes.
+The app projects **Input** as uncached input, **Output** as generated output, and **Cache** as reused input.
+Cache writes remain newly processed input.
+The runtime normalizes historical usage events through a pure method that starts no provider process.
+The app accepts recovered breakdowns only when inclusive input and output match sealed usage exactly.
+Bounded usage-event queries avoid reading full transcripts during observation.
+Unknown or inconsistent breakdowns remain unreported.
+
+Providers or historical records without a recorded cache breakdown keep uncached input and cache unreported.
+This includes current Bedrock and Jev usage records when their normalized usage contains only inclusive input and output.

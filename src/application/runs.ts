@@ -1,3 +1,9 @@
+import { setTimeout as wait } from "node:timers/promises";
+import {
+  automaticRetryDelay,
+  classifyExecutionFailure,
+} from "../domain/execution-retry.js";
+import { publicEvaluationGuidance } from "../contracts/evaluation-guidance.js";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -31,6 +37,8 @@ import { EvaluationService } from "./evaluations.js";
 import { checkResearchBudget } from "./research-budget.js";
 import { JevService } from "./jev.js";
 import { savedTarget, managedAgent } from "../contracts/targets.js";
+import { UsageProjection } from "./usage-projection.js";
+import { RunRetries } from "./run-retries.js";
 import { TargetInvocations } from "./target-invocations.js";
 import { validateTargetEvidence } from "./evidence-requirements.js";
 
@@ -41,15 +49,24 @@ export class RunService {
     Map<string, AbortController>
   >();
   private closing = false;
+  private readonly admissionLimits = new Map<string, number>();
+  private readonly executingCounts = new Map<string, number>();
+  private readonly admissionWaiters = new Map<string, Set<() => void>>();
   private readonly invocations: TargetInvocations;
+  private readonly retries: RunRetries;
   constructor(
     private readonly db: Database,
     private readonly runtime: RuntimePort,
     private readonly evaluation: EvaluationService,
     private readonly directory: string,
     private readonly jev: JevService,
+    private readonly usage = new UsageProjection(
+      db,
+      runtime.normalizeRecordedUsage?.bind(runtime),
+    ),
   ) {
     this.invocations = new TargetInvocations(directory, runtime);
+    this.retries = new RunRetries(db, runtime, (runId) => this.jobs.has(runId));
   }
   async recover(): Promise<void> {
     const recovered = await this.invocations.recover();
@@ -197,7 +214,21 @@ export class RunService {
         schemaVersion: 2 as const,
         target: resolvedTarget.target,
         targetCapabilities: resolvedTarget.capabilities,
-        questions,
+        questions: questions.map((question) => ({
+          ...question,
+          evaluationGuidance: [
+            question.evaluationGuidance,
+            publicEvaluationGuidance(
+              {
+                ...evaluator.settings,
+                ...evaluator.settings.questionOverrides[question.id],
+              },
+              question.expected,
+            ),
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        })),
         repetitions: input.repetitions,
         judge,
         ...(jevJudge ? { jevJudge } : {}),
@@ -237,6 +268,15 @@ export class RunService {
     this.schedule(run.id);
     return this.view(run.id);
   }
+  async retryFailed(
+    input: CommandInput<"runs.retry-failed">,
+  ): Promise<RunView> {
+    if (this.closing)
+      throw new AppError("unavailable", "The engine is shutting down.");
+    const retry = await this.retries.create(input);
+    if (retry.status === "queued") this.schedule(retry.id);
+    return this.view(retry.id);
+  }
   view(runId: string, cursor = 0): RunView {
     const run = this.db.require("run", runId);
     const results = this.db.list("result", { runId });
@@ -249,10 +289,12 @@ export class RunService {
       ? this.db.get("research", run.researchSessionId)
       : undefined;
     const actions = allowedActions(parent?.status ?? run.status);
+    const retryEligibility = this.retries.eligibility(run, results);
     return {
       run,
+      retryEligibility,
       results,
-      attempts: this.db.attemptSummaries(runId),
+      attempts: this.usage.attempts(runId),
       scoreSets,
       jevAssessments: this.db.jevSummaries(runId),
       reviews: this.db.list("review", { runId }),
@@ -366,6 +408,9 @@ export class RunService {
       .finally(() => {
         this.jobs.delete(runId);
         this.controllers.delete(runId);
+        this.admissionLimits.delete(runId);
+        this.executingCounts.delete(runId);
+        this.admissionWaiters.delete(runId);
       });
     this.jobs.set(runId, job);
   }
@@ -380,8 +425,20 @@ export class RunService {
       message: "Evaluation started.",
     });
     this.controllers.set(runId, new Map());
-    const worker = async () => {
+    this.admissionLimits.set(runId, run.manifest.limits.concurrency);
+    const workers = new Set<Promise<void>>();
+    const failures: unknown[] = [];
+    const startWorker = (index: number) => {
+      const task = worker(index)
+        .catch((error: unknown) => {
+          failures.push(error);
+        })
+        .finally(() => workers.delete(task));
+      workers.add(task);
+    };
+    const worker = async (workerIndex: number) => {
       while (!this.closing && this.db.require("run", runId).intent === "run") {
+        if (workerIndex >= (this.admissionLimits.get(runId) ?? 1)) break;
         const result = this.db.list("result", {
           runId,
           status: ["pending", "interrupted"],
@@ -408,17 +465,13 @@ export class RunService {
             break;
           }
         }
-        await this.executeResult(run, result);
+        await this.executeResult(run, result, () => startWorker(0));
       }
     };
-    const outcomes = await Promise.allSettled(
-      Array.from({ length: run.manifest.limits.concurrency }, worker),
-    );
-    const failure = outcomes.find(
-      (outcome): outcome is PromiseRejectedResult =>
-        outcome.status === "rejected",
-    );
-    if (failure) throw failure.reason;
+    for (let index = 0; index < run.manifest.limits.concurrency; index++)
+      startWorker(index);
+    while (workers.size) await Promise.all([...workers]);
+    if (failures.length) throw failures[0];
     this.settleIntent(runId);
   }
   private settleIntent(runId: string): void {
@@ -445,7 +498,181 @@ export class RunService {
       this.evaluation.sealOriginal(runId);
     this.db.append({ runId, type: `run.${status}`, message: `Run ${status}.` });
   }
+  private async acquireExecution(
+    runId: string,
+    resultId: string,
+  ): Promise<boolean> {
+    const controller = new AbortController(),
+      key = `admission-${resultId}`;
+    this.controllers.get(runId)!.set(key, controller);
+    try {
+      while (
+        (this.executingCounts.get(runId) ?? 0) >=
+        (this.admissionLimits.get(runId) ?? 1)
+      ) {
+        if (
+          controller.signal.aborted ||
+          this.closing ||
+          this.db.require("run", runId).intent !== "run"
+        )
+          return false;
+        await new Promise<void>((resolve) => {
+          const waiters =
+            this.admissionWaiters.get(runId) ?? new Set<() => void>();
+          const wake = () => {
+            waiters.delete(wake);
+            controller.signal.removeEventListener("abort", wake);
+            resolve();
+          };
+          waiters.add(wake);
+          this.admissionWaiters.set(runId, waiters);
+          controller.signal.addEventListener("abort", wake, { once: true });
+        });
+      }
+      if (
+        controller.signal.aborted ||
+        this.closing ||
+        this.db.require("run", runId).intent !== "run"
+      )
+        return false;
+      this.executingCounts.set(
+        runId,
+        (this.executingCounts.get(runId) ?? 0) + 1,
+      );
+      return true;
+    } finally {
+      this.controllers.get(runId)?.delete(key);
+    }
+  }
+  private releaseExecution(runId: string): void {
+    this.executingCounts.set(
+      runId,
+      Math.max(0, (this.executingCounts.get(runId) ?? 1) - 1),
+    );
+    for (const wake of this.admissionWaiters.get(runId) ?? []) wake();
+  }
   private async executeResult(
+    run: RunRecord,
+    result: ResultRecord,
+    onRetryWaiting: () => void,
+  ): Promise<void> {
+    for (;;) {
+      this.db.update("result", {
+        ...this.db.require("result", result.id),
+        status: "running",
+      });
+      if (!(await this.acquireExecution(run.id, result.id))) {
+        this.db.update("result", {
+          ...this.db.require("result", result.id),
+          status: "interrupted",
+        });
+        return;
+      }
+      try {
+        const sessionAtAdmission = run.researchSessionId
+          ? this.db.require("research", run.researchSessionId)
+          : undefined;
+        const budgetAtAdmission = sessionAtAdmission
+          ? checkResearchBudget(this.db, sessionAtAdmission, 1, run.id)
+          : undefined;
+        if (
+          this.closing ||
+          this.db.require("run", run.id).intent !== "run" ||
+          budgetAtAdmission
+        ) {
+          this.db.update("result", {
+            ...this.db.require("result", result.id),
+            status: "interrupted",
+          });
+          if (budgetAtAdmission) this.control(run.id, "halt");
+          return;
+        }
+        await this.executeAttempt(run, result);
+      } finally {
+        this.releaseExecution(run.id);
+      }
+      const latest = this.db.require("result", result.id);
+      const attempt = this.db.require("attempt", latest.attemptIds.at(-1)!);
+      const classification = attempt.failure?.classification;
+      if (latest.status !== "failed" || !classification) return;
+      const delay = automaticRetryDelay(
+        classification,
+        attempt.number,
+        savedTarget(run.manifest).kind,
+      );
+      if (
+        delay === undefined ||
+        this.closing ||
+        this.db.require("run", run.id).intent !== "run"
+      )
+        return;
+      const session = run.researchSessionId
+        ? this.db.require("research", run.researchSessionId)
+        : undefined;
+      const exhausted = session
+        ? checkResearchBudget(this.db, session, 1, run.id)
+        : undefined;
+      if (exhausted) {
+        this.control(run.id, "halt");
+        return;
+      }
+      this.admissionLimits.set(
+        run.id,
+        Math.max(1, Math.floor((this.admissionLimits.get(run.id) ?? 1) / 2)),
+      );
+      this.db.update("result", { ...latest, status: "running" });
+      this.db.append({
+        runId: run.id,
+        attemptId: attempt.id,
+        type: "question.retry.waiting",
+        message:
+          "Provider capacity is temporarily unavailable. Waiting before a safe retry; concurrency has been reduced.",
+        data: {
+          delayMs: delay,
+          nextAttempt: attempt.number + 1,
+          concurrency: this.admissionLimits.get(run.id)!,
+        },
+      });
+      const controller = new AbortController();
+      this.controllers.get(run.id)!.set(attempt.id, controller);
+      try {
+        // Backoff releases provider capacity and the question worker independently.
+        onRetryWaiting();
+        await wait(delay, undefined, { signal: controller.signal });
+      } catch (error) {
+        if (!controller.signal.aborted) throw error;
+      } finally {
+        this.controllers.get(run.id)?.delete(attempt.id);
+      }
+      if (
+        controller.signal.aborted ||
+        this.closing ||
+        this.db.require("run", run.id).intent !== "run"
+      ) {
+        this.db.update("result", {
+          ...this.db.require("result", result.id),
+          status: "interrupted",
+        });
+        return;
+      }
+      const currentSession = run.researchSessionId
+        ? this.db.require("research", run.researchSessionId)
+        : undefined;
+      if (
+        currentSession &&
+        checkResearchBudget(this.db, currentSession, 1, run.id)
+      ) {
+        this.db.update("result", {
+          ...this.db.require("result", result.id),
+          status: "interrupted",
+        });
+        this.control(run.id, "halt");
+        return;
+      }
+      result = this.db.require("result", result.id);
+    }
+  }
+  private async executeAttempt(
     run: RunRecord,
     result: ResultRecord,
   ): Promise<void> {
@@ -492,6 +719,7 @@ export class RunService {
     );
     let completed = false;
     let acceptingEvents = true;
+    let toolActivity = false;
     try {
       await mkdir(artifactDirectory, { recursive: true });
       const parent = run.researchSessionId
@@ -518,6 +746,9 @@ export class RunService {
           text: question.text,
           tags: question.tags,
           ...(question.context ? { context: question.context } : {}),
+          ...(question.evaluationGuidance
+            ? { evaluationGuidance: question.evaluationGuidance }
+            : {}),
           ...(question.answerFormat
             ? { answerFormat: question.answerFormat }
             : {}),
@@ -535,6 +766,7 @@ export class RunService {
           });
         },
         onEvent: (event) => {
+          if (event.type.startsWith("tool.")) toolActivity = true;
           if (
             acceptingEvents &&
             this.db.require("result", result.id).attemptIds.at(-1) ===
@@ -613,26 +845,37 @@ export class RunService {
           message: "Independent judge started.",
         });
         try {
+          const { expected, ...publicFields } = question;
+          const judgeQuestion = publicQuestionSchema.parse(publicFields);
+          assessment.judgeRequest = jsonSchema.parse({
+            ...(output.evidenceScope
+              ? { observationLevel: output.evidenceScope }
+              : {}),
+            configuration: run.manifest.judge,
+            question: judgeQuestion,
+            expected,
+            answer: output.answer,
+          });
+          this.db.append({
+            runId: run.id,
+            attemptId: attempt.id,
+            type: "judge.request",
+            message: "Saved the original judge request before admission.",
+            data: assessment.judgeRequest,
+          });
           assessment.judge = judgeVerdictSchema.parse(
             await this.runtime.judge({
               observationLevel: output.evidenceScope,
               configuration: run.manifest.judge,
-              question: {
-                id: question.id,
-                text: question.text,
-                tags: question.tags,
-                ...(question.context ? { context: question.context } : {}),
-                ...(question.answerFormat
-                  ? { answerFormat: question.answerFormat }
-                  : {}),
-              },
-              expected: question.expected,
+              question: judgeQuestion,
+              expected,
               answer: output.answer,
               artifactDirectory: join(artifactDirectory, "judge"),
               timeoutMs: run.manifest.limits.timeoutMs,
               signal: controller.signal,
             }),
           );
+          assessment.judgeResponse = jsonSchema.parse(assessment.judge);
         } catch (error) {
           assessment.judgeError = errorMessage(error);
         }
@@ -681,6 +924,8 @@ export class RunService {
           : "engine_failure";
       const interrupted =
         controller.signal.aborted && code !== "cleanup_failed";
+      const classification = classifyExecutionFailure(error);
+      if (toolActivity) classification.retrySafety = "unsafe";
       const status = interrupted ? "interrupted" : "failed";
       const transport =
         error && typeof error === "object" && "evidence" in error
@@ -701,6 +946,7 @@ export class RunService {
           error: errorMessage(error),
           failure: {
             code,
+            classification,
             ...(transport?.success ? { transport: transport.data } : {}),
           },
           ...(remoteCompletion ? { remoteCompletion } : {}),
@@ -716,24 +962,36 @@ export class RunService {
           message: errorMessage(error),
         });
       });
+      const configurationBlocked = ["authentication", "configuration"].includes(
+        classification.category,
+      );
       if (
         !interrupted &&
-        ![
-          "target_failure",
-          "timeout",
-          "output_limit",
-          "evidence_failure",
-          "evidence_limit",
-          "http_error",
-          "protocol_error",
-          "request_too_large",
-          "response_too_large",
-          "invalid_response",
-          "answer_mapping",
-          "transport_error",
-          "invalid_json",
-          "answer_missing",
-        ].includes(code)
+        (configurationBlocked ||
+          (!(
+            classification.transient &&
+            ["rate-limit", "provider-capacity"].includes(
+              classification.category,
+            )
+          ) &&
+            ![
+              "target_failure",
+              "timeout",
+              "output_limit",
+              "evidence_failure",
+              "evidence_limit",
+              "http_error",
+              "protocol_error",
+              "request_too_large",
+              "response_too_large",
+              "invalid_response",
+              "answer_mapping",
+              "transport_error",
+              "invalid_json",
+              "answer_missing",
+              "submission_rejected",
+              "tool_rejected",
+            ].includes(code)))
       ) {
         const current = this.db.require("run", run.id);
         this.db.update("run", {
@@ -745,7 +1003,7 @@ export class RunService {
         });
         for (const active of this.controllers.get(run.id)?.values() ?? [])
           active.abort(new Error("A fatal execution failure stopped the run."));
-        throw error;
+        if (!configurationBlocked) throw error;
       }
     } finally {
       acceptingEvents = false;

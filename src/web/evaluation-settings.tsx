@@ -1,3 +1,6 @@
+import { JsonEditor } from "./json-editor.js";
+import { modelSettingsGuide } from "./json-guides.js";
+import { validateModelSettings } from "../contracts/model-settings.js";
 import type {
   BankSummary,
   BankDetail,
@@ -30,29 +33,6 @@ export function EvaluationSettings({
 }) {
   return (
     <>
-      {draft.judge && (
-        <Field
-          label="Judge evidence requirements"
-          help="External agents provide answers only. Internal actions cannot be inferred from missing traces."
-        >
-          <select
-            aria-label="Judge evidence requirements"
-            value={draft.judgeEvidenceRequirement}
-            onChange={(event) =>
-              set(
-                "judgeEvidenceRequirement",
-                event.target.value as typeof draft.judgeEvidenceRequirement,
-              )
-            }
-          >
-            <option value="answer">Answer evidence only</option>
-            <option value="internal-activity">
-              Internal activity required
-            </option>
-            <option value="unspecified">Unspecified</option>
-          </select>
-        </Field>
-      )}
       <div className="form-grid">
         <Field
           label="Repetitions"
@@ -88,7 +68,10 @@ export function EvaluationSettings({
         </Field>
       </div>
       <div className="form-grid">
-        <Field label="Question timeout (seconds)">
+        <Field
+          label="Question timeout (seconds)"
+          help="Maximum time for one question attempt. External requests stop waiting at this deadline, but remote work might continue."
+        >
           <input
             aria-label="Question timeout"
             type="number"
@@ -114,22 +97,30 @@ export function EvaluationSettings({
           />
         </Field>
       </div>
+      <details className="disclosure">
+        <summary>Advanced execution limits</summary>
+        <Field
+          label="Maximum recorded output (bytes)"
+          help="The runtime stops an attempt that exceeds this output limit. The value is frozen and preserved when you reuse the run."
+        >
+          <input
+            aria-label="Maximum recorded output"
+            type="number"
+            min="1024"
+            max="16000000"
+            value={draft.maxOutputBytes}
+            onChange={(event) =>
+              set("maxOutputBytes", Number(event.target.value))
+            }
+          />
+        </Field>
+      </details>
       <div className="divider" />
-      <Field
-        label="Maximum recorded output (bytes)"
-        help="The runtime stops an attempt that exceeds this output limit. The value is frozen and preserved when you reuse the run."
-      >
-        <input
-          aria-label="Maximum recorded output"
-          type="number"
-          min="1024"
-          max="16000000"
-          value={draft.maxOutputBytes}
-          onChange={(event) =>
-            set("maxOutputBytes", Number(event.target.value))
-          }
-        />
-      </Field>
+      <h3>Optional judging</h3>
+      <p className="subtle">
+        Deterministic evaluation always runs. Additional judges record
+        independent assessments and can incur model usage.
+      </p>
       <label className="check-row">
         <input
           type="checkbox"
@@ -143,6 +134,29 @@ export function EvaluationSettings({
           </small>
         </span>
       </label>
+      {draft.judge && (
+        <Field
+          label="Judge evidence requirements"
+          help="External agents provide answers only. Internal actions cannot be inferred from missing traces."
+        >
+          <select
+            aria-label="Judge evidence requirements"
+            value={draft.judgeEvidenceRequirement}
+            onChange={(event) =>
+              set(
+                "judgeEvidenceRequirement",
+                event.target.value as typeof draft.judgeEvidenceRequirement,
+              )
+            }
+          >
+            <option value="answer">Answer evidence only</option>
+            <option value="internal-activity">
+              Internal activity required
+            </option>
+            <option value="unspecified">Unspecified</option>
+          </select>
+        </Field>
+      )}
       {draft.judge && (
         <>
           <ModelFields
@@ -162,6 +176,7 @@ export function EvaluationSettings({
             />
           </Field>
           <RoleProvider
+            harness={draft.judgeHarness}
             label="Judge authentication"
             connections={connections}
             value={draft.judgeProviderConnectionId}
@@ -179,12 +194,14 @@ export function EvaluationSettings({
               label="Judge model settings"
               help="These settings belong to the judge independently of the target agent. The judge receives no target tools."
             >
-              <textarea
-                aria-label="Judge model settings"
-                className="code-input"
-                rows={6}
+              <JsonEditor
+                label="Judge model settings"
                 value={draft.judgeSettings}
-                onChange={(event) => set("judgeSettings", event.target.value)}
+                onChange={(value) => set("judgeSettings", value)}
+                guide={modelSettingsGuide(draft.judgeHarness)}
+                validate={(value) => {
+                  validateModelSettings(draft.judgeHarness, value);
+                }}
               />
             </Field>
           </details>

@@ -1,3 +1,6 @@
+import { JsonEditor } from "./json-editor.js";
+import { modelSettingsGuide } from "./json-guides.js";
+import { validateModelSettings } from "../contracts/model-settings.js";
 import type { RuntimeCatalog, WorkspaceView } from "../contracts.js";
 import type { SetupDraftProps } from "./setup-types.js";
 import { ModelFields, RoleProvider } from "./model-fields.js";
@@ -25,7 +28,8 @@ export function AgentSettings({
         onModel={(value) => set("model", value)}
       />
       <RoleProvider
-        label="Provider API key connection"
+        harness={draft.harness}
+        label="Agent authentication"
         connections={connections}
         value={draft.providerConnectionId}
         onChange={(id, provider) => {
@@ -40,23 +44,21 @@ export function AgentSettings({
       >
         <textarea
           aria-label="System prompt"
-          rows={10}
+          rows={7}
           value={draft.prompt}
           onChange={(event) => set("prompt", event.target.value)}
         />
       </Field>
       <details className="disclosure">
         <summary>Advanced agent settings</summary>
-        <p className="subtle">
-          Provider settings such as maxTurns, reasoningEffort, temperature, and
-          maxOutputTokens. The runtime validates support.
-        </p>
-        <textarea
-          aria-label="Advanced agent settings"
-          className="code-input"
-          rows={7}
+        <JsonEditor
+          label="Advanced agent settings"
           value={draft.settings}
-          onChange={(event) => set("settings", event.target.value)}
+          onChange={(value) => set("settings", value)}
+          guide={modelSettingsGuide(draft.harness)}
+          validate={(value) => {
+            validateModelSettings(draft.harness, value);
+          }}
         />
       </details>
     </>

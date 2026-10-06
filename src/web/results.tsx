@@ -3,7 +3,12 @@ import { useState } from "react";
 import type { RunComparison, WorkspaceView } from "../contracts.js";
 import { command, useResource } from "./api.js";
 import { JudgeSavedAnswers } from "./judge-saved.js";
-import { RunAccuracy, RunOutcomes } from "./run-outcomes.js";
+import { RunOutcomes } from "./run-outcomes.js";
+import {
+  AssessmentScore,
+  AssessmentSelector,
+  selectedAssessment,
+} from "./assessment-controls.js";
 import {
   DownloadButton,
   Empty,
@@ -26,6 +31,9 @@ export function Results({
 }) {
   const [offset, setOffset] = useState(0);
   const [judgingRunId, setJudgingRunId] = useState<string | null>(null);
+  const [scoreSelections, setScoreSelections] = useState<
+    Record<string, string>
+  >({});
   const page = useResource("runs.list", { limit: 100, offset }, 5000);
   const [selected, setSelected] = useState<string[]>([]),
     [query, setQuery] = useState(""),
@@ -48,15 +56,9 @@ export function Results({
   return (
     <>
       <PageHeading
-        eyebrow="Evidence library"
         title="Results"
-        description="Inspect saved runs, compare evidence, and reuse tested configuration."
-      >
-        <a className="button primary" href="#/run">
-          <Icon name="plus" size={16} />
-          New run
-        </a>
-      </PageHeading>
+        description="Review evidence, compare runs, and reuse configurations."
+      />
       <ErrorNotice error={error ?? page.error} />
       {judgingRunId && (
         <JudgeSavedAnswers
@@ -125,7 +127,7 @@ export function Results({
                   <th>Agent</th>
                   <th>Status</th>
                   <th>Answers</th>
-                  <th>Deterministic accuracy</th>
+                  <th>Saved score</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -174,43 +176,78 @@ export function Results({
                       <RunOutcomes {...run} />
                     </td>
                     <td className="mono">
-                      <RunAccuracy {...run} />
+                      <AssessmentSelector
+                        runId={run.id}
+                        passes={run.assessmentPasses ?? []}
+                        selectedId={
+                          scoreSelections[run.id] ??
+                          run.selectedAssessmentPassId
+                        }
+                        label={`Saved score for ${run.name}`}
+                        onSaved={(id) => {
+                          setScoreSelections((current) => ({
+                            ...current,
+                            [run.id]: id,
+                          }));
+                          page.refresh();
+                          refresh();
+                        }}
+                      />
+                      <AssessmentScore
+                        pass={selectedAssessment(
+                          run.assessmentPasses ?? [],
+                          scoreSelections[run.id] ??
+                            run.selectedAssessmentPassId,
+                        )}
+                      />
                     </td>
                     <td>
                       <div className="row-actions">
-                        <button
-                          disabled={!run.completed}
-                          onClick={() => setJudgingRunId(run.id)}
-                        >
-                          Judge saved answers
-                        </button>
                         <a
                           href={`#/run?source=${run.id}`}
                           title="Reuse frozen configuration"
                         >
                           Reuse
                         </a>
-                        <button
-                          onClick={() => {
-                            setSaving(run.id);
-                            setName(`${run.name} configuration`);
-                          }}
-                        >
-                          Save blueprint
-                        </button>
-                        <button
-                          onClick={() => {
-                            void command("runs.export-target", {
-                              runId: run.id,
-                            })
-                              .then((value) =>
-                                setExported({ id: run.id, value }),
-                              )
-                              .catch(setError);
-                          }}
-                        >
-                          Export JSON
-                        </button>
+                        <details className="result-actions-menu">
+                          <summary aria-label={`More actions for ${run.name}`}>
+                            More
+                          </summary>
+                          <div className="result-actions-list">
+                            <button
+                              disabled={!run.completed}
+                              title={
+                                !run.completed
+                                  ? "Record at least one completed answer first."
+                                  : "Create another score from recorded answers without running the agent again."
+                              }
+                              onClick={() => setJudgingRunId(run.id)}
+                            >
+                              Score saved answers
+                            </button>
+                            <button
+                              onClick={() => {
+                                setSaving(run.id);
+                                setName(`${run.name} configuration`);
+                              }}
+                            >
+                              Save blueprint
+                            </button>
+                            <button
+                              onClick={() => {
+                                void command("runs.export-target", {
+                                  runId: run.id,
+                                })
+                                  .then((value) =>
+                                    setExported({ id: run.id, value }),
+                                  )
+                                  .catch(setError);
+                              }}
+                            >
+                              Export JSON
+                            </button>
+                          </div>
+                        </details>
                       </div>
                     </td>
                   </tr>
@@ -269,12 +306,13 @@ export function Results({
               </p>
             </div>
           </div>
-          <div className="blueprint-grid">
+          <div className="panel-body">
             {workspace.blueprints.map((blueprint) => (
-              <article className="blueprint-card" key={blueprint.id}>
-                <Icon name="agent" size={22} />
-                <h3>{blueprint.name}</h3>
-                <p>{targetLabel(savedTarget(blueprint))}</p>
+              <article className="history-row" key={blueprint.id}>
+                <div>
+                  <strong>{blueprint.name}</strong>
+                  <p>{targetLabel(savedTarget(blueprint))}</p>
+                </div>
                 <div className="actions">
                   <a
                     className="button secondary"
@@ -378,7 +416,7 @@ function Comparison({ value }: { value: RunComparison }) {
             <tr>
               <th>Run</th>
               <th>Agent</th>
-              <th>Deterministic accuracy</th>
+              <th>Selected score</th>
               <th>Answers</th>
               <th>Repetitions</th>
             </tr>
@@ -399,7 +437,10 @@ function Comparison({ value }: { value: RunComparison }) {
                   </small>
                 </td>
                 <td>
-                  <RunAccuracy {...row} />
+                  <strong>
+                    {row.assessmentPass?.name ?? "No saved score"}
+                  </strong>
+                  <AssessmentScore pass={row.assessmentPass} />
                 </td>
                 <td>
                   <RunOutcomes {...row} />

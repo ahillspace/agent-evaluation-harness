@@ -107,6 +107,17 @@ export async function startServer(
       }
       const url = new URL(request.url ?? "/", `http://${hostHeader}`);
       let result: unknown;
+      if (request.method === "GET" && url.pathname === "/api/build") {
+        const build = await readFile(
+          resolve(webDirectory, "build.json"),
+          "utf8",
+        )
+          .then((value) => JSON.parse(value) as { buildId: string })
+          .catch(() => ({ buildId: "development" }));
+        response.setHeader("Content-Type", "application/json");
+        response.end(JSON.stringify({ ...build, processId: process.pid }));
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/api/discovery")
         result = {
           name: "Agent Evaluation Harness",

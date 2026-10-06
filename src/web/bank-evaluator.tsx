@@ -16,7 +16,7 @@ import {
   ReferenceSelector,
   ReferencePolicyWarning,
 } from "./reference-selector.js";
-import { ErrorNotice, Field, Help, Icon, date } from "./ui.js";
+import { ErrorNotice, Field, Help, Icon, date, SectionIntro } from "./ui.js";
 
 export function BankEvaluator({
   workspace,
@@ -128,6 +128,11 @@ export function BankEvaluator({
           </p>
         </div>
       </div>
+      <SectionIntro
+        title="Deterministic grading"
+        description="Define the rules that compare agent answers with the expected answers in this bank."
+        details="Use numeric tolerances, text rules, and table policies to accept valid equivalents. Preview changes against saved answers before publishing. These rules do not make model calls; optional judges remain separate."
+      />
       <ErrorNotice error={error} />
       <div className="notice">
         Active: <strong>{active?.name ?? "Default evaluator"}</strong>
@@ -171,66 +176,71 @@ export function BankEvaluator({
           </select>
         </Field>
       </div>
-      <div className="form-grid">
-        <Field label="Absolute tolerance">
-          <input
-            aria-label="Absolute tolerance"
-            type="number"
-            min="0"
-            step="any"
-            value={settings.absoluteTolerance}
-            onChange={(event) =>
-              setSettings({
-                ...settings,
-                absoluteTolerance: Number(event.target.value),
-              })
-            }
-          />
-        </Field>
-        <Field label="Relative tolerance">
-          <input
-            aria-label="Relative tolerance"
-            type="number"
-            min="0"
-            step="any"
-            value={settings.relativeTolerance}
-            onChange={(event) =>
-              setSettings({
-                ...settings,
-                relativeTolerance: Number(event.target.value),
-              })
-            }
-          />
-        </Field>
-      </div>
-      <div className="check-grid">
-        {(
-          [
-            "caseSensitive",
-            "trimWhitespace",
-            "collapseWhitespace",
-            "arrayOrderMatters",
-          ] as const
-        ).map((key) => (
-          <label key={key} className="check-row">
-            <input
-              type="checkbox"
-              checked={settings[key]}
-              onChange={(event) =>
-                setSettings({ ...settings, [key]: event.target.checked })
-              }
-            />
-            {
-              {
-                caseSensitive: "Case sensitive",
-                trimWhitespace: "Trim outer whitespace",
-                collapseWhitespace: "Normalize whitespace",
-                arrayOrderMatters: "Preserve array order",
-              }[key]
-            }
-          </label>
-        ))}
-      </div>
+      <details className="disclosure">
+        <summary>Number precision and text matching</summary>
+        <div className="stack">
+          <div className="form-grid">
+            <Field label="Absolute tolerance">
+              <input
+                aria-label="Absolute tolerance"
+                type="number"
+                min="0"
+                step="any"
+                value={settings.absoluteTolerance}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    absoluteTolerance: Number(event.target.value),
+                  })
+                }
+              />
+            </Field>
+            <Field label="Relative tolerance">
+              <input
+                aria-label="Relative tolerance"
+                type="number"
+                min="0"
+                step="any"
+                value={settings.relativeTolerance}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    relativeTolerance: Number(event.target.value),
+                  })
+                }
+              />
+            </Field>
+          </div>
+          <div className="check-grid">
+            {(
+              [
+                "caseSensitive",
+                "trimWhitespace",
+                "collapseWhitespace",
+                "arrayOrderMatters",
+              ] as const
+            ).map((key) => (
+              <label key={key} className="check-row">
+                <input
+                  type="checkbox"
+                  checked={settings[key]}
+                  onChange={(event) =>
+                    setSettings({ ...settings, [key]: event.target.checked })
+                  }
+                />
+                {
+                  {
+                    caseSensitive: "Case sensitive",
+                    trimWhitespace: "Trim outer whitespace",
+                    collapseWhitespace: "Normalize whitespace",
+                    arrayOrderMatters: "Preserve array order",
+                  }[key]
+                }
+              </label>
+            ))}
+          </div>
+        </div>
+      </details>
       <Field
         label="Required evidence"
         help="Answer evidence works with external endpoints. Internal activity requires recorded agent steps. Custom evaluation must declare its requirement before an external run."
@@ -473,36 +483,37 @@ export function BankEvaluator({
       </div>
       {preview !== null && <EvaluatorPreview preview={preview} />}
       {calibration !== null && <CalibrationResults report={calibration} />}
-      <div className="divider" />
-      <h3>Published evaluator revisions</h3>
-      {revisions.map((revision) => (
-        <div className="history-row" key={revision.id}>
-          <div>
-            <strong>{revision.name}</strong>
-            <p>
-              Revision {revision.number} · {revision.settings.mode} ·{" "}
-              {date(revision.createdAt)}
-            </p>
+      <details className="disclosure">
+        <summary>Published evaluator revisions ({revisions.length})</summary>
+        {revisions.map((revision) => (
+          <div className="history-row" key={revision.id}>
+            <div>
+              <strong>{revision.name}</strong>
+              <p>
+                Revision {revision.number} · {revision.settings.mode} ·{" "}
+                {date(revision.createdAt)}
+              </p>
+            </div>
+            {revision.id === bank.activeEvaluatorRevisionId ? (
+              <span className="tag lime">Active</span>
+            ) : (
+              <button
+                className="button secondary"
+                onClick={() => {
+                  void command("evaluators.activate", {
+                    bankId,
+                    evaluatorRevisionId: revision.id,
+                  })
+                    .then(refresh)
+                    .catch(setError);
+                }}
+              >
+                Activate
+              </button>
+            )}
           </div>
-          {revision.id === bank.activeEvaluatorRevisionId ? (
-            <span className="tag lime">Active</span>
-          ) : (
-            <button
-              className="button secondary"
-              onClick={() => {
-                void command("evaluators.activate", {
-                  bankId,
-                  evaluatorRevisionId: revision.id,
-                })
-                  .then(refresh)
-                  .catch(setError);
-              }}
-            >
-              Activate
-            </button>
-          )}
-        </div>
-      ))}
+        ))}
+      </details>
     </div>
   );
 }

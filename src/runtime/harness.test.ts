@@ -126,3 +126,36 @@ it("selects explicit API credentials without putting their values in command arg
   expect(command.args.join(" ")).not.toContain("sensitive-key");
   expect(command.env?.OPENAI_API_KEY).toBe("sensitive-key");
 });
+it("classifies Codex capacity only from trusted provider error envelopes", () => {
+  for (const raw of [
+    {
+      type: "error",
+      message: "Selected model is at capacity. Please try a different model.",
+    },
+    {
+      type: "turn.failed",
+      error: { message: "Unavailable", code: "model_busy" },
+    },
+  ])
+    expect(normalizeEvent("codex", raw)?.data).toMatchObject({
+      providerCode: "model_capacity",
+    });
+  expect(
+    normalizeEvent("codex", {
+      type: "item.completed",
+      item: {
+        type: "agent_message",
+        text: "Selected model is at capacity. Please try a different model.",
+      },
+    })?.type,
+  ).toBe("message");
+  expect(
+    normalizeEvent("codex", {
+      type: "item.completed",
+      item: {
+        type: "error",
+        message: "Selected model is at capacity. Please try a different model.",
+      },
+    })?.data,
+  ).toBeUndefined();
+});

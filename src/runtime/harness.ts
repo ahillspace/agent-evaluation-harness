@@ -1,7 +1,10 @@
+import { claudeCommand, claudeEvent } from "./claude.js";
+import { openCodeProvider } from "./model-providers.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { z } from "zod";
+import { validateModelSettings } from "../contracts/model-settings.js";
+export { settingsSchema } from "../contracts/model-settings.js";
 import type {
   AgentConfig,
   Json,
@@ -11,27 +14,6 @@ import type {
 import { answerFormatJsonSchema } from "../contracts/answer-format.js";
 import type { McpBinding } from "./connections.js";
 import type { ProcessSpec } from "./process-supervisor.js";
-
-export const settingsSchema = z
-  .object({
-    authSource: z.enum(["local", "connection"]).optional(),
-    maxTurns: z.number().int().min(1).max(500).default(40),
-    reasoningEffort: z
-      .enum([
-        "none",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-        "ultra",
-      ])
-      .optional(),
-    temperature: z.number().min(0).max(2).optional(),
-    maxOutputTokens: z.number().int().min(1).max(1_000_000).optional(),
-  })
-  .strict();
 
 export function helperCommand(
   mode: string,
@@ -59,19 +41,16 @@ export function helperCommand(
   };
 }
 
-export function buildHarnessCommand(input: {
-  agent: AgentConfig;
-  cwd: string;
-  prompt: string;
-  mcp: McpBinding[];
-  role: "target" | "researcher" | "judge";
-  conversationId?: string;
-  env?: Record<string, string>;
-  answerFormatPath?: string;
-}): ProcessSpec {
-  const { agent, cwd } = input;
-  const settings = settingsSchema.parse(agent.settings);
-  const env = { ...input.env };
+export function createHarnessBridges(
+  input: {
+    mcp: McpBinding[];
+    role: "target" | "researcher" | "judge";
+    cwd: string;
+    answerFormatPath?: string;
+  },
+  env: Record<string, string>,
+) {
+  const { cwd } = input;
   const bridges = input.mcp.map((binding, index) => {
     const variable = `AEH_MCP_BINDING_${index}`;
     env[variable] = JSON.stringify(binding);
@@ -97,6 +76,23 @@ export function buildHarnessCommand(input: {
       ...helperCommand("evidence"),
       tools: ["read_evidence"],
     });
+  return bridges;
+}
+
+export function buildHarnessCommand(input: {
+  agent: AgentConfig;
+  cwd: string;
+  prompt: string;
+  mcp: McpBinding[];
+  role: "target" | "researcher" | "judge";
+  conversationId?: string;
+  env?: Record<string, string>;
+  answerFormatPath?: string;
+}): ProcessSpec {
+  const { agent, cwd } = input;
+  const settings = validateModelSettings(agent.harness, agent.settings);
+  const env = { ...input.env };
+  const bridges = createHarnessBridges(input, env);
   if (agent.harness === "codex") {
     const disabled = [
       "apps",
@@ -184,6 +180,18 @@ export function buildHarnessCommand(input: {
     ];
     return { executable: "codex", args, cwd, env, input: input.prompt };
   }
+  if (agent.harness === "claude")
+    return claudeCommand({
+      cwd,
+      prompt: input.prompt,
+      model: agent.model,
+      maxTurns: settings.maxTurns,
+      reasoningEffort: settings.reasoningEffort,
+      env,
+      bridges,
+      conversationId: input.conversationId,
+      persistent: input.role === "researcher",
+    });
   if (agent.harness !== "opencode")
     throw new Error(`Unsupported harness: ${agent.harness}.`);
   const mcp = Object.fromEntries(
@@ -205,28 +213,7 @@ export function buildHarnessCommand(input: {
     else permission[`${bridge.name}_*`] = "allow";
   }
   env.XDG_CONFIG_HOME = path.join(cwd, "config");
-  const selectedProvider = agent.model.split("/")[0]!;
-  const key = (
-    {
-      openai: "OPENAI_API_KEY",
-      anthropic: "ANTHROPIC_API_KEY",
-      openrouter: "OPENROUTER_API_KEY",
-      google: "GOOGLE_GENERATIVE_AI_API_KEY",
-    } as Record<string, string>
-  )[selectedProvider];
-  const provider =
-    key && env[key]
-      ? {
-          [selectedProvider]: {
-            options: {
-              apiKey: `{env:${key}}`,
-              ...(env[`${selectedProvider.toUpperCase()}_BASE_URL`]
-                ? { baseURL: env[`${selectedProvider.toUpperCase()}_BASE_URL`] }
-                : {}),
-            },
-          },
-        }
-      : {};
+  const provider = openCodeProvider(agent.model, env);
   env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
     $schema: "https://opencode.ai/config.json",
     share: "disabled",
@@ -292,9 +279,10 @@ export function buildTargetPrompt(
     "Submit your final answer with the submit_answer tool. The answer must be a JSON value.",
     ...(question.answerFormat
       ? [
-          `Required public answer format: submit an array of row objects using exactly these column names and value types. Do not include a type/columns/rows wrapper. If submission reports a format error, correct it and submit again. JSON Schema: ${JSON.stringify(answerFormatJsonSchema(question.answerFormat))}`,
+          `Required public answer format: ${question.answerFormat.type === "table" ? "submit an array of row objects using exactly these column names and value types. Do not include a type/columns/rows wrapper." : question.answerFormat.type === "scalar" ? "submit one scalar value of the declared type. Do not wrap it in an array or object." : "submit a JSON list of values of the declared item type."} If submission reports a format error, correct it and call submit_answer again. JSON Schema: ${JSON.stringify(answerFormatJsonSchema(question.answerFormat))}`,
         ]
       : []),
+    question.evaluationGuidance ?? "",
     ...(agent.harness === "codex"
       ? [
           "Use functions.exec to call await tools.mcp__answer__submit_answer({answer: YOUR_JSON_VALUE}). A text-only final message does not record an answer.",
@@ -327,10 +315,39 @@ export function redact(text: string, secrets: string[]): string {
   }
   return text;
 }
+/** Only a completely captured fresh native turn with no admitted work proves safe nonadmission. */
+export function codexCapacityNotAdmitted(input: {
+  harness: string;
+  role: string;
+  conversationId?: string;
+  transcript: Json[];
+  complete: boolean;
+}): boolean {
+  if (
+    input.harness !== "codex" ||
+    input.role !== "target" ||
+    input.conversationId ||
+    !input.complete ||
+    !input.transcript.length
+  )
+    return false;
+  const last = input.transcript.at(-1);
+  if (!record(last) || last.type !== "turn.failed") return false;
+  return input.transcript.every((raw) => {
+    if (!record(raw)) return false;
+    if (raw.type === "thread.started" || raw.type === "turn.started")
+      return true;
+    if (raw.type !== "error" && raw.type !== "turn.failed") return false;
+    const event = normalizeEvent("codex", raw);
+    return record(event?.data) && event.data.providerCode === "model_capacity";
+  });
+}
+
 export function normalizeEvent(
   harness: string,
   raw: Record<string, unknown>,
 ): RuntimeEvent | undefined {
+  if (harness === "claude") return claudeEvent(raw);
   const item = record(raw.item)
     ? raw.item
     : record(raw.part)
@@ -369,17 +386,36 @@ export function normalizeEvent(
   ) {
     const error = record(raw.error) ? raw.error : (item ?? raw);
     const details = record(error.data) ? error.data : error;
+    const message =
+      typeof details.message === "string"
+        ? details.message
+        : typeof raw.message === "string"
+          ? raw.message
+          : "The provider reported an error.";
+    const trustedCodexError =
+      harness === "codex" &&
+      (raw.type === "error" || raw.type === "turn.failed");
+    const nativeCode = details.code ?? details.codex_error_info ?? error.code;
+    const capacity =
+      trustedCodexError &&
+      ([
+        "model_busy",
+        "modelBusy",
+        "model_capacity",
+        "model_capacity_exceeded",
+      ].includes(String(nativeCode ?? "")) ||
+        message ===
+          "Selected model is at capacity. Please try a different model.");
+    const data = {
+      ...(typeof details.statusCode === "number"
+        ? { statusCode: details.statusCode }
+        : {}),
+      ...(capacity ? { providerCode: "model_capacity" } : {}),
+    };
     return {
       type: "error",
-      message:
-        typeof details.message === "string"
-          ? details.message
-          : typeof raw.message === "string"
-            ? raw.message
-            : "The provider reported an error.",
-      ...(typeof details.statusCode === "number"
-        ? { data: { statusCode: details.statusCode } }
-        : {}),
+      message,
+      ...(Object.keys(data).length ? { data } : {}),
     };
   }
   if (harness === "opencode" && typeof raw.sessionID === "string")

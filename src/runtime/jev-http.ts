@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Json, TargetOutput } from "../contracts.js";
 import { redact } from "./harness.js";
 import { withInvocationDeadline } from "./deadline.js";
+import { safeFetchFailureDetails } from "./safe-fetch-diagnostics.js";
 
 export const TYPESAFE_ENDPOINT = "https://api.typesafe.ai/v1";
 export interface HttpAttempt {
@@ -147,10 +148,10 @@ export async function jevHttp(input: {
               signal,
               redirect: "manual",
             });
-          } catch {
+          } catch (error) {
             throw new JevFailure(
               "provider_failure",
-              "The TypeSafe request failed before a complete HTTP response. It was not retried because provider usage is unknown.",
+              `The TypeSafe request failed before a complete HTTP response${safeFetchFailureDetails(error)}. It was not retried because provider usage is unknown.`,
             );
           }
           status = response.status;

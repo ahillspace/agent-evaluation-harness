@@ -23,6 +23,20 @@ import { RunService } from "./runs.js";
 import { checkResearchBudget } from "./research-budget.js";
 import { validateResearchProposal } from "../domain/research-proposal.js";
 
+export function researchJevChoice(
+  record:
+    | {
+        status: "completed" | "pending" | "error";
+        reviewRequired?: boolean;
+        checks?: { answer: { choice: string } };
+      }
+    | undefined,
+): "acceptable" | "incorrect" | undefined {
+  if (record?.status !== "completed" || record.reviewRequired) return undefined;
+  const choice = record.checks?.answer.choice;
+  return choice === "acceptable" || choice === "incorrect" ? choice : undefined;
+}
+
 export class ResearchService {
   private readonly jobs = new Map<string, Promise<void>>();
   private readonly controllers = new Map<string, AbortController>();
@@ -378,10 +392,7 @@ export class ResearchService {
             item.resultId === result.id &&
             item.attemptId === result.completedAttemptId,
         );
-        const choice =
-          saved?.status === "completed" && !saved.reviewRequired
-            ? saved.checks?.answer.choice
-            : undefined;
+        const choice = researchJevChoice(saved);
         verdict =
           choice === "acceptable"
             ? true

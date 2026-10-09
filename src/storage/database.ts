@@ -296,7 +296,10 @@ export class Database {
   jevSummaries(runId: string): JevAssessmentSummary[] {
     return this.db
       .prepare(
-        `SELECT json_set(json_remove(value,'$.evidence','$.criteria','$.request','$.response','$.attempts','$.configuration','$.configurationHash','$.evidenceHash','$.attemptEvidenceHash','$.bankRevisionId','$.evaluatorRevisionId','$.httpStatus','$.requestId'),
+        `SELECT json_set(json_remove(value,'$.evidence','$.criteria','$.request','$.response','$.attempts','$.fallback','$.configuration','$.configurationHash','$.evidenceHash','$.attemptEvidenceHash','$.bankRevisionId','$.evaluatorRevisionId','$.httpStatus','$.requestId'),
+      '$.fallbackApplied',json(CASE WHEN json_type(value,'$.fallback')='object' THEN 'true' ELSE 'false' END),
+      '$.fallbackUsage',json_extract(value,'$.fallback.trigger.usage'),
+      '$.fallbackResultUsage',json_extract(value,'$.fallback.resultUsage'),
       '$.profileRevisionId',json_extract(value,'$.configuration.profile.id'),
       '$.profileRevisionNumber',json_extract(value,'$.configuration.profile.number'),
       '$.profileName',json_extract(value,'$.configuration.profile.name'),
@@ -304,7 +307,15 @@ export class Database {
       FROM records WHERE kind='jevAssessment' AND run_id=? ORDER BY ordinal`,
       )
       .all(runId)
-      .map((row) => JSON.parse(row.summary as string) as JevAssessmentSummary);
+      .map((row) => {
+        const summary = JSON.parse(
+          row.summary as string,
+        ) as JevAssessmentSummary;
+        if (summary.fallbackUsage == null) delete summary.fallbackUsage;
+        if (summary.fallbackResultUsage == null)
+          delete summary.fallbackResultUsage;
+        return summary;
+      });
   }
   insert<K extends RecordKind>(
     kind: K,

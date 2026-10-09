@@ -19,6 +19,68 @@ import { Database } from "../storage/database.js";
 import { savedTarget } from "../contracts/targets.js";
 import { evidenceSupports } from "../domain/evidence-requirements.js";
 
+function evidenceForClassificationRequest(
+  evidence: JudgeEvidence,
+  requirement: JevProfileSettings["evidenceRequirement"],
+): JudgeEvidence {
+  if (requirement !== "answer") return evidence;
+  return {
+    ...evidence,
+    observationLevel: "answer-only",
+    trace: { format: "unavailable", entries: null },
+  };
+}
+
+type JevFallback = NonNullable<JevAssessmentRecord["fallback"]>;
+type JevFallbackTrigger = JevFallback["trigger"];
+
+function fallbackTrigger(error: unknown): JevFallbackTrigger {
+  const detail =
+    typeof error === "object" && error !== null
+      ? (error as Record<string, unknown>)
+      : {};
+  const trigger: JevFallbackTrigger = {
+    error: {
+      code: typeof detail.code === "string" ? detail.code : "judge_error",
+      message: errorMessage(error),
+    },
+  };
+  for (const field of ["request", "response", "attempts"] as const)
+    if (detail[field] !== undefined) {
+      const parsed = jsonSchema.safeParse(detail[field]);
+      if (parsed.success) trigger[field] = parsed.data;
+    }
+  if (typeof detail.requestId === "string")
+    trigger.requestId = detail.requestId;
+  if (typeof detail.httpStatus === "number")
+    trigger.httpStatus = detail.httpStatus;
+  if (detail.usage)
+    trigger.usage = detail.usage as JevAssessmentRecord["usage"];
+  if (detail.pricing)
+    trigger.pricing = detail.pricing as JevAssessmentRecord["pricing"];
+  return trigger;
+}
+
+function aggregateFallbackUsage(
+  trigger: JevFallbackTrigger["usage"],
+  result: JevAssessmentRecord["usage"],
+): JevAssessmentRecord["usage"] {
+  if (!trigger || !result) return undefined;
+  const combined: NonNullable<JevAssessmentRecord["usage"]> = {};
+  for (const key of [
+    "inputTokens",
+    "cachedInputTokens",
+    "outputTokens",
+    "costUsd",
+  ] as const) {
+    const first = trigger[key];
+    const second = result[key];
+    if (first !== undefined && second !== undefined)
+      combined[key] = first + second;
+  }
+  return Object.keys(combined).length ? combined : undefined;
+}
+
 export class JevService {
   constructor(
     private readonly db: Database,
@@ -377,7 +439,8 @@ export class JevService {
           "interrupted",
           "Jev was interrupted before admission.",
         );
-      if (!this.runtime.classifier)
+      const classifier = this.runtime.classifier;
+      if (!classifier)
         throw new AppError(
           "unavailable",
           "No classification judge is configured.",
@@ -396,31 +459,116 @@ export class JevService {
             ),
           )
         : run.manifest.limits.timeoutMs;
-      const result = await this.runtime.classifier.evaluate({
-        configuration,
-        criteria,
-        evidence,
-        timeoutMs,
-        signal,
-        onRequest: (request) => {
+      const deadline = Date.now() + timeoutMs;
+      let result: Awaited<ReturnType<typeof classifier.evaluate>>;
+      try {
+        result = await classifier.evaluate({
+          configuration,
+          criteria,
+          evidence: evidenceForClassificationRequest(
+            evidence,
+            criteria.evidenceRequirement,
+          ),
+          timeoutMs,
+          signal,
+          onRequest: (request) => {
+            record = this.db.update("jevAssessment", {
+              ...record,
+              request: jsonSchema.parse(request),
+            });
+          },
+        });
+      } catch (initialError) {
+        const detail =
+          typeof initialError === "object" && initialError !== null
+            ? (initialError as Record<string, unknown>)
+            : {};
+        const traceIncluded =
+          criteria.evidenceRequirement !== "answer" &&
+          evidence.observationLevel === "internal-activity" &&
+          evidence.trace.format !== "unavailable" &&
+          evidence.trace.entries !== null;
+        const canFallback =
+          criteria.answerOnlyFallback !== undefined &&
+          traceIncluded &&
+          !signal.aborted &&
+          (detail.code === "token_limit_exceeded" ||
+            detail.code === "capacity_exceeded");
+        const remainingMs = deadline - Date.now();
+        if (!canFallback || remainingMs <= 0) throw initialError;
+        const trigger = fallbackTrigger(initialError);
+        if (trigger.request === undefined && record.request !== undefined)
+          trigger.request = record.request;
+        record = this.db.update("jevAssessment", {
+          ...record,
+          request: undefined,
+          response: undefined,
+          attempts: undefined,
+          requestId: undefined,
+          httpStatus: undefined,
+          pricing: undefined,
+          fallback: {
+            trigger,
+            criteria: criteria.answerOnlyFallback!,
+          },
+        });
+        try {
+          result = await classifier.evaluate({
+            configuration,
+            criteria,
+            evidence,
+            scope: "answer-only-fallback",
+            timeoutMs: remainingMs,
+            signal,
+            onRequest: (request) => {
+              record = this.db.update("jevAssessment", {
+                ...record,
+                request: jsonSchema.parse(request),
+              });
+            },
+          });
+          const usage = aggregateFallbackUsage(trigger.usage, result.usage);
           record = this.db.update("jevAssessment", {
             ...record,
-            request: jsonSchema.parse(request),
+            usage,
+            fallback: {
+              ...record.fallback!,
+              resultUsage: result.usage,
+            },
           });
-        },
-      });
+        } catch (fallbackError) {
+          const fallbackResult = fallbackTrigger(fallbackError);
+          const usage = aggregateFallbackUsage(
+            trigger.usage,
+            fallbackResult.usage,
+          );
+          record = this.db.update("jevAssessment", {
+            ...record,
+            usage,
+            fallback: {
+              ...record.fallback!,
+              resultUsage: fallbackResult.usage,
+            },
+          });
+          throw fallbackError;
+        }
+      }
       const reviewRequired =
+        !result.checks.evidence ||
+        !result.checks.reference ||
         Object.values(result.checks).some(
           (check) => check.confidence < criteria.confidenceThreshold,
         ) ||
         result.checks.answer.choice === "insufficient_evidence" ||
-        result.checks.evidence.choice === "insufficient_evidence" ||
+        result.checks.evidence?.choice === "insufficient_evidence" ||
         (result.checks.answer.choice === "acceptable" &&
-          result.checks.evidence.choice === "contradicted") ||
-        result.checks.reference.choice !== "consistent";
+          result.checks.evidence?.choice === "contradicted") ||
+        (result.checks.reference !== undefined &&
+          result.checks.reference.choice !== "consistent");
       record = this.db.update("jevAssessment", {
         ...record,
         ...result,
+        ...(record.fallback ? { usage: record.usage } : {}),
         status: "completed",
         finishedAt: now(),
         reviewRequired,
@@ -440,11 +588,11 @@ export class JevService {
         provenance.requestId = detail.requestId;
       if (typeof detail.httpStatus === "number")
         provenance.httpStatus = detail.httpStatus;
-      if (detail.usage)
+      if (detail.usage && !record.fallback)
         provenance.usage = detail.usage as JevAssessmentRecord["usage"];
       if (detail.pricing)
         provenance.pricing = detail.pricing as JevAssessmentRecord["pricing"];
-      if (!record.request && !provenance.request)
+      if (!record.fallback && !record.request && !provenance.request)
         provenance.usage = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
       record = this.db.update("jevAssessment", {
         ...record,

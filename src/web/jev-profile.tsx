@@ -35,6 +35,7 @@ export function JevProfileEditor({
   const [overrides, setOverrides] = useState(
     JSON.stringify(settings.questionOverrides ?? {}, null, 2),
   );
+  const fallback = settings.answerOnlyFallback;
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const publish = async () => {
@@ -185,6 +186,102 @@ export function JevProfileEditor({
         ),
       )}
       <details className="disclosure">
+        <summary>Oversized trace fallback</summary>
+        <p className="subtle">
+          When a trace exceeds Jev's request limit, an optional second request
+          can judge the complete answer against the question and expected
+          answer. It omits agent activity. Evidence support and reference
+          consistency show Not assessed. If this request is still too large, it
+          stays an error.
+        </p>
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={Boolean(settings.answerOnlyFallback)}
+            onChange={(event) =>
+              setSettings({
+                ...settings,
+                answerOnlyFallback: event.target.checked
+                  ? jevProfileSettingsSchema.shape.answerOnlyFallback.parse({})
+                  : undefined,
+              })
+            }
+          />
+          Allow answer-only fallback
+        </label>
+        <p className="subtle">
+          This applies only to requests that include a trace. Answer-only
+          profiles already omit it. The original request and error stay
+          available for inspection.
+        </p>
+        {fallback && (
+          <div className="stack">
+            <Field
+              label="Fallback shared instructions"
+              help="Separate instructions for the second request. Judge only the available answer and reference; do not require tool activity. Question-specific overrides do not change these fallback criteria."
+            >
+              <textarea
+                aria-label="Fallback shared instructions"
+                rows={3}
+                value={fallback.instructions}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    answerOnlyFallback: {
+                      ...fallback,
+                      instructions: event.target.value,
+                    },
+                  })
+                }
+              />
+            </Field>
+            <Field label="Fallback answer instructions">
+              <textarea
+                aria-label="Fallback answer instructions"
+                rows={3}
+                value={fallback.answer.instructions}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    answerOnlyFallback: {
+                      ...fallback,
+                      answer: {
+                        ...fallback.answer,
+                        instructions: event.target.value,
+                      },
+                    },
+                  })
+                }
+              />
+            </Field>
+            {Object.entries(fallback.answer.criteria).map(([label, value]) => (
+              <Field key={label} label={label.replaceAll("_", " ")}>
+                <textarea
+                  aria-label={`Fallback ${label} criterion`}
+                  rows={2}
+                  value={value}
+                  onChange={(event) =>
+                    setSettings({
+                      ...settings,
+                      answerOnlyFallback: {
+                        ...fallback,
+                        answer: {
+                          ...fallback.answer,
+                          criteria: {
+                            ...fallback.answer.criteria,
+                            [label]: event.target.value,
+                          },
+                        },
+                      },
+                    })
+                  }
+                />
+              </Field>
+            ))}
+          </div>
+        )}
+      </details>
+      <details className="disclosure">
         <summary>Question-specific criteria</summary>
         <JsonEditor
           label="Jev question overrides"
@@ -238,7 +335,7 @@ export function JevProfileEditor({
           <div className="history-row" key={profile.id}>
             <div>
               <strong>
-                {profile.name} · revision {profile.number}
+                {profile.name} Â· revision {profile.number}
               </strong>
               <p>{date(profile.createdAt)}</p>
             </div>

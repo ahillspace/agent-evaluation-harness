@@ -14,6 +14,7 @@ import {
   type BankRevision,
   type EvaluatorRevision,
   type RunRecord,
+  type JevAssessmentRecord,
 } from "../contracts.js";
 import { Database } from "./database.js";
 
@@ -69,6 +70,89 @@ function run(id: string): RunRecord {
 }
 
 describe("typed durable records", () => {
+  it("keeps fallback payloads out of observation while retaining per-call usage", async () => {
+    const db = await setup();
+    const criteria = jevProfileSettingsSchema.parse({ answerOnlyFallback: {} });
+    const record: JevAssessmentRecord = {
+      id: "ja",
+      runId: "r",
+      resultId: "q",
+      attemptId: "a",
+      createdAt: bank.createdAt,
+      status: "completed",
+      kind: "original",
+      published: true,
+      configuration: {
+        model: "jev-1.13.0",
+        connection: {
+          connectionId: "c",
+          provider: "typesafe",
+          settings: {},
+          credentialFields: [],
+        },
+        profile: {
+          id: "p",
+          bankId: "bank1",
+          number: 1,
+          name: "Trace checks",
+          createdAt: bank.createdAt,
+          digest: "p",
+          settings: criteria,
+        },
+      },
+      configurationHash: "config",
+      evidenceHash: "evidence",
+      attemptEvidenceHash: "attempt",
+      bankRevisionId: bank.id,
+      evaluatorRevisionId: evaluator.id,
+      evidence: {
+        schemaVersion: 1,
+        runId: "r",
+        resultId: "q",
+        attemptId: "a",
+        repetition: 1,
+        referenceCriteria: {},
+        finalText: "42",
+        question: bank.questions[0]!,
+        expected: 42,
+        finalAnswer: 42,
+        publicAgent: agentSchema.parse({ harness: "codex", model: "fixture" }),
+        startedAt: bank.createdAt,
+        finishedAt: bank.createdAt,
+        trace: { format: "unavailable", entries: null },
+      },
+      criteria,
+      fallback: {
+        trigger: {
+          error: { code: "token_limit_exceeded", message: "Too large" },
+          request: { large: "PRIVATE_TRACE" },
+          response: { detail: "PRIVATE_RESPONSE" },
+          usage: { inputTokens: 10 },
+        },
+        criteria: criteria.answerOnlyFallback!,
+        resultUsage: { inputTokens: 20 },
+      },
+      usage: { inputTokens: 30 },
+    };
+    db.insert("jevAssessment", record);
+    const [summary] = db.jevSummaries("r");
+    expect(summary).toMatchObject({
+      fallbackApplied: true,
+      fallbackUsage: { inputTokens: 10 },
+      fallbackResultUsage: { inputTokens: 20 },
+      usage: { inputTokens: 30 },
+    });
+    expect(summary).not.toHaveProperty("fallback");
+    expect(JSON.stringify(summary)).not.toContain("PRIVATE_");
+    expect(db.require("jevAssessment", "ja").fallback).toEqual(record.fallback);
+    db.insert("jevAssessment", { ...record, id: "plain", fallback: undefined });
+    const withoutFallback = db
+      .jevSummaries("r")
+      .find((item) => item.id === "plain");
+    expect(withoutFallback?.fallbackApplied).toBe(false);
+    expect(withoutFallback).not.toHaveProperty("fallbackUsage");
+    expect(withoutFallback).not.toHaveProperty("fallbackResultUsage");
+  });
   it("freezes canonical target configuration in blueprints", async () => {
     const db = await setup();
     const blueprint = db.insert("blueprint", {

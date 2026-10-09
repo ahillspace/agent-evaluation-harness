@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { answerFormatSchema, jsonSchema } from "../contracts.js";
+import { prepareTableauFeatureGate } from "./tableau-feature-gate.js";
 import {
   answerFormatJsonSchema,
   validateSubmittedAnswer,
@@ -39,6 +40,7 @@ if (mode === "connection") {
     command: string;
     args: string[];
     env: Record<string, string>;
+    features?: Record<string, boolean>;
   };
   const inherited = [
     "PATH",
@@ -53,13 +55,22 @@ if (mode === "connection") {
     "TEMP",
     "TMP",
   ];
-  const env = {
+  const inheritedEnv = {
     ...Object.fromEntries(
       inherited.flatMap((name) =>
         process.env[name] ? [[name, process.env[name]!]] : [],
       ),
     ),
-    ...binding.env,
+  };
+  const prepared = await prepareTableauFeatureGate(
+    binding.features ?? {},
+    binding.env,
+  );
+  const env = { ...inheritedEnv, ...prepared.env };
+  let cleanupPromise: Promise<void> | undefined;
+  const cleanup = () => {
+    cleanupPromise ??= prepared.cleanup().catch(() => undefined);
+    return cleanupPromise;
   };
   const child = spawn(binding.command, binding.args, {
     env,
@@ -74,11 +85,14 @@ if (mode === "connection") {
   child.once("error", () => {
     process.stderr.write("The connection process could not start.\n");
     process.exitCode = 1;
+    void cleanup();
     lines.close();
   });
   child.once("close", (code) => {
-    process.exitCode = code ?? 1;
-    lines.close();
+    void cleanup().finally(() => {
+      process.exitCode = code ?? 1;
+      lines.close();
+    });
   });
   lines.on("line", (line) => {
     if (line.length > 2_000_000) {

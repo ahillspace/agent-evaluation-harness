@@ -13,6 +13,7 @@ import {
   type RunRecord,
   type RunView,
   type RunObservation,
+  type JevAssessmentRecord,
 } from "../contracts.js";
 import { Database } from "../storage/database.js";
 import { AppError, errorMessage } from "../domain/errors.js";
@@ -359,11 +360,13 @@ export class AssessmentPassService {
   }
   private jevJudgment(
     j: PassJudgment,
-    record: Pick<
-      ReturnType<Database["jevSummaries"]>[number],
-      "id" | "status" | "checks" | "error" | "usage" | "reviewRequired"
-    >,
+    record: JevAssessmentRecord,
   ): PassJudgment {
+    const answer = record.checks?.answer;
+    const answerEligible =
+      record.status === "completed" &&
+      answer !== undefined &&
+      answer.confidence >= record.criteria.confidenceThreshold;
     return {
       ...j,
       jevAssessmentId: record.id,
@@ -372,17 +375,15 @@ export class AssessmentPassService {
           ? "error"
           : record.status === "pending"
             ? "unjudged"
-            : record.reviewRequired
-              ? "unjudged"
-              : record.checks?.answer.choice === "acceptable"
-                ? "correct"
-                : record.checks?.answer.choice === "incorrect"
-                  ? "incorrect"
-                  : "unjudged",
+            : answerEligible && answer.choice === "acceptable"
+              ? "correct"
+              : answerEligible && answer.choice === "incorrect"
+                ? "incorrect"
+                : "unjudged",
       explanation:
         record.error?.message ??
         (record.checks
-          ? `Answer: ${record.checks.answer.choice}; evidence: ${record.checks.evidence.choice}; reference: ${record.checks.reference.choice}.`
+          ? `Answer: ${record.checks.answer.choice}; evidence: ${record.checks.evidence?.choice ?? "not assessed"}; reference: ${record.checks.reference?.choice ?? "not assessed"}.`
           : "No classification returned."),
       ...(record.usage ? { usage: record.usage } : {}),
     };
@@ -658,7 +659,7 @@ export class AssessmentPassService {
             },
           );
           next = this.jevJudgment(judgment, record);
-          if (record.checks?.reference.choice === "suspected_issue") {
+          if (record.checks?.reference?.choice === "suspected_issue") {
             const findingId = `finding_${digest({ runId: run.id, questionId: result.questionId, kind: "reference" }).slice(0, 24)}`;
             if (!this.db.get("bankFinding", findingId))
               this.db.insert("bankFinding", {

@@ -26,6 +26,8 @@ Choose the provider whose API protocol the gateway implements and enter its base
 For an Anthropic-compatible gateway, select Anthropic and its API-key or bearer authentication mode.
 For a Bedrock gateway, supply the region and bearer token, and set the optional gateway URL.
 Enter the gateway's model ID if it does not expose a model catalog.
+Set `NODE_EXTRA_CA_CERTS` to a trusted PEM bundle path before starting the Node engine when Bedrock or managed child harnesses need a company CA.
+Node reads this setting at process startup.
 
 The built-in Bedrock Converse harness uses non-streaming requests.
 OpenCode's Bedrock integration requires ConverseStream support.
@@ -36,9 +38,60 @@ Connection discovery does not prove that a gateway accepts every model or invoca
 Create a Tableau connection for the intended server and site, then test it from **Settings**.
 In **Run**, select the connection and allowed actions under **Tools**.
 The engine manages the Tableau MCP process; an empty tool selection exposes no Tableau tools.
+When you check a connection or run with Tableau tools, the harness starts a local stdio MCP process using the saved Tableau server, site, and token.
+By default, it runs `npx -y @tableau/mcp-server@4.13.3`.
+If the package is not installed or cached locally, `npx -y` fetches it into npm's cache and runs it without a confirmation prompt.
+This is an on-demand cache install, not a global install.
+The harness does not attach to an already-running MCP server or use servers configured in Codex, Claude Code, or OpenCode.
+To use another Tableau MCP version, change the package spec in `mcpArgs` under **Tableau MCP settings (JSON)**.
+To use another compatible local server, set `mcpCommand` and `mcpArgs`.
+The machine running the harness needs Node.js/npm and npm access for an uncached package.
+The web editor's **Tableau MCP settings (JSON)** accepts `mcpCommand`, `mcpArgs`, `mcpEnv`, and `mcpFeatures`.
+This object configures the local process; it is not a JSON request sent to the MCP server.
+The runtime communicates over stdio and supplies Tableau authentication through its launch environment.
+A compatible custom server must implement stdio MCP and accept these harness-managed environment variables:
+
+| Variable                    | Value                                                           |
+| --------------------------- | --------------------------------------------------------------- |
+| `TRANSPORT`                 | `stdio`                                                         |
+| `AUTH`                      | `pat`                                                           |
+| `SERVER`                    | The saved Tableau server URL.                                   |
+| `SITE_NAME`                 | The saved site content URL.                                     |
+| `PAT_NAME`                  | The saved personal access token name.                           |
+| `PAT_VALUE`                 | The secret personal access token value.                         |
+| `INCLUDE_TOOLS`             | Selected tool names as a comma-separated list, when restricted. |
+| `ENABLE_MCP_SITE_SETTINGS`  | `false`                                                         |
+| `PRODUCT_TELEMETRY_ENABLED` | `false`                                                         |
+| `DISABLE_LOG_MASKING`       | `false`                                                         |
+
+Use `mcpEnv` for additional MCP server environment variables as string values.
+This lets a connection use server options added in another Tableau MCP version without a harness update.
+Variable names retain their exact spelling and case, and values pass through literally without shell expansion.
+Use the spelling expected by the MCP server, and do not supply two names that differ only by case.
+Use strings for all values, including numbers, booleans, and serialized JSON.
+The harness reserves authentication, transport, telemetry, tool selection, and its internal feature override variable.
+These are public settings saved with connection and run configurations.
+Do not put credentials in `mcpEnv`; use the protected credential field.
+
+For example, set `mcpEnv` to `{"INCLUDE_DATASOURCE_IDS":"id-1,id-2"}` to bound Tableau MCP tool requests and results to those datasource IDs.
+The PAT authenticates to Tableau, and the MCP datasource filter bounds the resources available through this connection.
+Tableau documents datasource scoping in its [self-hosted deployment guide](https://tableau.github.io/tableau-mcp/docs/enterprise/tableau-server).
+`INCLUDE_TOOLS` is controlled by the tool allowlist in **Run**.
+
+Use `mcpFeatures` for feature flags as a map of feature names to booleans.
+The harness overlays these values on the defaults shipped by the selected Tableau MCP package through Tableau MCP's custom feature gate provider interface.
+Feature names stay user-configurable so new Tableau flags do not require a harness release.
+See Tableau's [feature flag documentation](https://tableau.github.io/tableau-mcp/docs/developers/feature-flags) for the current provider behavior.
+
+For example, set `mcpFeatures` to `{"knowledge-tools":true}` to enable Tableau Knowledge tools in packages that support that flag.
+The site must have Tableau Knowledge enabled, and the feature is available on Tableau+ sites.
+Query and inspect require Viewer or higher; manage requires Creator or higher and can change shared Knowledge context.
+Select only the Knowledge tools the agent should use in **Run**.
+See Tableau's [Knowledge query](https://tableau.github.io/tableau-mcp/docs/tools/knowledge/query-knowledge-context), [inspect](https://tableau.github.io/tableau-mcp/docs/tools/knowledge/inspect-knowledge-context), and [manage](https://tableau.github.io/tableau-mcp/docs/tools/knowledge/manage-knowledge-context) documentation.
 
 Keep datasource references consistent across the question context, system prompt, and datasource setting.
-A datasource ID provides prompt guidance; it does not restrict the account's underlying access.
+A datasource ID in the Run setup provides prompt guidance.
+Use `mcpEnv.INCLUDE_DATASOURCE_IDS` when the MCP connection must enforce a datasource boundary.
 Requests sharing a Tableau session credential can wait for that connection even when the run permits additional concurrency.
 
 ## Create a question bank

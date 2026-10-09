@@ -1,4 +1,4 @@
-import { it, expect } from "vitest";
+import { it, expect, vi } from "vitest";
 import { createServer } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,6 +7,69 @@ import { invokeBedrock } from "./bedrock.js";
 import { createProcessSupervisor } from "./platform.js";
 import type { AgentConfig, RuntimeEvent } from "../contracts.js";
 import type { ProcessSupervisor } from "./process-supervisor.js";
+
+it("surfaces safe TLS cause codes when Bedrock transport fails", async () => {
+  const transportCause = Object.assign(new Error("private TLS details"), {
+    code: "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      throw new TypeError("fetch failed with private endpoint details", {
+        cause: transportCause,
+      });
+    }),
+  );
+  try {
+    let failure: unknown;
+    try {
+      await invokeBedrock({
+        agent: {
+          harness: "bedrock",
+          model: "model",
+          systemPrompt: "Judge",
+          settings: {},
+          tools: [],
+          connections: [
+            {
+              connectionId: "fixture",
+              provider: "amazon-bedrock",
+              settings: {
+                baseUrl: "https://gateway.example/bedrock",
+                region: "us-east-1",
+              },
+              credentialFields: ["apiKey"],
+            },
+          ],
+        },
+        directory: tmpdir(),
+        prompt: "Question",
+        role: "judge",
+        mcp: [],
+        env: { AWS_BEARER_TOKEN_BEDROCK: "fixture-secret" },
+        supervisor: {} as ProcessSupervisor,
+        signal: AbortSignal.timeout(5000),
+        timeoutMs: 5000,
+        sanitize: (value) => value.replaceAll("fixture-secret", "[REDACTED]"),
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      code: "infrastructure_failure",
+      providerDiagnostics: {
+        code: "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+      },
+    });
+    expect((failure as Error).message).toContain(
+      "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+    );
+    expect((failure as Error).message).not.toContain("private");
+    expect(JSON.stringify(failure)).not.toContain("fixture-secret");
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
 
 it("retains trusted rejection status, refuses redirects, and bounds nonstream bodies", async () => {
   let mode = "reject";

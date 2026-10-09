@@ -76,6 +76,117 @@ it("freezes provider authentication and materializes only its selected secret", 
   });
   expect(JSON.stringify(binding)).not.toContain("fixture-token");
 });
+it("preserves arbitrary MCP environment variable names through materialization", async () => {
+  const { service } = await fixture();
+  const saved = await service.save({
+    name: "Tableau",
+    provider: "tableau",
+    settings: {
+      server: "https://example.tableau.com",
+      site: "example",
+      patName: "test",
+      mcpEnv: {
+        include_datasource_ids: "datasource-1",
+        Future_MCP_Option: "enabled",
+        AUTH_TIMEOUT: "30",
+        TOKEN_LIMIT: "100",
+        SECRET_PROVIDER: "local",
+      },
+    },
+    credentials: { patValue: "fixture-pat" },
+  });
+  expect(saved.settings.mcpEnv).toEqual({
+    include_datasource_ids: "datasource-1",
+    Future_MCP_Option: "enabled",
+    AUTH_TIMEOUT: "30",
+    TOKEN_LIMIT: "100",
+    SECRET_PROVIDER: "local",
+  });
+  const binding = await service.freeze({
+    connectionId: saved.id,
+    provider: "tableau",
+    settings: {},
+    credentialFields: [],
+  });
+  const material = await service.materialize(
+    [binding],
+    ["tableau.list-datasources"],
+  );
+  expect(material.mcp[0]?.env).toMatchObject({
+    include_datasource_ids: "datasource-1",
+    Future_MCP_Option: "enabled",
+    AUTH_TIMEOUT: "30",
+    TOKEN_LIMIT: "100",
+    SECRET_PROVIDER: "local",
+  });
+});
+it("rejects case-insensitive MCP environment duplicates and managed names", async () => {
+  const { service } = await fixture();
+  const settings = {
+    server: "https://example.tableau.com",
+    site: "example",
+    patName: "test",
+  };
+  await expect(
+    service.save({
+      name: "Duplicate",
+      provider: "tableau",
+      settings: {
+        ...settings,
+        mcpEnv: { Future_Option: "one", future_option: "two" },
+      },
+      credentials: { patValue: "fixture-pat" },
+    }),
+  ).rejects.toThrow(/unique regardless of case/i);
+  await expect(
+    service.save({
+      name: "Managed",
+      provider: "tableau",
+      settings: { ...settings, mcpEnv: { server: "https://other.example" } },
+      credentials: { patValue: "fixture-pat" },
+    }),
+  ).rejects.toThrow(/cannot replace/i);
+});
+it("rejects NUL characters in MCP environment values", async () => {
+  const { service } = await fixture();
+  await expect(
+    service.save({
+      name: "Invalid environment",
+      provider: "tableau",
+      settings: {
+        server: "https://example.tableau.com",
+        site: "example",
+        patName: "test",
+        mcpEnv: { future_option: "before\0after" },
+      },
+      credentials: { patValue: "fixture-pat" },
+    }),
+  ).rejects.toThrow(/NUL/i);
+});
+it("rejects common credential aliases in MCP environment names", async () => {
+  const { service } = await fixture();
+  const settings = {
+    server: "https://example.tableau.com",
+    site: "example",
+    patName: "test",
+  };
+  for (const name of [
+    "MY_PAT",
+    "TABLEAU_PAT",
+    "API_KEY",
+    "CUSTOM_AUTHORIZATION",
+    "TLS_PRIVATE_KEY",
+  ]) {
+    await expect(
+      service.save({
+        name: "Credential-like environment",
+        provider: "tableau",
+        settings: { ...settings, mcpEnv: { [name]: "fixture-value" } },
+        credentials: { patValue: "fixture-pat" },
+      }),
+    ).rejects.toThrow(/credential values must use/i);
+  }
+});
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });

@@ -35,6 +35,44 @@ Alternatively, set `AEH_URL` in the CLI's environment.
 The CLI accepts loopback HTTP endpoints only.
 The HTTP equivalent is `POST /api/commands/<operation>` with the same JSON body; discovery uses `GET /api/discovery`.
 
+## Save a Tableau connection
+
+Use `connections.save` to create or update a saved Tableau connection.
+The settings object holds the Tableau server, site, token name, local MCP command and arguments, additional environment variables, and feature flags.
+The PAT value belongs under `credentials.patValue`, separate from the settings object.
+
+```json
+{
+  "name": "Tableau QA",
+  "provider": "tableau",
+  "settings": {
+    "server": "https://tableau.example.com",
+    "site": "my-site",
+    "patName": "harness-token",
+    "mcpCommand": "npx",
+    "mcpArgs": ["-y", "@tableau/mcp-server@4.13.3"],
+    "mcpEnv": {
+      "INCLUDE_DATASOURCE_IDS": "your-datasource-id"
+    },
+    "mcpFeatures": {
+      "knowledge-tools": true
+    }
+  },
+  "credentials": {
+    "patValue": "SUPPLY_VIA_PROTECTED_INPUT"
+  }
+}
+```
+
+Send this object to `node dist/cli.js connections.save --stdin` or `POST /api/commands/connections.save`.
+For updates, include the connection `id`; omit `credentials` to keep the currently saved PAT.
+The default `mcpCommand` is `npx`, and the default `mcpArgs` are `["-y", "@tableau/mcp-server@4.13.3"]`.
+The web editor's **Tableau MCP settings (JSON)** accepts `mcpCommand`, `mcpArgs`, `mcpEnv`, and `mcpFeatures`.
+`mcpEnv` maps additional environment variable names to string values, and `mcpFeatures` maps feature names to booleans.
+The harness reserves its authentication, transport, tool selection, and internal feature override variable.
+Do not put a real PAT in `settings`, `mcpArgs`, command-line arguments, or a committed JSON file.
+Use the web editor or provide the credential through controlled standard input.
+
 ## Create a bank and launch a run
 
 Save this small example as `bank.json`:

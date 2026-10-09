@@ -6,6 +6,7 @@ import type { AgentConfig, Json, RuntimeEvent } from "../contracts.js";
 import { jsonSchema } from "../contracts.js";
 import { validateModelSettings } from "../contracts/model-settings.js";
 import { createHarnessBridges, record } from "./harness.js";
+import { safeFetchDiagnostics } from "./safe-fetch-diagnostics.js";
 import type { McpBinding } from "./connections.js";
 import { McpSession } from "./mcp-session.js";
 import type { ProcessSupervisor } from "./process-supervisor.js";
@@ -32,12 +33,15 @@ const responseSchema = z.object({
 export class BedrockFailure extends Error {
   usage?: { inputTokens: number; outputTokens: number };
   toolActivity = false;
+  providerDiagnostics?: { name?: string; code?: string };
   constructor(
     message: string,
     readonly code: string,
     readonly status?: number,
+    providerDiagnostics?: { name?: string; code?: string },
   ) {
     super(message);
+    this.providerDiagnostics = providerDiagnostics;
   }
 }
 
@@ -391,17 +395,33 @@ export async function invokeBedrock(input: {
         "target_failure",
       );
     } catch (error) {
-      const failure =
-        error instanceof BedrockFailure
-          ? error
-          : new BedrockFailure(
-              error instanceof z.ZodError
-                ? "The provider or tool response failed validation."
-                : "The Bedrock transport or tool invocation did not complete.",
-              error instanceof z.ZodError
-                ? "evidence_failure"
-                : "infrastructure_failure",
-            );
+      let failure: BedrockFailure;
+      if (error instanceof BedrockFailure) failure = error;
+      else {
+        const diagnostic = safeFetchDiagnostics(error);
+        const providerCode = diagnostic.codes[0];
+        const providerName = diagnostic.names[0];
+        const suffix = providerCode
+          ? ` (${providerCode})`
+          : providerName
+            ? ` (${providerName})`
+            : "";
+        failure = new BedrockFailure(
+          error instanceof z.ZodError
+            ? "The provider or tool response failed validation."
+            : `The Bedrock transport or tool invocation did not complete${suffix}.`,
+          error instanceof z.ZodError
+            ? "evidence_failure"
+            : "infrastructure_failure",
+          undefined,
+          providerCode || providerName
+            ? {
+                ...(providerName ? { name: providerName } : {}),
+                ...(providerCode ? { code: providerCode } : {}),
+              }
+            : undefined,
+        );
+      }
       failure.usage = { inputTokens, outputTokens };
       failure.toolActivity = toolActivity;
       throw failure;

@@ -32,6 +32,40 @@ const endpoint = z
       !url.hash
     );
   }, "Use a server URL without credentials, a query, or a fragment.");
+const tableauEnvironment = z
+  .record(
+    z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+    z
+      .string()
+      .max(20_000)
+      .refine((value) => !value.includes("\0"), {
+        message: "MCP environment values cannot contain NUL characters.",
+      }),
+  )
+  .default({})
+  .refine((value) => Object.keys(value).length <= 100, {
+    message: "Use no more than 100 additional MCP environment variables.",
+  });
+const tableauFeatures = z
+  .record(z.string().min(1).max(200), z.boolean())
+  .default({})
+  .refine((value) => Object.keys(value).length <= 200, {
+    message: "Use no more than 200 MCP feature flags.",
+  });
+const tableauManagedEnvironment = new Set([
+  "TRANSPORT",
+  "AUTH",
+  "SERVER",
+  "SITE_NAME",
+  "PAT_NAME",
+  "PAT_VALUE",
+  "ENABLE_MCP_SITE_SETTINGS",
+  "PRODUCT_TELEMETRY_ENABLED",
+  "DISABLE_LOG_MASKING",
+  "INCLUDE_TOOLS",
+  "EXCLUDE_TOOLS",
+  "AEH_TABLEAU_FEATURE_OVERRIDES",
+]);
 const tableauSettings = z
   .object({
     server: endpoint,
@@ -42,6 +76,8 @@ const tableauSettings = z
       .array(z.string().max(2000))
       .max(100)
       .default(["-y", "@tableau/mcp-server@4.13.3"]),
+    mcpEnv: tableauEnvironment,
+    mcpFeatures: tableauFeatures,
   })
   .strict();
 export interface McpBinding {
@@ -50,6 +86,7 @@ export interface McpBinding {
   args: string[];
   env: Record<string, string>;
   tools: string[];
+  features?: Record<string, boolean>;
 }
 
 export class ConnectionService {
@@ -80,6 +117,18 @@ export class ConnectionService {
               type: "array",
               items: { type: "string" },
               default: ["-y", "@tableau/mcp-server@4.13.3"],
+            },
+            mcpEnv: {
+              type: "object",
+              title: "Additional MCP environment variables",
+              additionalProperties: { type: "string" },
+              default: {},
+            },
+            mcpFeatures: {
+              type: "object",
+              title: "MCP feature flags",
+              additionalProperties: { type: "boolean" },
+              default: {},
             },
           },
           additionalProperties: false,
@@ -155,6 +204,17 @@ export class ConnectionService {
     if (provider === "typesafe") return z.object({}).strict().parse(value);
     if (provider === "tableau") {
       const settings = tableauSettings.parse(value);
+      const environmentNames = Object.keys(settings.mcpEnv);
+      const normalizedEnvironmentNames = environmentNames.map((name) =>
+        name.toUpperCase(),
+      );
+      if (
+        new Set(normalizedEnvironmentNames).size !==
+        normalizedEnvironmentNames.length
+      )
+        throw new Error(
+          "MCP environment variable names must be unique regardless of case.",
+        );
       if (
         settings.mcpArgs.some((arg) =>
           /(?:api[-_]?key|password|pat[-_]?value|authorization|secret|token)[=:]/i.test(
@@ -163,6 +223,35 @@ export class ConnectionService {
         )
       )
         throw new Error("MCP arguments cannot contain credentials.");
+      if (
+        normalizedEnvironmentNames.some((name) =>
+          tableauManagedEnvironment.has(name),
+        )
+      )
+        throw new Error(
+          "MCP environment settings cannot replace credentials, transport, tool selection, or harness-managed values.",
+        );
+      if (
+        normalizedEnvironmentNames.some((name) =>
+          /(?:^|[_-])(API[_-]?KEY|ACCESS[_-]?KEY|PAT(?:[-_]?VALUE)?|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTHORIZATION|PRIVATE[_-]?KEY)$/.test(
+            name,
+          ),
+        )
+      )
+        throw new Error(
+          "Credential values must use the separate protected credential fields, not MCP environment settings.",
+        );
+      if (
+        Object.keys(settings.mcpFeatures).length &&
+        normalizedEnvironmentNames.some((name) =>
+          ["FEATURE_GATE_PROVIDER", "FEATURE_GATE_PROVIDER_CONFIG"].includes(
+            name,
+          ),
+        )
+      )
+        throw new Error(
+          "Use mcpFeatures or a custom feature gate provider, but not both.",
+        );
       return settings;
     }
     if (MODEL_PROVIDERS.some((id) => id === provider))
@@ -336,6 +425,7 @@ export class ConnectionService {
           command: command.executable,
           args: command.args,
           tools: selected,
+          features: settings.mcpFeatures,
           env: {
             TRANSPORT: "stdio",
             AUTH: "pat",
@@ -347,6 +437,7 @@ export class ConnectionService {
             PRODUCT_TELEMETRY_ENABLED: "false",
             DISABLE_LOG_MASKING: "false",
             ...(selected.length ? { INCLUDE_TOOLS: selected.join(",") } : {}),
+            ...settings.mcpEnv,
           },
         });
       } else {

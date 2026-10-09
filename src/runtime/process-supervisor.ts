@@ -26,6 +26,57 @@ export interface ProcessResult {
   durationMs: number;
 }
 
+/** Internal handoff for a completed process whose ownership cleanup failed. */
+export class ProcessCleanupFailure extends Error {
+  readonly code = "cleanup_failed";
+  cause?: unknown;
+  evidence?: unknown;
+  private readonly processResult?: ProcessResult;
+
+  constructor(input: {
+    processResult?: ProcessResult;
+    cause?: unknown;
+    message?: string;
+  }) {
+    const originalMessage =
+      input.cause instanceof Error ? input.cause.message : undefined;
+    super(
+      input.message ??
+        (originalMessage
+          ? `${originalMessage} Process cleanup also failed; runtime admissions are stopped.`
+          : "Process cleanup failed. Runtime admissions are stopped."),
+    );
+    this.name = "ProcessCleanupFailure";
+    this.cause = input.cause;
+    this.processResult = input.processResult;
+    Object.defineProperty(this, "cause", {
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(this, "processResult", {
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+  }
+
+  takeProcessResult(): ProcessResult | undefined {
+    return this.processResult;
+  }
+
+  preserveOriginal(input: {
+    error: Error;
+    message?: string;
+    diagnostic?: unknown;
+  }): this {
+    this.cause = input.error;
+    if (input.diagnostic !== undefined) this.evidence = input.diagnostic;
+    this.message = `${(input.message ?? input.error.message).slice(0, 1000)} Process cleanup also failed; runtime admissions are stopped.`;
+    return this;
+  }
+}
+
 /** Coordinates runtime invocations through owned process scopes. */
 export class ProcessSupervisor {
   private reserved = 0;
@@ -138,11 +189,10 @@ export class ProcessSupervisor {
         await this.driver.cleanup(id);
         cleaned = true;
       } catch {
-        const error = new Error(
-          "Process cleanup failed. Runtime admissions are stopped.",
-        ) as Error & { code: string };
-        error.code = "cleanup_failed";
-        throw error;
+        throw new ProcessCleanupFailure({
+          processResult: result,
+          cause: executionError,
+        });
       }
       if (executionError) throw executionError;
       return result!;

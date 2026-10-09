@@ -133,9 +133,20 @@ export function runPerformance(
       researcherUsage.push({});
   }
   const originalJudges = db.originalJudgeUsage(runId);
-  const jev = db
-    .jevSummaries(runId)
-    .map((a) => ({ usage: a.usage, pending: a.status === "pending" }));
+  const jev = db.jevSummaries(runId).flatMap((a) =>
+    a.fallbackApplied
+      ? [
+          {
+            usage: a.fallbackUsage,
+            pending: false,
+          },
+          {
+            usage: a.fallbackResultUsage,
+            pending: a.status === "pending",
+          },
+        ]
+      : [{ usage: a.usage, pending: a.status === "pending" }],
+  );
   const llm = [
     ...new Map(
       db.passJudgeUsage(runId).map((report) => [report.judgmentId, report]),

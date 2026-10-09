@@ -37,6 +37,7 @@ import {
   type PublicQuestion,
 } from "../contracts.js";
 import { ConnectionService } from "./connections.js";
+import { prepareTableauFeatureGate } from "./tableau-feature-gate.js";
 import { discoverHarness } from "./discovery.js";
 import {
   buildHarnessCommand,
@@ -47,7 +48,10 @@ import {
   redact,
   settingsSchema,
 } from "./harness.js";
-import type { ProcessSupervisor } from "./process-supervisor.js";
+import {
+  ProcessCleanupFailure,
+  type ProcessSupervisor,
+} from "./process-supervisor.js";
 import { createPlatformServices, type PlatformServices } from "./platform.js";
 import { ConnectionGate, tableauSessionKey } from "./connection-gate.js";
 import { withInvocationDeadline } from "./deadline.js";
@@ -422,48 +426,58 @@ class LocalRuntime implements RuntimePort {
       ["tableau.*"],
     );
     const mcp = material.mcp[0]!;
+    const prepared = await prepareTableauFeatureGate(
+      mcp.features ?? {},
+      mcp.env,
+    );
     const stop = new AbortController();
     let tools: Json | undefined;
-    const probe = await this.supervisor.run({
-      executable: mcp.command,
-      args: mcp.args,
-      cwd: this.directory,
-      env: mcp.env,
-      timeoutMs: 90_000,
-      processLimit: 16,
-      signal: stop.signal,
-      keepStdinOpen: true,
-      input: `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "agent-evaluation-harness", version: "0.1.0" } } })}\n`,
-      onLine(line, write) {
-        let raw: unknown;
-        try {
-          raw = JSON.parse(redact(line, material.secrets));
-        } catch {
-          return;
-        }
-        if (!record(raw)) return;
-        if (raw.id === 1 && raw.result) {
-          write(
-            `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
-          );
-          write(
-            `${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`,
-          );
-        }
-        if (
-          raw.id === 2 &&
-          record(raw.result) &&
-          Array.isArray(raw.result.tools)
-        ) {
-          tools = raw.result.tools as Json;
-          stop.abort();
-        }
-      },
-    });
+    let probeTimedOut = false;
+    try {
+      const probe = await this.supervisor.run({
+        executable: mcp.command,
+        args: mcp.args,
+        cwd: this.directory,
+        env: prepared.env,
+        timeoutMs: 90_000,
+        processLimit: 16,
+        signal: stop.signal,
+        keepStdinOpen: true,
+        input: `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "agent-evaluation-harness", version: "0.1.0" } } })}\n`,
+        onLine(line, write) {
+          let raw: unknown;
+          try {
+            raw = JSON.parse(redact(line, material.secrets));
+          } catch {
+            return;
+          }
+          if (!record(raw)) return;
+          if (raw.id === 1 && raw.result) {
+            write(
+              `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
+            );
+            write(
+              `${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`,
+            );
+          }
+          if (
+            raw.id === 2 &&
+            record(raw.result) &&
+            Array.isArray(raw.result.tools)
+          ) {
+            tools = raw.result.tools as Json;
+            stop.abort();
+          }
+        },
+      });
+      probeTimedOut = probe.timedOut;
+    } finally {
+      await prepared.cleanup();
+    }
     if (!tools)
       return {
         ok: false,
-        message: probe.timedOut
+        message: probeTimedOut
           ? "Tableau accepted the credentials, but MCP tool discovery timed out."
           : "Tableau accepted the credentials, but MCP tool discovery failed.",
       };
@@ -760,6 +774,14 @@ class LocalRuntime implements RuntimePort {
               toolActivity: error.toolActivity,
               usage: error.usage,
             }),
+            {
+              ...(error.providerDiagnostics
+                ? { providerDiagnostics: error.providerDiagnostics }
+                : {}),
+              ...(error.status !== undefined
+                ? { statusCode: error.status }
+                : {}),
+            },
           );
         throw error;
       } finally {
@@ -803,132 +825,194 @@ class LocalRuntime implements RuntimePort {
         }),
     );
     let result;
+    let cleanupFailure: ProcessCleanupFailure | undefined;
     try {
-      result = await this.supervisor.run({
-        ...command,
-        signal: input.signal,
-        timeoutMs: input.timeoutMs,
-        maxOutputBytes: input.maxOutputBytes ?? 4_000_000,
-        processLimit: 16,
-        onLine(line) {
-          let raw: unknown;
-          try {
-            raw = JSON.parse(redact(line, secrets));
-          } catch {
-            transcriptComplete = false;
-            return;
-          }
-          if (!record(raw)) {
-            transcriptComplete = false;
-            return;
-          }
-          transcript.push(raw as Json);
-          const id =
-            typeof raw.thread_id === "string"
-              ? raw.thread_id
-              : typeof raw.sessionID === "string"
-                ? raw.sessionID
-                : typeof raw.session_id === "string"
-                  ? raw.session_id
-                  : undefined;
-          if (id && !conversationId) {
-            if (input.conversationId && id !== input.conversationId)
+      try {
+        result = await this.supervisor.run({
+          ...command,
+          signal: input.signal,
+          timeoutMs: input.timeoutMs,
+          maxOutputBytes: input.maxOutputBytes ?? 4_000_000,
+          processLimit: 16,
+          onLine(line) {
+            let raw: unknown;
+            try {
+              raw = JSON.parse(redact(line, secrets));
+            } catch {
+              transcriptComplete = false;
+              return;
+            }
+            if (!record(raw)) {
+              transcriptComplete = false;
+              return;
+            }
+            transcript.push(raw as Json);
+            const id =
+              typeof raw.thread_id === "string"
+                ? raw.thread_id
+                : typeof raw.sessionID === "string"
+                  ? raw.sessionID
+                  : typeof raw.session_id === "string"
+                    ? raw.session_id
+                    : undefined;
+            if (id && !conversationId) {
+              if (input.conversationId && id !== input.conversationId)
+                throw new RuntimeFailure(
+                  "continuity_failed",
+                  "The provider returned a different conversation.",
+                );
+              conversationId = id;
+              input.onEvent?.({
+                type: "conversation.created",
+                message: "Provider conversation established.",
+                data: { conversationId: id },
+              });
+            } else if (id && conversationId !== id)
               throw new RuntimeFailure(
                 "continuity_failed",
-                "The provider returned a different conversation.",
+                "The provider changed conversations during a turn.",
               );
-            conversationId = id;
-            input.onEvent?.({
-              type: "conversation.created",
-              message: "Provider conversation established.",
-              data: { conversationId: id },
-            });
-          } else if (id && conversationId !== id)
-            throw new RuntimeFailure(
-              "continuity_failed",
-              "The provider changed conversations during a turn.",
-            );
-          const event = normalizeEvent(input.agent.harness, raw);
-          if (
-            input.agent.harness === "claude" &&
-            raw.type === "result" &&
-            event?.type === "error" &&
-            record(raw.usage)
-          ) {
-            const usage = { ...raw.usage, cost: raw.total_cost_usd };
-            invocationUsage.add(usage);
-            input.onEvent?.({
-              type: "usage",
-              message: "Provider usage before failure.",
-              data: usage as Json,
+            const normalizedEvent = normalizeEvent(input.agent.harness, raw);
+            const event =
+              normalizedEvent?.type === "error"
+                ? {
+                    ...normalizedEvent,
+                    message: redact(normalizedEvent.message, secrets),
+                    ...(normalizedEvent.data
+                      ? {
+                          data: JSON.parse(
+                            redact(
+                              JSON.stringify(normalizedEvent.data),
+                              secrets,
+                            ),
+                          ) as Json,
+                        }
+                      : {}),
+                  }
+                : normalizedEvent;
+            if (
+              input.agent.harness === "claude" &&
+              raw.type === "result" &&
+              event?.type === "error" &&
+              record(raw.usage)
+            ) {
+              const usage = { ...raw.usage, cost: raw.total_cost_usd };
+              invocationUsage.add(usage);
+              input.onEvent?.({
+                type: "usage",
+                message: "Provider usage before failure.",
+                data: usage as Json,
+              });
+            }
+            if (event?.type === "message")
+              text =
+                input.agent.harness === "opencode"
+                  ? text + event.message
+                  : event.message;
+            if (event?.type.startsWith("tool.")) toolActivity = true;
+            if (event?.type === "error") {
+              providerError = event.message;
+              if (
+                record(event.data) &&
+                typeof event.data.providerCode === "string"
+              )
+                providerCode = event.data.providerCode;
+              if (
+                record(event.data) &&
+                typeof event.data.statusCode === "number"
+              )
+                providerStatus = event.data.statusCode;
+              if (
+                record(event.data) &&
+                typeof event.data.retryAfterMs === "number"
+              )
+                providerRetryAfterMs = event.data.retryAfterMs;
+            }
+            if (
+              event?.type === "tool.completed" &&
+              ++toolCalls > limits.maxTurns
+            )
+              throw new RuntimeFailure(
+                "target_failure",
+                "The configured tool call limit was reached.",
+              );
+            if (event?.type === "usage") invocationUsage.add(event.data);
+            if (event && event.type !== "conversation.started")
+              input.onEvent?.(event);
+          },
+        });
+      } catch (error) {
+        if (!(error instanceof ProcessCleanupFailure)) throw error;
+        const processResult = error.takeProcessResult();
+        if (!processResult) {
+          if (error.cause instanceof Error) {
+            const originalError = error.cause;
+            const message = redact(originalError.message, secrets);
+            error.preserveOriginal({
+              error: originalError,
+              message,
+              diagnostic: {
+                ...(originalError instanceof RuntimeFailure
+                  ? { code: originalError.code }
+                  : {}),
+                message: message.slice(0, 1000),
+              },
             });
           }
-          if (event?.type === "message")
-            text =
-              input.agent.harness === "opencode"
-                ? text + event.message
-                : event.message;
-          if (event?.type.startsWith("tool.")) toolActivity = true;
-          if (event?.type === "error") {
-            providerError = event.message;
-            if (
-              record(event.data) &&
-              typeof event.data.providerCode === "string"
-            )
-              providerCode = event.data.providerCode;
-            if (record(event.data) && typeof event.data.statusCode === "number")
-              providerStatus = event.data.statusCode;
-            if (
-              record(event.data) &&
-              typeof event.data.retryAfterMs === "number"
-            )
-              providerRetryAfterMs = event.data.retryAfterMs;
-          }
-          if (event?.type === "tool.completed" && ++toolCalls > limits.maxTurns)
-            throw new RuntimeFailure(
-              "target_failure",
-              "The configured tool call limit was reached.",
-            );
-          if (event?.type === "usage") invocationUsage.add(event.data);
-          if (event && event.type !== "conversation.started")
-            input.onEvent?.(event);
-        },
-      });
+          throw error;
+        }
+        cleanupFailure = error;
+        result = processResult;
+      }
     } finally {
       release();
     }
+    const throwFailure = (failure: RuntimeFailure): never => {
+      if (cleanupFailure)
+        throw cleanupFailure.preserveOriginal({
+          error: failure,
+          message: redact(failure.message, secrets),
+          diagnostic: {
+            code: failure.code,
+            message: redact(failure.message, secrets).slice(0, 1000),
+          },
+        });
+      throw failure;
+    };
     if (result.interrupted)
-      throw new RuntimeFailure(
-        "interrupted",
-        "The invocation was interrupted.",
-        {
+      throwFailure(
+        new RuntimeFailure("interrupted", "The invocation was interrupted.", {
           category: "unknown",
           transient: false,
           retrySafety: "unknown",
           usage: invocationUsage.value(),
-        },
+        }),
       );
     if (result.timedOut)
-      throw new RuntimeFailure(
-        "timeout",
-        "The invocation exceeded its time limit.",
-        {
-          category: "timeout",
-          transient: false,
-          retrySafety: "unknown",
-          usage: invocationUsage.value(),
-        },
+      throwFailure(
+        new RuntimeFailure(
+          "timeout",
+          "The invocation exceeded its time limit.",
+          {
+            category: "timeout",
+            transient: false,
+            retrySafety: "unknown",
+            usage: invocationUsage.value(),
+          },
+        ),
       );
     if (result.outputLimited)
-      throw new RuntimeFailure(
-        "output_limit",
-        "The invocation exceeded its output limit.",
-        {
-          category: "harness",
-          transient: false,
-          retrySafety: "unknown",
-          usage: invocationUsage.value(),
-        },
+      throwFailure(
+        new RuntimeFailure(
+          "output_limit",
+          "The invocation exceeded its output limit.",
+          {
+            category: "harness",
+            transient: false,
+            retrySafety: "unknown",
+            usage: invocationUsage.value(),
+          },
+        ),
       );
     if (result.exitCode !== 0 || providerError) {
       const message = redact(
@@ -948,7 +1032,7 @@ class LocalRuntime implements RuntimePort {
         transcript,
         complete: transcriptComplete && result.exitCode !== null,
       });
-      throw new RuntimeFailure(
+      const providerFailure = new RuntimeFailure(
         infrastructure ? "infrastructure_failure" : "target_failure",
         message,
         providerExecutionFailure({
@@ -968,7 +1052,20 @@ class LocalRuntime implements RuntimePort {
           statusCode: providerStatus ?? null,
         },
       );
+      if (cleanupFailure)
+        throw cleanupFailure.preserveOriginal({
+          error: providerFailure,
+          message: redact(providerFailure.message, secrets),
+          diagnostic: {
+            code: providerFailure.code,
+            message: redact(providerFailure.message, secrets).slice(0, 1000),
+            providerCode: providerCode ?? null,
+            statusCode: providerStatus ?? null,
+          },
+        });
+      throw providerFailure;
     }
+    if (cleanupFailure) throw cleanupFailure;
     return {
       text,
       conversationId,

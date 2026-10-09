@@ -7,7 +7,10 @@ import { JevProfileEditor } from "./jev-profile.js";
 import { JudgeSavedAnswers } from "./judge-saved.js";
 import { AgentSettings } from "./agent-settings.js";
 import { initialSetup } from "./drafts.js";
-import type { JevAssessmentSummary } from "../contracts.js";
+import {
+  jevProfileSettingsSchema,
+  type JevAssessmentSummary,
+} from "../contracts.js";
 
 describe("Jev presentation boundaries", () => {
   it("distinguishes provider token capacity from an incorrect answer", () => {
@@ -28,6 +31,8 @@ describe("Jev presentation boundaries", () => {
     expect(html).toContain("Reference consistency criteria");
     expect(html).toContain('aria-label="Jev question overrides"');
     expect(html).toContain('aria-label="Jev confidence threshold"');
+    expect(html).toContain("Allow answer-only fallback");
+    expect(html).not.toContain('aria-label="Fallback shared instructions"');
   });
   it("loads saved evidence before offering a new assessment", () => {
     const html = renderToStaticMarkup(
@@ -47,6 +52,66 @@ describe("Jev presentation boundaries", () => {
     );
     expect(html).toContain("Score saved answers");
     expect(html).toContain("Loading saved answers");
+  });
+  it("exposes separate fallback criteria only when enabled in the saved profile", () => {
+    const html = renderToStaticMarkup(
+      <JevProfileEditor
+        bankId="b"
+        profiles={[
+          {
+            id: "p",
+            bankId: "b",
+            number: 1,
+            name: "Trace checks",
+            createdAt: "2026-10-08",
+            digest: "profile-digest",
+            settings: jevProfileSettingsSchema.parse({
+              evidenceRequirement: "internal-activity",
+              answerOnlyFallback: {},
+            }),
+          },
+        ]}
+        onSaved={() => {}}
+      />,
+    );
+    expect(html).toContain("Allow answer-only fallback");
+    expect(html).toContain('aria-label="Fallback shared instructions"');
+    expect(html).toContain('aria-label="Fallback answer instructions"');
+    expect(html).toContain('aria-label="Fallback acceptable criterion"');
+    expect(html).toContain("Not assessed");
+  });
+  it("shows omitted fallback checks as not assessed without invented confidence", () => {
+    const html = renderToStaticMarkup(
+      <JevAssessment
+        assessment={{
+          id: "a",
+          runId: "r",
+          resultId: "q",
+          attemptId: "t",
+          createdAt: "2026-10-08",
+          kind: "original",
+          profileRevisionId: "p",
+          profileRevisionNumber: 1,
+          profileName: "Trace checks",
+          confidenceThreshold: 0.7,
+          status: "completed",
+          published: true,
+          reviewRequired: true,
+          fallbackApplied: true,
+          checks: {
+            answer: {
+              choice: "acceptable",
+              confidence: 0.9,
+              probabilities: { acceptable: 0.9, incorrect: 0.1 },
+            },
+          },
+        }}
+      />,
+    );
+    expect(html).toContain("Answer-only fallback");
+    expect(html.match(/Not assessed/g)).toHaveLength(2);
+    expect(html.match(/confidence<\/span>/g)).toHaveLength(1);
+    expect(html).not.toContain("insufficient evidence");
   });
   it("renders three independent classifications and probabilities without creating a pass verdict", () => {
     const value = {

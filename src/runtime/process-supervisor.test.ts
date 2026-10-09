@@ -5,6 +5,10 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { ProcessSupervisor } from "./process-supervisor.js";
+import {
+  ProcessCleanupFailure,
+  ProcessSupervisor as ProcessSupervisorImpl,
+} from "./process-supervisor.js";
 import { createProcessSupervisor } from "./platform.js";
 
 const directories: string[] = [];
@@ -27,6 +31,81 @@ afterEach(async () => {
       .splice(0)
       .map((value) => rm(value, { recursive: true, force: true })),
   );
+});
+
+it("keeps the execution error when process cleanup also fails", async () => {
+  const executionError = Object.assign(
+    new Error("Gateway returned model_not_found"),
+    { code: "infrastructure_failure" },
+  );
+  const supervisor = new ProcessSupervisorImpl({
+    driver: {
+      capabilities: { hardDescendantLimit: false },
+      recover: async () => ({ recovered: 0 }),
+      prepare: async () => {},
+      launch: async () => {
+        throw executionError;
+      },
+      cleanup: async () => {
+        throw new Error("Private cleanup path details.");
+      },
+    },
+  });
+  await supervisor.recover();
+  try {
+    await expect(
+      supervisor.run({ executable: process.execPath, args: [], cwd: "." }),
+    ).rejects.toMatchObject({
+      code: "cleanup_failed",
+      cause: executionError,
+      message: expect.stringContaining("Gateway returned model_not_found"),
+    });
+    expect(supervisor.activeReservations).toBe(1);
+  } finally {
+    await supervisor.close();
+  }
+});
+
+it("keeps a completed provider result internal when process cleanup fails", async () => {
+  const supervisor = new ProcessSupervisorImpl({
+    driver: {
+      capabilities: { hardDescendantLimit: false },
+      recover: async () => ({ recovered: 0 }),
+      prepare: async () => {},
+      launch: async (input) => {
+        const child = spawn(input.executable, input.args, {
+          cwd: input.cwd,
+          env: input.env,
+          stdio: "pipe",
+        });
+        return { child, stop: () => child.kill() };
+      },
+      cleanup: async () => {
+        throw new Error("Private cleanup path details.");
+      },
+    },
+  });
+  await supervisor.recover();
+  try {
+    let failure: unknown;
+    try {
+      await supervisor.run({
+        executable: process.execPath,
+        args: ["-e", 'console.log("model_not_found")'],
+        cwd: process.cwd(),
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(ProcessCleanupFailure);
+    expect((failure as ProcessCleanupFailure).code).toBe("cleanup_failed");
+    expect(
+      (failure as ProcessCleanupFailure).takeProcessResult()?.stdout,
+    ).toContain("model_not_found");
+    expect(JSON.stringify(failure)).not.toContain("model_not_found");
+  } finally {
+    await supervisor.close();
+  }
 });
 
 it.skipIf(["win32", "darwin"].includes(process.platform))(

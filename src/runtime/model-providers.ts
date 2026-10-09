@@ -9,6 +9,7 @@ export const MODEL_PROVIDERS = [
 ] as const;
 const endpoint = z
   .string()
+  .trim()
   .url()
   .refine((value) => {
     const url = new URL(value);

@@ -2,6 +2,7 @@ import { ExternalAgentPicker } from "./external-agents.js";
 import { useEffect, useState } from "react";
 import { researchSchema } from "../contracts.js";
 import type { RuntimeCatalog, WorkspaceView } from "../contracts.js";
+import type { JevProfileRevision } from "../contracts.js";
 import { command, navigate, useResource } from "./api.js";
 import {
   createLaunch,
@@ -14,6 +15,7 @@ import { parseToolCatalog, type ToolChoice } from "./tools.js";
 
 import { AgentSettings } from "./agent-settings.js";
 import { EvaluationSettings } from "./evaluation-settings.js";
+import { jevConfigurationIssues } from "./jev-configuration.js";
 import { RunQuestions } from "./run-questions.js";
 import { RunTools } from "./run-tools.js";
 import { ResearchSettings } from "./research-settings.js";
@@ -86,6 +88,8 @@ export function Setup({
   const [toolsError, setToolsError] = useState<unknown>(null);
   const [modelsError, setModelsError] = useState<unknown>(null);
   const [error, setError] = useState<unknown>(null);
+  const [publishedJevProfile, setPublishedJevProfile] =
+    useState<JevProfileRevision | null>(null);
   const [pending, setPending] = useState(false);
   const [loadingSource, setLoadingSource] = useState(!!source && !restoreSaved);
   const [toolsRefresh, setToolsRefresh] = useState(0);
@@ -257,6 +261,14 @@ export function Setup({
     (item) => item.id === draft.bankRevisionId,
   );
   const bankRecord = workspace.banks.find((item) => item.id === selectedBankId);
+  const jevIssues = draft.jevEnabled
+    ? jevConfigurationIssues(
+        draft.jevSelection,
+        workspace.connections,
+        detail.data ?? undefined,
+        publishedJevProfile ? [publishedJevProfile] : [],
+      )
+    : undefined;
   const published = workspace.banks.map((item) => ({
     id: item.latestRevisionId,
     name: item.name,
@@ -560,6 +572,7 @@ export function Setup({
                   bankRecord={bankRecord}
                   evaluatorRevisions={detail.data?.evaluatorRevisions ?? []}
                   connections={workspace.connections}
+                  onJevProfilePublished={setPublishedJevProfile}
                 />
               )}
               {section === "research" && (
@@ -578,12 +591,21 @@ export function Setup({
                   ? `${selectedQuestionIds(draft, bank.questions).length} questions × ${draft.repetitions} repetitions`
                   : "Choose a question bank"}
               </span>
+              {section !== "evaluation" &&
+                (jevIssues?.connection || jevIssues?.profile) && (
+                  <span className="notice" role="status">
+                    {jevIssues.connection ?? jevIssues.profile} Review the
+                    Evaluation section to update Jev setup.
+                  </span>
+                )}
               <button
                 className="button primary"
                 disabled={
                   pending ||
                   !draftReady ||
                   !bank ||
+                  !!jevIssues?.connection ||
+                  !!jevIssues?.profile ||
                   (draft.questionSelection === "selected" &&
                     !draft.questionIds.length) ||
                   (draft.targetKind === "external"

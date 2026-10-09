@@ -108,6 +108,10 @@ Preview publication performs no additional inference.
 Startup marks unresolved judging requests explicitly instead of silently retrying potentially billable work.
 Completed target evidence missing its configured original assessment receives an explicit unavailable assessment.
 Research evidence retrieval exposes safe classification summaries without revealing profile criteria or raw requests.
+Jev records preserve the complete sealed evidence and hashes, while each provider request follows the frozen profile's evidence requirement.
+Answer-only requests omit internal-activity trace data without changing the saved evidence record.
+Jev pass correctness uses the answer choice and its frozen confidence threshold; the overall review flag remains a separate audit signal.
+Research candidate promotion retains its stricter requirement that the complete Jev assessment is not flagged for review.
 
 ## Module ownership
 
@@ -249,6 +253,10 @@ Failed executions accept notes and explicit exclusions but cannot receive a corr
 Reviewing a paused original creates an immutable parent snapshot before the derived review.
 Pass exports include frozen references and judge request, response, error, and evidence-hash provenance when available.
 Observation projections omit raw requests, responses, and reference payloads; deliberate pass reads retrieve them.
+JevService owns the optional single fallback after a trace size error, its shared deadline, and saved provenance.
+The runtime classifier translates the requested check scope and validates exactly those decisions.
+Dedicated versioned fallback criteria assess the complete answer without a trace; omitted checks remain unassessed and block automatic research promotion.
+Fallback never modifies sealed evidence, and observation projections omit the original oversized request.
 
 Accuracy uses correct answers divided by completed judgments with a correctness verdict.
 Existing saved passes derive display rates from frozen counts without rewriting their evidence.

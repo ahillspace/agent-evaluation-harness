@@ -28,11 +28,15 @@
 - Comparison reports incompatible evaluation bases.
 - Jev can run independently of, or alongside, the LLM judge without replacing deterministic grading.
 - Published Jev profiles preserve instructions, criteria, model selection, and question-specific overrides when configured.
-- Judge evidence contains the complete recorded attempt trace, with credentials and previous verdicts excluded.
+- Saved Jev records preserve complete sealed attempt evidence and hashes, while provider requests follow the frozen evidence requirement and exclude credentials and prior verdicts.
 - Evidence exceeding provider capacity produces an explicit error without silent truncation.
+- An explicitly enabled Jev fallback makes one answer-only request after a trace size error, using frozen dedicated criteria and the remaining assessment deadline.
+- Fallback preserves the original request and error, marks omitted checks Not assessed, and retains complete sealed evidence without changing hashes.
 - Saved-evidence judging creates a separate assessment without another target invocation.
 - Publishing a saved preview makes no provider call and preserves prior assessments.
 - Classification probabilities, low-confidence review status, and provider errors remain distinct from an incorrect answer.
+- Jev pass correctness uses the answer decision and frozen answer confidence threshold independently of auxiliary review flags.
+- Research candidate promotion retains its stricter requirement that a Jev assessment has no overall review flag.
 
 ## Runtime and research
 

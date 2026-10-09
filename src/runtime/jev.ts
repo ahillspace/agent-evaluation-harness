@@ -275,6 +275,7 @@ export class JevClassifier implements ClassificationJudgePort {
             secrets,
             signal,
             timeoutMs: input.timeoutMs,
+            maxAttempts: answerOnlyFallback ? 1 : 3,
             onRequest: input.onRequest,
           });
           const pricing =

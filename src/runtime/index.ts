@@ -37,7 +37,7 @@ import {
   type PublicQuestion,
 } from "../contracts.js";
 import { ConnectionService } from "./connections.js";
-import { prepareTableauFeatureGate } from "./tableau-feature-gate.js";
+import { prepareMcpBindings, recoverMcpResources } from "./mcp-resources.js";
 import { discoverHarness } from "./discovery.js";
 import {
   buildHarnessCommand,
@@ -50,6 +50,7 @@ import {
 } from "./harness.js";
 import {
   ProcessCleanupFailure,
+  cleanupFailure as sanitizedCleanupFailure,
   type ProcessSupervisor,
 } from "./process-supervisor.js";
 import { createPlatformServices, type PlatformServices } from "./platform.js";
@@ -122,6 +123,7 @@ class LocalRuntime implements RuntimePort {
   readonly externalTargets: ExternalTargetCatalog;
   private readonly targets: TargetRegistry;
   private localReady?: Promise<unknown>;
+  private mcpResourcesRecovered = false;
   readonly classifier: JevClassifier;
   private readonly supervisor: ProcessSupervisor;
   private readonly connections: ConnectionService;
@@ -158,7 +160,17 @@ class LocalRuntime implements RuntimePort {
     );
   }
   private ensureLocal() {
-    return (this.localReady ??= this.supervisor.recover());
+    return (this.localReady ??= this.supervisor
+      .recover()
+      .then(async (report) => {
+        await this.recoverMcpResources();
+        return report;
+      }));
+  }
+  private async recoverMcpResources() {
+    if (this.mcpResourcesRecovered) return;
+    await recoverMcpResources(this.directory);
+    this.mcpResourcesRecovered = true;
   }
   resolveTarget(target: TargetConfig) {
     return this.targets.resolve(target);
@@ -189,6 +201,7 @@ class LocalRuntime implements RuntimePort {
       const report = scopes.some((name) => name.endsWith(".json"))
         ? ((await this.ensureLocal()) as { recovered: number })
         : { recovered: 0 };
+      await this.recoverMcpResources();
       return {
         recovered: report.recovered
           ? [`Cleaned ${report.recovered} process scopes.`]
@@ -425,20 +438,18 @@ class LocalRuntime implements RuntimePort {
       [binding],
       ["tableau.*"],
     );
-    const mcp = material.mcp[0]!;
-    const prepared = await prepareTableauFeatureGate(
-      mcp.features ?? {},
-      mcp.env,
-    );
+    const prepared = await prepareMcpBindings(material.mcp, this.directory);
+    const mcp = prepared.mcp[0]!;
     const stop = new AbortController();
     let tools: Json | undefined;
     let probeTimedOut = false;
+    let cleanupConfirmed = true;
     try {
       const probe = await this.supervisor.run({
         executable: mcp.command,
         args: mcp.args,
         cwd: this.directory,
-        env: prepared.env,
+        env: mcp.env,
         timeoutMs: 90_000,
         processLimit: 16,
         signal: stop.signal,
@@ -471,8 +482,16 @@ class LocalRuntime implements RuntimePort {
         },
       });
       probeTimedOut = probe.timedOut;
+    } catch (error) {
+      if (error instanceof ProcessCleanupFailure) {
+        cleanupConfirmed = false;
+        error.takeProcessResult();
+        error.takeOriginalError();
+        throw sanitizedCleanupFailure();
+      }
+      throw error;
     } finally {
-      await prepared.cleanup();
+      if (cleanupConfirmed) await prepared.cleanup();
     }
     if (!tools)
       return {
@@ -722,6 +741,27 @@ class LocalRuntime implements RuntimePort {
       input.agent.connections,
       input.agent.tools,
     );
+    const prepared = await prepareMcpBindings(material.mcp, this.directory);
+    let cleanupConfirmed = true;
+    try {
+      const result = await this.invokePrepared(input, {
+        ...material,
+        mcp: prepared.mcp,
+      });
+      cleanupConfirmed = result.cleanup === "complete";
+      return result;
+    } catch (error) {
+      if (error instanceof ProcessCleanupFailure) cleanupConfirmed = false;
+      throw error;
+    } finally {
+      if (cleanupConfirmed) await prepared.cleanup();
+    }
+  }
+
+  private async invokePrepared(
+    input: InvocationInput,
+    material: Awaited<ReturnType<ConnectionService["materialize"]>>,
+  ) {
     if (["codex", "claude"].includes(input.agent.harness))
       await writeFile(
         path.join(input.directory, "instructions.txt"),
@@ -944,23 +984,24 @@ class LocalRuntime implements RuntimePort {
       } catch (error) {
         if (!(error instanceof ProcessCleanupFailure)) throw error;
         const processResult = error.takeProcessResult();
-        if (!processResult) {
-          if (error.cause instanceof Error) {
-            const originalError = error.cause;
-            const message = redact(originalError.message, secrets);
-            error.preserveOriginal({
-              error: originalError,
-              message,
-              diagnostic: {
-                ...(originalError instanceof RuntimeFailure
-                  ? { code: originalError.code }
-                  : {}),
-                message: message.slice(0, 1000),
-              },
-            });
-          }
-          throw error;
-        }
+        const originalError = error.takeOriginalError();
+        if (!processResult)
+          throw sanitizedCleanupFailure(
+            {
+              ...(originalError instanceof RuntimeFailure
+                ? { code: originalError.code }
+                : {}),
+              message: redact(
+                originalError instanceof Error
+                  ? originalError.message
+                  : "The provider invocation did not complete.",
+                secrets,
+              ),
+            },
+            originalError instanceof RuntimeFailure
+              ? originalError.executionFailure
+              : undefined,
+          );
         cleanupFailure = error;
         result = processResult;
       }
@@ -969,14 +1010,13 @@ class LocalRuntime implements RuntimePort {
     }
     const throwFailure = (failure: RuntimeFailure): never => {
       if (cleanupFailure)
-        throw cleanupFailure.preserveOriginal({
-          error: failure,
-          message: redact(failure.message, secrets),
-          diagnostic: {
+        throw sanitizedCleanupFailure(
+          {
             code: failure.code,
             message: redact(failure.message, secrets).slice(0, 1000),
           },
-        });
+          failure.executionFailure,
+        );
       throw failure;
     };
     if (result.interrupted)
@@ -1053,19 +1093,18 @@ class LocalRuntime implements RuntimePort {
         },
       );
       if (cleanupFailure)
-        throw cleanupFailure.preserveOriginal({
-          error: providerFailure,
-          message: redact(providerFailure.message, secrets),
-          diagnostic: {
+        throw sanitizedCleanupFailure(
+          {
             code: providerFailure.code,
             message: redact(providerFailure.message, secrets).slice(0, 1000),
             providerCode: providerCode ?? null,
             statusCode: providerStatus ?? null,
           },
-        });
+          providerFailure.executionFailure,
+        );
       throw providerFailure;
     }
-    if (cleanupFailure) throw cleanupFailure;
+    if (cleanupFailure) throw sanitizedCleanupFailure();
     return {
       text,
       conversationId,

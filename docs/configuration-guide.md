@@ -80,6 +80,8 @@ Tableau documents datasource scoping in its [self-hosted deployment guide](https
 
 Use `mcpFeatures` for feature flags as a map of feature names to booleans.
 The harness overlays these values on the defaults shipped by the selected Tableau MCP package through Tableau MCP's custom feature gate provider interface.
+The defaults load beside the server's real entry point, including when its executable is a symlink.
+If the package does not provide readable Boolean defaults in `features.json`, the feature override configuration fails instead of disabling unrelated defaults.
 Feature names stay user-configurable so new Tableau flags do not require a harness release.
 See Tableau's [feature flag documentation](https://tableau.github.io/tableau-mcp/docs/developers/feature-flags) for the current provider behavior.
 
@@ -93,6 +95,11 @@ Keep datasource references consistent across the question context, system prompt
 A datasource ID in the Run setup provides prompt guidance.
 Use `mcpEnv.INCLUDE_DATASOURCE_IDS` when the MCP connection must enforce a datasource boundary.
 Requests sharing a Tableau session credential can wait for that connection even when the run permits additional concurrency.
+Connection checks and managed MCP execution inherit the same restricted environment, including `NODE_EXTRA_CA_CERTS` when the engine has an explicit corporate certificate bundle.
+The certificate path retains spaces and does not require duplication in `mcpEnv`.
+Unrelated provider credentials and `NODE_TLS_REJECT_UNAUTHORIZED` do not pass through the inherited environment.
+The parent runtime owns generated feature-provider modules under its state directory and removes them after process cleanup settles.
+Startup removes abandoned modules only after confirming cleanup of persisted process scopes.
 
 ## Create a question bank
 

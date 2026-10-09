@@ -37,7 +37,6 @@ async function finish(code: number) {
         await drainGroup(pid, {
           verify: () =>
             verifyOwner(pid, started, id, processEntry("posix-runner").source),
-          ...(started ? { zombieAnchor: { pid, started, scopeId: id } } : {}),
         });
       }
       if (lease) await persist({ ...lease, state: "cleaned" });

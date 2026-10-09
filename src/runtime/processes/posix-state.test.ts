@@ -11,6 +11,60 @@ const owner = vi.fn(async () => true);
 const ownership: GroupOwnership = { verify: owner };
 const pause = vi.fn(async () => undefined);
 
+it.each(["inventory", "identity"])(
+  "does not report settled after a slow %s exceeds the cleanup deadline",
+  async (phase) => {
+    let now = 0;
+    let inventories = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const ops = {
+        ...groupOps(vi.fn(), []),
+        listMembers: async () => {
+          if (++inventories === 2 && phase === "inventory") now = 8000;
+          return [{ pid: 41, pgid: 41, uid: 501, state: "Z" }];
+        },
+      };
+      await expect(
+        drainGroup(
+          41,
+          {
+            verify: async () => {
+              if (phase === "identity") now = 8000;
+              return true;
+            },
+          },
+          ops,
+        ),
+      ).rejects.toThrow(/deadline/i);
+      expect(ops.signal).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+  },
+);
+
+it.each(["start time", "scope identity", "UID", "command"])(
+  "never overrides a conflicting %s in a zombie group",
+  async (field) => {
+    const ops = groupOps(vi.fn(), [
+      { pid: 41, pgid: 41, uid: 501, state: "Z" },
+    ]);
+    await expect(
+      drainGroup(
+        41,
+        {
+          verify: async () => {
+            throw new Error(`Process identity changed: ${field}`);
+          },
+        },
+        ops,
+      ),
+    ).rejects.toThrow(/identity changed/i);
+    expect(ops.signal).not.toHaveBeenCalled();
+  },
+);
+
 function groupOps(probe: () => void, members: GroupMember[], signal = vi.fn()) {
   const listMembers = vi.fn(async () => members);
   return {
@@ -21,6 +75,54 @@ function groupOps(probe: () => void, members: GroupMember[], signal = vi.fn()) {
     uid: 501,
   };
 }
+
+it("reinspects a transient Darwin EPERM inventory gap until ESRCH proves settlement", async () => {
+  const probe = vi
+    .fn()
+    .mockImplementationOnce(() => {
+      throw Object.assign(new Error(), { code: "EPERM" });
+    })
+    .mockImplementation(() => {
+      throw Object.assign(new Error(), { code: "ESRCH" });
+    });
+  const ops = groupOps(probe, []);
+  await expect(inspectGroup(41, ops)).resolves.toEqual({
+    status: "empty",
+    members: [],
+  });
+  expect(probe).toHaveBeenCalledTimes(2);
+});
+
+it("bounds repeated EPERM inventory gaps without declaring settlement", async () => {
+  const probe = vi.fn(() => {
+    throw Object.assign(new Error(), { code: "EPERM" });
+  });
+  await expect(inspectGroup(41, groupOps(probe, []))).rejects.toThrow(
+    /permission-denied/i,
+  );
+  expect(probe).toHaveBeenCalledTimes(21);
+});
+
+it("retains verified live-group continuity while its leader is reaped during cleanup", async () => {
+  let signalled = false;
+  const ops = {
+    ...groupOps(vi.fn(), []),
+    listMembers: async () =>
+      signalled
+        ? [{ pid: 42, pgid: 41, uid: 501, state: "Z" }]
+        : [
+            { pid: 41, pgid: 41, uid: 501, state: "S" },
+            { pid: 42, pgid: 41, uid: 501, state: "S" },
+          ],
+    signal: vi.fn(() => {
+      signalled = true;
+    }),
+  };
+  await expect(
+    drainGroup(41, { verify: async () => !signalled }, ops),
+  ).resolves.toBeUndefined();
+  expect(ops.signal).toHaveBeenCalledTimes(1);
+});
 
 it("parses Darwin process group rows and rejects incomplete inventory rows", () => {
   expect(parseGroupMembers("  42  41  501 Z+\n  41  41  501 S")).toEqual([
@@ -48,7 +150,7 @@ it("ignores PID 1 and unrelated unknown states while inspecting the owned group"
   ).resolves.toMatchObject({ status: "live" });
 });
 
-it("settles zombie descendants after the runner has been reaped", async () => {
+it("does not trust a reaped leader from an earlier cleanup or persisted lease", async () => {
   const probe = () => {
     throw Object.assign(new Error("Permission denied"), { code: "EPERM" });
   };
@@ -56,19 +158,14 @@ it("settles zombie descendants after the runner has been reaped", async () => {
 
   const ownership: GroupOwnership = {
     verify: async () => false,
-    zombieAnchor: {
-      pid: 41,
-      started: "Wed Oct 7 23:53:22 2026",
-      scopeId: "8b2903e2-568d-4165-8fe7-1350842a0daf",
-    },
   };
 
-  await expect(drainGroup(41, ownership, ops)).resolves.toBeUndefined();
+  await expect(drainGroup(41, ownership, ops)).rejects.toThrow(/identity/i);
   expect(ops.signal).not.toHaveBeenCalled();
   expect(ops.listMembers).toHaveBeenCalledTimes(2);
 });
 
-it("settles a zombie runner when its single-process probe returns EPERM", async () => {
+it("does not override a permission-denied ownership inspection", async () => {
   const probe = () => {
     throw Object.assign(new Error("Permission denied"), { code: "EPERM" });
   };
@@ -80,18 +177,15 @@ it("settles a zombie runner when its single-process probe returns EPERM", async 
     verify: async () => {
       throw Object.assign(new Error("Permission denied"), { code: "EPERM" });
     },
-    zombieAnchor: {
-      pid: 41,
-      started: "Wed Oct 7 23:53:22 2026",
-      scopeId: "8b2903e2-568d-4165-8fe7-1350842a0daf",
-    },
   };
 
-  await expect(drainGroup(41, ownership, ops)).resolves.toBeUndefined();
+  await expect(drainGroup(41, ownership, ops)).rejects.toThrow(
+    /Permission denied/i,
+  );
   expect(ops.signal).not.toHaveBeenCalled();
 });
 
-it("does not accept zombies without a trusted persisted group anchor", async () => {
+it("does not accept zombies without verified current ownership", async () => {
   const probe = () => {
     throw Object.assign(new Error("Permission denied"), { code: "EPERM" });
   };
@@ -110,11 +204,6 @@ it("keeps zombie cleanup unresolved when a group member has an unowned UID", asy
   const ops = groupOps(probe, [{ pid: 42, pgid: 41, uid: 1001, state: "Z" }]);
   const zombieOwnership: GroupOwnership = {
     verify: async () => false,
-    zombieAnchor: {
-      pid: 41,
-      started: "Wed Oct 7 23:53:22 2026",
-      scopeId: "8b2903e2-568d-4165-8fe7-1350842a0daf",
-    },
   };
 
   await expect(drainGroup(41, zombieOwnership, ops)).rejects.toThrow(

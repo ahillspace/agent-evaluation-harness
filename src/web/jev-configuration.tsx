@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
   BankDetail,
   ConnectionRecord,
@@ -55,7 +55,38 @@ export function JevConfiguration({
   bank?: BankDetail;
   onPublished: (profile: JevProfileRevision) => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState<{
+    bankId: string;
+    generation: number;
+  } | null>(null);
+  const current = useRef({
+    bankId: bank?.bank.id,
+    value,
+    onChange,
+    onPublished,
+    generation: 0,
+  });
+  useLayoutEffect(() => {
+    const changedBank = current.current.bankId !== bank?.bank.id;
+    current.current = {
+      bankId: bank?.bank.id,
+      value,
+      onChange,
+      onPublished,
+      generation: current.current.generation + (changedBank ? 1 : 0),
+    };
+    if (changedBank) setEditing(null);
+  });
+  useEffect(
+    () => () => {
+      current.current.generation++;
+    },
+    [],
+  );
+  const closeEditor = () => {
+    current.current.generation++;
+    setEditing(null);
+  };
   const [saved, setSaved] = useState<JevProfileRevision | null>(null);
   const issues = jevConfigurationIssues(
     value,
@@ -155,7 +186,13 @@ export function JevConfiguration({
       <button
         className="button secondary"
         disabled={!bank}
-        onClick={() => setEditing(true)}
+        onClick={() => {
+          if (bank)
+            setEditing({
+              bankId: bank.bank.id,
+              generation: ++current.current.generation,
+            });
+        }}
       >
         {issues.profile
           ? "Publish criteria for this bank"
@@ -166,11 +203,8 @@ export function JevConfiguration({
         <a href="#/settings/connections">Settings, Connections</a>. This run
         uses the saved connection selected above.
       </p>
-      {editing && bank && (
-        <Modal
-          title="Jev instructions and criteria"
-          onClose={() => setEditing(false)}
-        >
+      {editing !== null && editing.bankId === bank?.bank.id && bank && (
+        <Modal title="Jev instructions and criteria" onClose={closeEditor}>
           <JevProfileEditor
             bankId={bank.bank.id}
             profiles={profiles}
@@ -178,10 +212,16 @@ export function JevConfiguration({
               value.profileRevisionId ?? bank.bank.activeJevProfileRevisionId
             }
             onSaved={(profile) => {
+              const owner = current.current;
+              if (
+                owner.generation !== editing.generation ||
+                owner.bankId !== profile.bankId
+              )
+                return;
               setSaved(profile);
-              onChange({ ...value, profileRevisionId: profile.id });
-              onPublished(profile);
-              setEditing(false);
+              owner.onChange({ ...owner.value, profileRevisionId: profile.id });
+              owner.onPublished(profile);
+              closeEditor();
             }}
           />
         </Modal>

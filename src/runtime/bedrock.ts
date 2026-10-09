@@ -9,7 +9,11 @@ import { createHarnessBridges, record } from "./harness.js";
 import { safeFetchDiagnostics } from "./safe-fetch-diagnostics.js";
 import type { McpBinding } from "./connections.js";
 import { McpSession } from "./mcp-session.js";
-import type { ProcessSupervisor } from "./process-supervisor.js";
+import { providerExecutionFailure } from "./execution-failure.js";
+import {
+  cleanupFailure,
+  type ProcessSupervisor,
+} from "./process-supervisor.js";
 
 const messageSchema = z.object({
   role: z.enum(["user", "assistant"]),
@@ -442,13 +446,27 @@ export async function invokeBedrock(input: {
   if (failed?.status === "rejected") {
     if (completed) completed.cleanup = "unavailable";
     else {
-      const cleanupFailure = new BedrockFailure(
-        "MCP cleanup could not be confirmed.",
-        "cleanup_failed",
+      throw cleanupFailure(
+        failure instanceof BedrockFailure
+          ? {
+              message: input.sanitize(failure.message),
+              code: failure.code,
+              ...(failure.status === undefined
+                ? {}
+                : { statusCode: failure.status }),
+              ...(failure.providerDiagnostics
+                ? { providerDiagnostics: failure.providerDiagnostics }
+                : {}),
+            }
+          : undefined,
+        providerExecutionFailure({
+          status:
+            failure instanceof BedrockFailure ? failure.status : undefined,
+          toolFree: input.role === "target" && input.agent.tools.length === 0,
+          toolActivity,
+          usage: { inputTokens, outputTokens },
+        }),
       );
-      cleanupFailure.usage = { inputTokens, outputTokens };
-      cleanupFailure.toolActivity = toolActivity;
-      throw cleanupFailure;
     }
   }
   if (failedExecution) throw failure;

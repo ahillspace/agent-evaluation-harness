@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { inheritedEnvironment, resolveCommand } from "./commands.js";
 import type { ProcessDriver } from "./processes/contracts.js";
+import type { ExecutionFailure } from "../contracts/execution-failure.js";
 
 export interface ProcessSpec {
   executable: string;
@@ -29,9 +30,10 @@ export interface ProcessResult {
 /** Internal handoff for a completed process whose ownership cleanup failed. */
 export class ProcessCleanupFailure extends Error {
   readonly code = "cleanup_failed";
-  cause?: unknown;
   evidence?: unknown;
-  private readonly processResult?: ProcessResult;
+  executionFailure?: ExecutionFailure;
+  #processResult?: ProcessResult;
+  #originalError?: unknown;
 
   constructor(input: {
     processResult?: ProcessResult;
@@ -47,33 +49,50 @@ export class ProcessCleanupFailure extends Error {
           : "Process cleanup failed. Runtime admissions are stopped."),
     );
     this.name = "ProcessCleanupFailure";
-    this.cause = input.cause;
-    this.processResult = input.processResult;
-    Object.defineProperty(this, "cause", {
-      enumerable: false,
-      writable: true,
-      configurable: true,
-    });
-    Object.defineProperty(this, "processResult", {
-      enumerable: false,
-      writable: false,
-      configurable: false,
-    });
+    this.#originalError = input.cause;
+    this.#processResult = input.processResult;
   }
 
   takeProcessResult(): ProcessResult | undefined {
-    return this.processResult;
+    const result = this.#processResult;
+    this.#processResult = undefined;
+    return result;
   }
+  takeOriginalError(): unknown {
+    const error = this.#originalError;
+    this.#originalError = undefined;
+    return error;
+  }
+}
 
-  preserveOriginal(input: {
-    error: Error;
-    message?: string;
-    diagnostic?: unknown;
-  }): this {
-    this.cause = input.error;
-    if (input.diagnostic !== undefined) this.evidence = input.diagnostic;
-    this.message = `${(input.message ?? input.error.message).slice(0, 1000)} Process cleanup also failed; runtime admissions are stopped.`;
-    return this;
+/** Only safe diagnostics may cross the provider/runtime boundary. */
+export function cleanupFailure(
+  diagnostic?: {
+    message: string;
+    code?: string;
+    providerCode?: string | null;
+    statusCode?: number | null;
+    providerDiagnostics?: { name?: string; code?: string };
+  },
+  executionFailure?: ExecutionFailure,
+): ProcessCleanupFailure {
+  const failure = new ProcessCleanupFailure({
+    message: diagnostic
+      ? `${diagnostic.message.slice(0, 1000)} Process cleanup also failed; runtime admissions are stopped.`
+      : "Process cleanup failed. Runtime admissions are stopped.",
+  });
+  if (diagnostic)
+    failure.evidence = {
+      ...diagnostic,
+      message: diagnostic.message.slice(0, 1000),
+    };
+  if (executionFailure) failure.executionFailure = executionFailure;
+  return failure;
+}
+
+class ProcessExecutionFailure extends Error {
+  constructor(readonly result: ProcessResult) {
+    super(result.stderr.trim());
   }
 }
 
@@ -184,11 +203,19 @@ export class ProcessSupervisor {
         result = await this.spawnScope(spec, limit, id, done);
       } catch (error) {
         executionError = error;
+        if (error instanceof ProcessExecutionFailure) result = error.result;
       }
       try {
         await this.driver.cleanup(id);
         cleaned = true;
       } catch {
+        throw new ProcessCleanupFailure({
+          processResult: result,
+          cause: executionError,
+        });
+      }
+      if (executionError instanceof ProcessExecutionFailure) {
+        this.poisoned = true;
         throw new ProcessCleanupFailure({
           processResult: result,
           cause: executionError,
@@ -301,9 +328,7 @@ export class ProcessSupervisor {
       stderr += stderrDecoder.end();
       if (pending) emit(pending);
       if (callbackError) throw callbackError;
-      if (exitCode === 125 && stderr.includes("Containment:"))
-        throw new Error(stderr.trim());
-      return {
+      const result = {
         exitCode,
         stdout,
         stderr,
@@ -312,6 +337,9 @@ export class ProcessSupervisor {
         outputLimited,
         durationMs: Date.now() - started,
       };
+      if (exitCode === 125 && stderr.includes("Containment:"))
+        throw new ProcessExecutionFailure(result);
+      return result;
     } finally {
       clearTimeout(timeout);
       spec.signal?.removeEventListener("abort", abort);

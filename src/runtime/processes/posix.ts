@@ -88,15 +88,6 @@ export class PosixProcessDriver implements ProcessDriver {
                       input.id,
                       processEntry("posix-runner").source,
                     ),
-                  ...(lease.runnerStarted
-                    ? {
-                        zombieAnchor: {
-                          pid: lease.runnerPid,
-                          started: lease.runnerStarted,
-                          scopeId: input.id,
-                        },
-                      }
-                    : {}),
                 });
             } finally {
               if (child.exitCode === null && child.signalCode === null)
@@ -168,15 +159,6 @@ export class PosixProcessDriver implements ProcessDriver {
             id,
             processEntry("posix-runner").source,
           ),
-        ...(lease.runnerStarted
-          ? {
-              zombieAnchor: {
-                pid: lease.runnerPid,
-                started: lease.runnerStarted,
-                scopeId: id,
-              },
-            }
-          : {}),
       });
     }
     await unlink(filename);

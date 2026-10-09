@@ -2,7 +2,8 @@ import { targetFixture } from "../../tests/fixtures/runtime-targets.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { createServer } from "node:http";
+import { afterEach, expect, it, vi } from "vitest";
 import {
   agentSchema,
   jevProfileSettingsSchema,
@@ -13,9 +14,11 @@ import {
 import { createApplication } from "./application.js";
 import { Database } from "../storage/database.js";
 import { digest } from "../domain/identity.js";
+import { JevClassifier } from "../runtime/jev.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
+  vi.unstubAllGlobals();
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 async function setup(
@@ -609,6 +612,89 @@ it("keeps external evidence answer-only and refuses incompatible saved judging w
   expect(preview.error?.code).toBe("unsupported_evidence");
   expect(counts()).toEqual(before);
 });
+
+it.each([429, 529])(
+  "makes only one fallback HTTP attempt after trace rejection and HTTP %i",
+  async (status) => {
+    const { app, bank, agent, runtime } = await setup();
+    const profile = await app.execute("jev.profiles.publish", {
+      bankId: bank.bankId,
+      name: "Bounded fallback",
+      settings: jevProfileSettingsSchema.parse({
+        evidenceRequirement: "internal-activity",
+        answerOnlyFallback: {},
+      }),
+    });
+    runtime.classifier = new JevClassifier({
+      freeze: async () => ({
+        connectionId: "typesafe",
+        provider: "typesafe",
+        settings: {},
+        credentialFields: ["apiKey"],
+      }),
+      credentials: async () => ({ apiKey: "fixture-secret" }),
+      redactionSecrets: async () => [],
+    });
+    const requests: unknown[] = [];
+    const server = createServer(async (request, response) => {
+      let body = "";
+      for await (const chunk of request) body += String(chunk);
+      requests.push(JSON.parse(body));
+      response
+        .writeHead(requests.length === 1 ? 413 : status, {
+          "content-type": "application/json",
+          "retry-after": "0",
+        })
+        .end(
+          JSON.stringify(
+            requests.length === 1
+              ? { error: { code: "max_tokens_exceeded" } }
+              : {},
+          ),
+        );
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    cleanups.push(async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+    const address = server.address();
+    if (!address || typeof address === "string")
+      throw new Error("Fixture did not bind");
+    const fetchHttp = globalThis.fetch;
+    vi.stubGlobal("fetch", (url: string, options: RequestInit) => {
+      expect(url).toBe("https://api.typesafe.ai/v1/systemone");
+      return fetchHttp(`http://127.0.0.1:${address.port}/systemone`, options);
+    });
+    const launched = await app.execute("runs.launch", {
+      bankRevisionId: bank.id,
+      agent,
+      jevJudge: { connectionId: "typesafe", profileRevisionId: profile.id },
+    });
+    await app.waitForIdle();
+    const view = await app.execute("runs.get", { runId: launched.run.id });
+    const record = await app.execute("jev.get", {
+      assessmentId: view.jevAssessments[0]!.id,
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toHaveProperty(
+      "state.trace.format",
+      "provider_transcript",
+    );
+    expect(requests[1]).toHaveProperty("state.trace.entries", null);
+    expect(record.status).toBe("error");
+    expect(record.error?.code).toBe("provider_unavailable");
+    expect(record.fallback?.trigger).toMatchObject({
+      httpStatus: 413,
+      error: { code: "token_limit_exceeded" },
+    });
+    expect(record.attempts).toEqual([{ status, response: {} }]);
+    expect(record.usage).toBeUndefined();
+    expect(record.evidence.trace.format).toBe("provider_transcript");
+  },
+);
 
 it("falls back once on trace capacity errors and preserves both call records and usage", async () => {
   const { app, bank, agent, runtime } = await setup();

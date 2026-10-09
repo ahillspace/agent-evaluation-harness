@@ -1,6 +1,6 @@
 # macOS support plan
 
-Status: **Implementation complete; native Mac acceptance remains a release gate.**
+Status: **Implemented; authenticated Mac acceptance remains a release gate.**
 The implementation target uses shared runtime coordination, independent secret storage, Windows Job Objects, and managed macOS process groups.
 macOS supports providers that preserve process ownership and does not claim Windows-equivalent hard descendant containment.
 Unverified cleanup blocks further admissions on either platform.
@@ -197,4 +197,7 @@ Review findings in asynchronous shutdown, watchdog initialization, and recovery 
 Native Mac acceptance still requires actual Keychain behavior, Codex and OpenCode authentication, Tableau MCP, browser observation, research, and optional judging.
 Run the configured CI jobs and the acceptance scenarios above on real Macs before claiming release support.
 Record the tested macOS versions and architecture-specific provider behavior before selecting a minimum supported macOS version.
-No Mac host is available in the current development environment, and no native Mac or live provider result is claimed.
+No interactive Mac host is available in the current development environment.
+GitHub Actions runs native process fixtures on Apple Silicon and Intel Macs with Node.js 22.13.0 and 24.
+Those results establish fixture coverage only, not authenticated provider or interactive Keychain acceptance.
+See [the runtime reliability review](runtime-review-2026-10-09.md) for the cleanup, diagnostic, and MCP configuration regression scope.

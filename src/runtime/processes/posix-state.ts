@@ -36,10 +36,9 @@ export type GroupMember = {
 };
 export type GroupStatus = "empty" | "zombies" | "live";
 export type GroupSnapshot = { status: GroupStatus; members: GroupMember[] };
-/** The persisted launch identity anchors a zombie-only group after its leader exits. */
+/** Absence is distinct from an identity mismatch or failed inspection. */
 export type GroupOwnership = {
   verify: () => Promise<boolean>;
-  zombieAnchor?: { pid: number; started: string; scopeId: string };
 };
 export type GroupOperations = {
   probe: (pid: number) => void;
@@ -118,9 +117,32 @@ export async function inspectGroup(
     if (code !== "EPERM") throw error;
     permissionDenied = true;
   }
-  const members = (await operations.listMembers(pid)).filter(
+  let members = (await operations.listMembers(pid)).filter(
     (member) => member.pgid === pid,
   );
+  // Darwin may briefly expose EPERM before ps catches up with group reaping.
+  // Only ESRCH or actual membership can resolve this observation gap.
+  const inventoryDeadline = Date.now() + 1000;
+  for (
+    let attempt = 0;
+    permissionDenied &&
+    !members.length &&
+    attempt < 20 &&
+    Date.now() < inventoryDeadline;
+    attempt++
+  ) {
+    await operations.pause(50);
+    try {
+      operations.probe(pid);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") return { status: "empty", members: [] };
+      if (code !== "EPERM") throw error;
+    }
+    members = (await operations.listMembers(pid)).filter(
+      (member) => member.pgid === pid,
+    );
+  }
   if (members.length === 0) {
     if (permissionDenied)
       throw new Error(
@@ -180,7 +202,23 @@ export async function drainGroup(
 ) {
   const operations = groupOperations(overrides);
   const deadline = Date.now() + 7500;
-  const inspect = () => inspectGroup(pid, operations);
+  const requireDeadline = () => {
+    if (Date.now() >= deadline)
+      throw new Error("Owned process group cleanup exceeded its deadline.");
+  };
+  const inspect = async () => {
+    const snapshot = await inspectGroup(pid, operations);
+    requireDeadline();
+    return snapshot;
+  };
+  let verifiedMembers: Set<number> | undefined;
+  const verify = async (snapshot: GroupSnapshot) => {
+    const verified = await ownership.verify();
+    requireDeadline();
+    if (verified)
+      verifiedMembers = new Set(snapshot.members.map((member) => member.pid));
+    return verified;
+  };
   const stableSettled = async (first: GroupSnapshot) => {
     if (first.status === "live" || Date.now() >= deadline) return false;
     await operations.pause(50);
@@ -194,21 +232,13 @@ export async function drainGroup(
   const stableOwnedZombies = async (first: GroupSnapshot) => {
     if (first.status !== "zombies" || !(await stableSettled(first)))
       return false;
-    let verified = false;
-    try {
-      verified = await ownership.verify();
-    } catch {
-      /* A stable zombie group can use its persisted launch identity. */
-    }
-    const anchor = ownership.zombieAnchor;
+    // A false result means demonstrably reaped, never permission denied or mismatch.
+    // Continuity is local to this cleanup, after observing and verifying the live leader.
     if (
-      verified ||
-      (anchor?.pid === pid &&
-        /^[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(
-          anchor.started,
-        ) &&
-        /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(
-          anchor.scopeId,
+      (await verify(first)) ||
+      (verifiedMembers &&
+        !first.members.some(
+          (member) => member.pid === pid || !verifiedMembers!.has(member.pid),
         ))
     )
       return true;
@@ -223,7 +253,7 @@ export async function drainGroup(
   if (Date.now() >= deadline)
     throw new Error("Owned process group cleanup exceeded its deadline.");
   if (await settles(snapshot)) return;
-  if (!(await ownership.verify()))
+  if (!(await verify(snapshot)))
     throw new Error("Cannot verify the owned group leader.");
   if (Date.now() >= deadline)
     throw new Error("Owned process group cleanup exceeded its deadline.");
@@ -239,7 +269,7 @@ export async function drainGroup(
   }
   if (Date.now() >= deadline)
     throw new Error("Owned process group cleanup exceeded its deadline.");
-  if (!(await ownership.verify()))
+  if (!(await verify(snapshot)))
     throw new Error("Group identity changed during cleanup.");
   if (Date.now() >= deadline)
     throw new Error("Owned process group cleanup exceeded its deadline.");
@@ -262,7 +292,8 @@ export async function processIdentity(
     process.kill(pid, 0);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ESRCH") return undefined;
-    throw error;
+    // On Darwin a zombie can fail kill(0) while ps can still prove its identity.
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
   }
   let stdout: string;
   try {

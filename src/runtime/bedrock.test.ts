@@ -3,10 +3,137 @@ import { createServer } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
+import { inspect } from "node:util";
 import { invokeBedrock } from "./bedrock.js";
 import { createProcessSupervisor } from "./platform.js";
 import type { AgentConfig, RuntimeEvent } from "../contracts.js";
 import type { ProcessSupervisor } from "./process-supervisor.js";
+import { ProcessSupervisor as Supervisor } from "./process-supervisor.js";
+
+it.each(["http", "tls"])(
+  "preserves %s diagnostics and prior usage through real MCP cleanup failure",
+  async (mode) => {
+    const directory = await mkdtemp(path.join(tmpdir(), "aeh-bedrock-dual-"));
+    const secret = "fixture-bedrock-secret";
+    const supervisor = new Supervisor({
+      driver: {
+        capabilities: { hardDescendantLimit: false },
+        prepare: async () => {},
+        recover: async () => ({ recovered: 0 }),
+        launch: async (input) => {
+          const child = spawn(input.executable, input.args, {
+            cwd: input.cwd,
+            env: input.env,
+            stdio: "pipe",
+            windowsHide: true,
+          });
+          return { child, stop: () => child.kill() };
+        },
+        cleanup: async () => {
+          throw new Error(`Private cleanup ${secret}`);
+        },
+      },
+    });
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, options) => {
+        if (++calls > 1) {
+          if (mode === "tls")
+            throw new TypeError(`Private ${secret}`, {
+              cause: Object.assign(new Error(secret), {
+                code: "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+              }),
+            });
+          return new Response(secret, { status: 429 });
+        }
+        const body = JSON.parse(String(options.body));
+        const name = body.toolConfig.tools[0].toolSpec.name;
+        return Response.json({
+          output: {
+            message: {
+              role: "assistant",
+              content: [
+                {
+                  toolUse: {
+                    toolUseId: "answer1",
+                    name,
+                    input: { answer: 42 },
+                  },
+                },
+              ],
+            },
+          },
+          stopReason: "tool_use",
+          usage: { inputTokens: 12, outputTokens: 3 },
+        });
+      }),
+    );
+    try {
+      await supervisor.recover();
+      let failure: unknown;
+      try {
+        await invokeBedrock({
+          agent: {
+            harness: "bedrock",
+            model: "fixture",
+            systemPrompt: "Answer.",
+            settings: { maxTurns: 3 },
+            tools: [],
+            connections: [
+              {
+                connectionId: "fixture",
+                provider: "amazon-bedrock",
+                settings: {
+                  baseUrl: "https://fixture.example/bedrock",
+                  region: "us-east-1",
+                },
+                credentialFields: ["apiKey"],
+              },
+            ],
+          },
+          directory,
+          prompt: "Question",
+          role: "target",
+          mcp: [],
+          env: { AWS_BEARER_TOKEN_BEDROCK: secret },
+          supervisor,
+          signal: AbortSignal.timeout(10000),
+          timeoutMs: 10000,
+          sanitize: (value) => value.replaceAll(secret, "[REDACTED]"),
+        });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({
+        code: "cleanup_failed",
+        evidence: {
+          code: "infrastructure_failure",
+          ...(mode === "http"
+            ? { statusCode: 429 }
+            : {
+                providerDiagnostics: {
+                  code: "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+                },
+              }),
+        },
+        executionFailure: { usage: { inputTokens: 12, outputTokens: 3 } },
+      });
+      expect(inspect(failure, { depth: 10, showHidden: true })).not.toContain(
+        secret,
+      );
+      expect(JSON.stringify(failure)).not.toContain(secret);
+      expect(calls).toBe(2);
+      expect(supervisor.activeReservations).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  15000,
+);
 
 it("surfaces safe TLS cause codes when Bedrock transport fails", async () => {
   const transportCause = Object.assign(new Error("private TLS details"), {

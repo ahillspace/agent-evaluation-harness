@@ -170,6 +170,23 @@ it("retries only explicit rejected overloads and retains every response", async 
   });
   expect(ambiguous.requests).toHaveLength(1);
 });
+it.each([429, 529])(
+  "honors a one-attempt budget for HTTP %i without retrying",
+  async (status) => {
+    const server = await fixture((response) =>
+      response.writeHead(status, { "retry-after": "0" }).end("{}"),
+    );
+    await expect(
+      invoke(server.endpoint, { maxAttempts: 1 }),
+    ).rejects.toMatchObject({
+      code: "provider_unavailable",
+      httpStatus: status,
+      attempts: [{ status, response: {} }],
+      usage: undefined,
+    });
+    expect(server.requests).toHaveLength(1);
+  },
+);
 it("keeps 422 capacity errors and invalid JSON provenance without retrying", async () => {
   const capacity = await fixture((response) =>
     response.writeHead(422).end('{"detail":"context exceeds capacity"}'),

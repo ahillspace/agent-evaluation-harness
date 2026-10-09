@@ -16,6 +16,8 @@ it.skipIf(!["win32", "darwin"].includes(process.platform))(
       Future_JSON_Option: '{"enabled":true,"limit":42}',
       Future_Literal_Option: "$HOME; $(echo untouched)\nsecond line",
     };
+    const certificate = path.join(directory, "company certificates.pem");
+    await writeFile(certificate, "");
     try {
       await supervisor.recover();
       const command = helperCommand("connection", "AEH_TEST_MCP_BINDING");
@@ -23,7 +25,7 @@ it.skipIf(!["win32", "darwin"].includes(process.platform))(
         const lines = require('node:readline').createInterface({ input: process.stdin });
         lines.on('line', line => {
           const request = JSON.parse(line);
-          const env = Object.fromEntries(${JSON.stringify(Object.keys(environment))}.map(key => [key, process.env[key]]));
+          const env = Object.fromEntries(${JSON.stringify([...Object.keys(environment), "NODE_EXTRA_CA_CERTS"])}.map(key => [key, process.env[key]]));
           process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { env, inheritedSecret: process.env.AEH_UNRELATED_SECRET ?? null } }) + '\\n');
         });
       `;
@@ -35,6 +37,7 @@ it.skipIf(!["win32", "darwin"].includes(process.platform))(
         timeoutMs: 15_000,
         env: {
           AEH_UNRELATED_SECRET: "unrelated-fixture-secret",
+          NODE_EXTRA_CA_CERTS: certificate,
           AEH_TEST_MCP_BINDING: JSON.stringify({
             command: process.execPath,
             args: ["-e", childSource],
@@ -47,7 +50,7 @@ it.skipIf(!["win32", "darwin"].includes(process.platform))(
       });
       expect(result.exitCode, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout).result).toEqual({
-        env: environment,
+        env: { ...environment, NODE_EXTRA_CA_CERTS: certificate },
         inheritedSecret: null,
       });
     } finally {

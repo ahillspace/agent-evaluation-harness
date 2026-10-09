@@ -1,5 +1,4 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 
 const providerSource = `const fs = require("node:fs");
@@ -8,13 +7,14 @@ const path = require("node:path");
 class FeatureGateProvider {
   constructor() {
     const entry = process.argv[1];
-    let defaults = {};
-    if (entry) {
-      try {
-        defaults = JSON.parse(
-          fs.readFileSync(path.join(path.dirname(path.resolve(entry)), "features.json"), "utf8"),
-        );
-      } catch {}
+    let defaults;
+    try {
+      const realEntry = fs.realpathSync(entry);
+      defaults = JSON.parse(fs.readFileSync(path.join(path.dirname(realEntry), "features.json"), "utf8"));
+      if (!defaults || typeof defaults !== "object" || Array.isArray(defaults) ||
+          Object.values(defaults).some(value => typeof value !== "boolean")) throw new Error();
+    } catch {
+      throw new Error("Tableau MCP feature defaults could not be loaded from the server entry point.");
     }
     let overrides = {};
     try {
@@ -34,6 +34,7 @@ module.exports = { default: FeatureGateProvider };
 export async function prepareTableauFeatureGate(
   features: Record<string, boolean>,
   env: Record<string, string>,
+  ownerDirectory?: string,
 ): Promise<{
   env: Record<string, string>;
   cleanup: () => Promise<void>;
@@ -41,7 +42,13 @@ export async function prepareTableauFeatureGate(
   if (!Object.keys(features).length)
     return { env, cleanup: async () => undefined };
 
-  const directory = await mkdtemp(path.join(tmpdir(), "aeh-tableau-features-"));
+  if (!ownerDirectory)
+    throw new Error(
+      "Tableau feature overrides require a parent-owned resource directory.",
+    );
+  const directory = await mkdtemp(
+    path.join(ownerDirectory, "tableau-features-"),
+  );
   const modulePath = path.join(directory, "feature-gate-provider.cjs");
   try {
     await writeFile(modulePath, providerSource, {

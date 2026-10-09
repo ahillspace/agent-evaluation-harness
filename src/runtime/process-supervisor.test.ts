@@ -57,7 +57,6 @@ it("keeps the execution error when process cleanup also fails", async () => {
       supervisor.run({ executable: process.execPath, args: [], cwd: "." }),
     ).rejects.toMatchObject({
       code: "cleanup_failed",
-      cause: executionError,
       message: expect.stringContaining("Gateway returned model_not_found"),
     });
     expect(supervisor.activeReservations).toBe(1);

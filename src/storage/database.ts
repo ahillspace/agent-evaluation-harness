@@ -1,5 +1,8 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type {
+  AnswerSource,
+  AssessmentPassSummary,
+  RunSummary,
   Assessment,
   UsageReport,
   AssessmentPass,
@@ -25,12 +28,14 @@ import type {
   JevProfileRevision,
   JevAssessmentRecord,
   JevAssessmentSummary,
+  RunRetryApplication,
 } from "../contracts.js";
-import { id } from "../domain/identity.js";
+import { digest, id } from "../domain/identity.js";
 import { AppError } from "../domain/errors.js";
 import { canonical, now } from "../domain/identity.js";
 
 export interface RecordMap {
+  retryApplication: RunRetryApplication;
   assessmentPass: AssessmentPass;
   bankFinding: BankFinding;
   bank: Bank;
@@ -54,12 +59,14 @@ export interface RecordQuery {
   resultId?: string;
   bankId?: string;
   researchSessionId?: string;
+  parentRunId?: string;
   status?: string | string[];
   limit?: number;
   offset?: number;
   descending?: boolean;
 }
 const policies: Record<RecordKind, { appendOnly: boolean; fixed: string[] }> = {
+  retryApplication: { appendOnly: true, fixed: [] },
   assessmentPass: {
     appendOnly: false,
     fixed: [
@@ -68,6 +75,7 @@ const policies: Record<RecordKind, { appendOnly: boolean; fixed: string[] }> = {
       "source",
       "createdAt",
       "parentPassId",
+      "retryApplicationId",
       "basis",
       "configuration",
     ],
@@ -139,12 +147,54 @@ const policies: Record<RecordKind, { appendOnly: boolean; fixed: string[] }> = {
     ],
   },
 };
+export interface PassSummaryBasis {
+  bankRevisionId: string;
+  evaluatorRevisionId: string;
+  referenceHash: string;
+  defaultDisposition?: string;
+  dispositions: Record<string, string>;
+}
+export interface ScoreSummaryInput {
+  id: string;
+  name: string;
+  createdAt: string;
+  basis: PassSummaryBasis;
+  assessments: Array<{
+    resultId: string;
+    attemptId: string;
+    deterministic: string;
+    judgeVerdict: boolean | null;
+    judgeError: boolean;
+    judgeResponded: boolean;
+  }>;
+}
+const comparisonDisposition = (settings: string) =>
+  `json_object('defaultDisposition',json_extract(${settings},'$.referenceDisposition'),'dispositions',json(COALESCE((SELECT json_group_object(key,json_extract(value,'$.referenceDisposition')) FROM json_each(${settings},'$.questionOverrides') WHERE json_type(value,'$.referenceDisposition')='text'),'{}')))`;
+const compactAssessment = (value: string) =>
+  `json_object('resultId',json_extract(${value},'$.resultId'),'attemptId',json_extract(${value},'$.attemptId'),'deterministic',json_extract(${value},'$.deterministic.status'),'judgeVerdict',json(${value} -> '$.judge.verdict'),'judgeError',json_type(${value},'$.judgeError') IS NOT NULL,'judgeResponded',json_type(${value},'$.judge') IS NOT NULL OR json_type(${value},'$.judgeResponse') IS NOT NULL)`;
+const referenceHash = (questions: string, selected: string) =>
+  `reference_hash(COALESCE((SELECT json_group_array(json_object('id',json_extract(q.value,'$.id'),'expected',json(q.value -> '$.expected'))) FROM json_each(${questions}) q WHERE json_extract(q.value,'$.id') IN (SELECT json_extract(value,'$.id') FROM json_each(${selected}))),'[]'))`;
+export type RunHeader = Pick<
+  RunRecord,
+  "id" | "name" | "status" | "retryOf"
+> & { manifestHash: string };
+export type RunListQuery = {
+  bankId?: string;
+  status?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+};
+export const normalizeRunSearch = (value: string): string =>
+  value.normalize("NFKC").toLowerCase();
+
 const queryColumns = {
   runId: "run_id",
   resultId: "result_id",
   bankId: "bank_id",
   researchSessionId: "session_id",
   status: "status",
+  parentRunId: "parent_run_id",
 } as const;
 
 function assessmentProjection(value: string): string {
@@ -175,11 +225,24 @@ export class Database {
   private readonly db: DatabaseSync;
   constructor(path: string) {
     this.db = new DatabaseSync(path);
+    this.db.function("normalize_search", { deterministic: true }, (value) =>
+      normalizeRunSearch(String(value ?? "")),
+    );
+    this.db.function("manifest_hash", { deterministic: true }, (value) =>
+      digest(JSON.parse(String(value))),
+    );
+    this.db.function("reference_hash", { deterministic: true }, (value) =>
+      digest(
+        (JSON.parse(String(value)) as Array<{ id: string }>).sort((a, b) =>
+          a.id.localeCompare(b.id),
+        ),
+      ),
+    );
     try {
       const version = Number(
         this.db.prepare("PRAGMA user_version").get()?.user_version ?? 0,
       );
-      if (version > 5)
+      if (version > 7)
         throw new AppError(
           "schema_version",
           "This catalog requires a newer application version.",
@@ -196,7 +259,7 @@ export class Database {
       PRAGMA foreign_keys=OFF;
       PRAGMA busy_timeout=5000;
       BEGIN IMMEDIATE;
-      CREATE TABLE IF NOT EXISTS ${version > 0 && version < 5 ? "records_v5" : "records"} (
+      CREATE TABLE IF NOT EXISTS ${version > 0 && version < 6 ? "records_v6" : "records"} (
         kind TEXT NOT NULL CHECK(kind IN (${Object.keys(policies)
           .map((kind) => `'${kind}'`)
           .join(",")})),
@@ -210,11 +273,22 @@ export class Database {
         UNIQUE(kind,id)
       );
     `);
-    if (version > 0 && version < 5)
+    if (version > 0 && version < 6)
       this.db.exec(`
-      INSERT INTO records_v5(kind,id,value,immutable,ordinal) SELECT kind,id,value,immutable,ordinal FROM records;
+      INSERT INTO records_v6(kind,id,value,immutable,ordinal) SELECT kind,id,value,immutable,ordinal FROM records;
       DROP TABLE records;
-      ALTER TABLE records_v5 RENAME TO records;
+      ALTER TABLE records_v6 RENAME TO records;
+    `);
+    if (version < 7) {
+      this.db.exec(`
+        ALTER TABLE records ADD COLUMN parent_run_id TEXT GENERATED ALWAYS AS (json_extract(value,'$.retryOf.runId')) VIRTUAL;
+        ALTER TABLE records ADD COLUMN run_bank_id TEXT GENERATED ALWAYS AS (json_extract(value,'$.manifest.bank.bankId')) VIRTUAL;
+      `);
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS records_parent_run ON records(kind,parent_run_id,ordinal);
+      CREATE INDEX IF NOT EXISTS records_run_bank ON records(kind,run_bank_id,ordinal);
+      CREATE INDEX IF NOT EXISTS records_run_bank_status ON records(kind,run_bank_id,status,ordinal);
     `);
     if (version < 3)
       this.db.exec("DROP TRIGGER IF EXISTS immutable_blueprint_fields;");
@@ -232,7 +306,7 @@ export class Database {
       CREATE INDEX IF NOT EXISTS events_run ON events(run_id,sequence);
       CREATE INDEX IF NOT EXISTS events_session ON events(session_id,sequence);
       CREATE INDEX IF NOT EXISTS events_attempt ON events(attempt_id,sequence);
-      CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY, hash TEXT NOT NULL, kind TEXT NOT NULL, record_id TEXT NOT NULL,
+      CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY, hash TEXT NOT NULL, kind TEXT NOT NULL, record_id TEXT NOT NULL, response TEXT CHECK(response IS NULL OR json_valid(response)),
         FOREIGN KEY(kind,record_id) REFERENCES records(kind,id));
       CREATE TRIGGER IF NOT EXISTS records_append_only BEFORE UPDATE ON records
       WHEN OLD.immutable=1 OR OLD.kind IN (${Object.entries(policies)
@@ -260,6 +334,15 @@ export class Database {
       WHEN OLD.kind='jevAssessment' AND json_extract(OLD.value,'$.published')=1 AND json_extract(NEW.value,'$.published') IS NOT 1
       BEGIN SELECT RAISE(ABORT,'Published judge assessments cannot be unpublished.'); END;
     `);
+    if (
+      !this.db
+        .prepare("PRAGMA table_info(idempotency)")
+        .all()
+        .some((column) => column.name === "response")
+    )
+      this.db.exec(
+        "ALTER TABLE idempotency ADD COLUMN response TEXT CHECK(response IS NULL OR json_valid(response));",
+      );
     for (const [kind, policy] of Object.entries(policies)) {
       if (!policy.fixed.length) continue;
       const changed = policy.fixed
@@ -286,7 +369,7 @@ export class Database {
         "INSERT OR IGNORE INTO workspace_metadata(key,value) VALUES ('id',?)",
       )
       .run(id("workspace"));
-    this.db.exec("PRAGMA user_version=5; COMMIT; PRAGMA foreign_keys=ON;");
+    this.db.exec("PRAGMA user_version=7; COMMIT; PRAGMA foreign_keys=ON;");
   }
   workspaceId(): string {
     return this.db
@@ -390,6 +473,252 @@ export class Database {
         .get(...parameters)?.total ?? 0,
     );
   }
+  runHeaders(query: RecordQuery = {}): RunHeader[] {
+    const { where, parameters } = recordFilter("run", query);
+    return this.db
+      .prepare(
+        `SELECT json_object('id',id,'name',json_extract(value,'$.name'),'status',status,'retryOf',json_extract(value,'$.retryOf'),'manifestHash',manifest_hash(json_extract(value,'$.manifest'))) AS value FROM records WHERE ${where} ORDER BY ordinal`,
+      )
+      .all(...parameters)
+      .map((row) => JSON.parse(String(row.value)) as RunHeader);
+  }
+  runHeader(runId: string): RunHeader {
+    const row = this.db
+      .prepare(
+        "SELECT json_object('id',id,'name',json_extract(value,'$.name'),'status',status,'retryOf',json_extract(value,'$.retryOf'),'manifestHash',manifest_hash(json_extract(value,'$.manifest'))) AS value FROM records WHERE kind='run' AND id=?",
+      )
+      .get(runId);
+    if (!row) throw new AppError("not_found", `run ${runId} was not found.`);
+    return JSON.parse(String(row.value)) as RunHeader;
+  }
+  appliedAnswerSource(
+    runId: string,
+    resultId: string,
+  ): AnswerSource | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT json_set(json_extract(item.value,'$.source'),'$.applicationId',records.id) AS value FROM records,json_each(records.value,'$.bindings') item WHERE kind='retryApplication' AND run_id=? AND json_extract(item.value,'$.resultId')=? ORDER BY records.ordinal DESC,item.key DESC LIMIT 1",
+      )
+      .get(runId, resultId);
+    return row ? (JSON.parse(String(row.value)) as AnswerSource) : undefined;
+  }
+  answerSource(attemptId: string): AnswerSource {
+    const row = this.db
+      .prepare(
+        "SELECT id,run_id,result_id,json_extract(value,'$.evidenceHash') AS hash FROM records WHERE kind='attempt' AND id=?",
+      )
+      .get(attemptId);
+    if (!row)
+      throw new AppError("not_found", `attempt ${attemptId} was not found.`);
+    return {
+      runId: String(row.run_id),
+      resultId: String(row.result_id),
+      attemptId: String(row.id),
+      evidenceHash: String(row.hash ?? ""),
+    };
+  }
+  resultAnswerSources(
+    runId: string,
+  ): Array<ResultRecord & { answerSource?: AnswerSource }> {
+    return this.db
+      .prepare(
+        `SELECT r.value AS result,a.id AS attempt_id,a.run_id AS source_run_id,a.result_id AS source_result_id,json_extract(a.value,'$.evidenceHash') AS hash FROM records r LEFT JOIN records a ON a.kind='attempt' AND a.id=json_extract(r.value,'$.completedAttemptId') WHERE r.kind='result' AND r.run_id=? ORDER BY r.ordinal`,
+      )
+      .all(runId)
+      .map((row) => ({
+        ...(JSON.parse(String(row.result)) as ResultRecord),
+        ...(row.attempt_id
+          ? {
+              answerSource: {
+                runId: String(row.source_run_id),
+                resultId: String(row.source_result_id),
+                attemptId: String(row.attempt_id),
+                evidenceHash: String(row.hash ?? ""),
+              },
+            }
+          : {}),
+      }));
+  }
+  runPage(query: RunListQuery = {}): {
+    runs: Array<
+      Pick<
+        RunSummary,
+        | "id"
+        | "name"
+        | "status"
+        | "createdAt"
+        | "bankId"
+        | "bankName"
+        | "model"
+        | "harness"
+        | "targetKind"
+        | "targetName"
+        | "researchSessionId"
+        | "selectedAssessmentPassId"
+      >
+    >;
+    total: number;
+    nextOffset: number | null;
+  } {
+    const clauses = ["kind='run'"],
+      parameters: SQLInputValue[] = [];
+    if (query.bankId) {
+      clauses.push("run_bank_id=?");
+      parameters.push(query.bankId);
+    }
+    if (query.status) {
+      clauses.push("status=?");
+      parameters.push(query.status);
+    }
+    if (query.search?.trim()) {
+      clauses.push(
+        "instr(normalize_search(json_extract(value,'$.name') || ' ' || json_extract(value,'$.manifest.bank.name') || ' ' || COALESCE(json_extract(value,'$.manifest.target.name'),json_extract(value,'$.manifest.target.agent.harness') || ' / ' || json_extract(value,'$.manifest.target.agent.model'),json_extract(value,'$.manifest.agent.harness') || ' / ' || json_extract(value,'$.manifest.agent.model'),'')),?)>0",
+      );
+      parameters.push(normalizeRunSearch(query.search.trim()));
+    }
+    const where = clauses.join(" AND "),
+      limit = query.limit ?? 100,
+      offset = query.offset ?? 0;
+    if (
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 200 ||
+      !Number.isInteger(offset) ||
+      offset < 0
+    )
+      throw new AppError(
+        "invalid_query",
+        "Run pages require a limit from 1 to 200 and a nonnegative offset.",
+      );
+    const total = Number(
+      this.db
+        .prepare(`SELECT COUNT(*) AS total FROM records WHERE ${where}`)
+        .get(...parameters)!.total,
+    );
+    const runs = this.db
+      .prepare(
+        `SELECT json_object('id',id,'name',json_extract(value,'$.name'),'status',status,'createdAt',json_extract(value,'$.createdAt'),'bankId',run_bank_id,'bankName',json_extract(value,'$.manifest.bank.name'),'model',COALESCE(json_extract(value,'$.manifest.target.agent.model'),json_extract(value,'$.manifest.agent.model')),'harness',COALESCE(json_extract(value,'$.manifest.target.agent.harness'),json_extract(value,'$.manifest.agent.harness')),'targetKind',COALESCE(json_extract(value,'$.manifest.target.kind'),'managed'),'targetName',json_extract(value,'$.manifest.target.name'),'researchSessionId',session_id,'selectedAssessmentPassId',json_extract(value,'$.selectedAssessmentPassId')) AS value FROM records WHERE ${where} ORDER BY ordinal DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...parameters, limit, offset)
+      .map((row) => {
+        const value = JSON.parse(String(row.value));
+        for (const key of [
+          "researchSessionId",
+          "selectedAssessmentPassId",
+          "targetName",
+        ])
+          if (value[key] === null) delete value[key];
+        return value;
+      });
+    return {
+      runs,
+      total,
+      nextOffset: offset + runs.length < total ? offset + runs.length : null,
+    };
+  }
+  runOutcomeCounts(
+    runId: string,
+  ): Pick<RunSummary, "completed" | "failed" | "total"> {
+    const row = this.db
+      .prepare(
+        `WITH applied AS (SELECT DISTINCT json_extract(item.value,'$.resultId') AS result_id FROM records,json_each(records.value,'$.bindings') item WHERE kind='retryApplication' AND run_id=?) SELECT COUNT(*) AS total,COALESCE(SUM(json_type(value,'$.completedAttemptId')='text' OR id IN (SELECT result_id FROM applied)),0) AS completed,COALESCE(SUM(status='failed' AND json_type(value,'$.completedAttemptId') IS NULL AND id NOT IN (SELECT result_id FROM applied)),0) AS failed FROM records WHERE kind='result' AND run_id=?`,
+      )
+      .get(runId, runId)!;
+    return {
+      total: Number(row.total),
+      completed: Number(row.completed),
+      failed: Number(row.failed),
+    };
+  }
+  assessmentPassSummaries(runId: string): AssessmentPassSummary[] {
+    return this.db
+      .prepare(
+        "SELECT json_remove(value,'$.configuration','$.judgments','$.basis.eligibleResultIds','$.basis.excludedResultIds') AS value FROM records WHERE kind='assessmentPass' AND run_id=? ORDER BY ordinal",
+      )
+      .all(runId)
+      .map((row) => JSON.parse(String(row.value)) as AssessmentPassSummary);
+  }
+  runAssessmentState(runId: string): Pick<
+    RunRecord,
+    "createdAt" | "updatedAt" | "status"
+  > & {
+    judgeEnabled: boolean;
+    jevEnabled: boolean;
+  } {
+    const row = this.db
+      .prepare(
+        "SELECT json_object('createdAt',json_extract(value,'$.createdAt'),'updatedAt',json_extract(value,'$.updatedAt'),'status',status,'judgeEnabled',json_extract(value,'$.manifest.judge.enabled'),'jevEnabled',json_type(value,'$.manifest.jevJudge')='object') AS value FROM records WHERE kind='run' AND id=?",
+      )
+      .get(runId);
+    if (!row) throw new AppError("not_found", `run ${runId} was not found.`);
+    return JSON.parse(String(row.value));
+  }
+  runAssessmentBasis(runId: string): {
+    createdAt: string;
+    updatedAt: string;
+    status: RunRecord["status"];
+    judgeEnabled: boolean;
+    jevEnabled: boolean;
+    basis: PassSummaryBasis;
+  } {
+    const row = this.db
+      .prepare(
+        `SELECT json_object('createdAt',json_extract(value,'$.createdAt'),'updatedAt',json_extract(value,'$.updatedAt'),'status',status,'judgeEnabled',json_extract(value,'$.manifest.judge.enabled'),'jevEnabled',json_type(value,'$.manifest.jevJudge')='object','basis',json_patch(${comparisonDisposition("json_extract(records.value,'$.manifest.evaluator.settings')")},json_object('bankRevisionId',json_extract(value,'$.manifest.bank.id'),'evaluatorRevisionId',json_extract(value,'$.manifest.evaluator.id'),'referenceHash',${referenceHash("json_extract(records.value,'$.manifest.questions')", "json_extract(records.value,'$.manifest.questions')")}))) AS value FROM records WHERE kind='run' AND id=?`,
+      )
+      .get(runId);
+    if (!row) throw new AppError("not_found", `run ${runId} was not found.`);
+    return JSON.parse(String(row.value));
+  }
+  resultAssessmentMetadata(
+    runId: string,
+  ): Array<
+    Pick<ResultRecord, "id" | "questionId" | "status" | "completedAttemptId">
+  > {
+    return this.db
+      .prepare(
+        "SELECT json_object('id',id,'questionId',json_extract(value,'$.questionId'),'status',status,'completedAttemptId',json_extract(value,'$.completedAttemptId')) AS value FROM records WHERE kind='result' AND run_id=? ORDER BY ordinal",
+      )
+      .all(runId)
+      .map((row) => JSON.parse(String(row.value)));
+  }
+  originalAssessmentMetadata(runId: string): ScoreSummaryInput["assessments"] {
+    const saved = this.db
+      .prepare(
+        `SELECT (SELECT json_group_array(json(${compactAssessment("item.value")})) FROM json_each(records.value,'$.assessments') item) AS value FROM records WHERE kind='scoreSet' AND run_id=? AND json_extract(value,'$.kind')='original' ORDER BY ordinal LIMIT 1`,
+      )
+      .get(runId);
+    if (saved) return JSON.parse(String(saved.value));
+    return this.db
+      .prepare(
+        `SELECT ${compactAssessment("value")} AS value FROM records WHERE kind='assessment' AND run_id=? ORDER BY ordinal`,
+      )
+      .all(runId)
+      .map((row) => JSON.parse(String(row.value)));
+  }
+  originalJevMetadata(runId: string): Array<{
+    id: string;
+    resultId: string;
+    attemptId: string;
+    status: string;
+    choice: string | null;
+    confidence: number | null;
+    threshold: number;
+  }> {
+    return this.db
+      .prepare(
+        "SELECT json_object('id',id,'resultId',result_id,'attemptId',json_extract(value,'$.attemptId'),'status',status,'choice',json_extract(value,'$.checks.answer.choice'),'confidence',json_extract(value,'$.checks.answer.confidence'),'threshold',json_extract(value,'$.criteria.confidenceThreshold')) AS value FROM records WHERE kind='jevAssessment' AND run_id=? AND json_extract(value,'$.kind')='original' ORDER BY ordinal",
+      )
+      .all(runId)
+      .map((row) => JSON.parse(String(row.value)));
+  }
+  legacyScoreSummaryInputs(runId: string): ScoreSummaryInput[] {
+    return this.db
+      .prepare(
+        `SELECT json_object('id','scores_' || scores.id,'name',json_extract(scores.value,'$.evaluator.name') || ' (revision ' || json_extract(scores.value,'$.evaluator.number') || ')','createdAt',json_extract(scores.value,'$.createdAt'),'basis',json_patch(${comparisonDisposition("json_extract(scores.value,'$.evaluator.settings')")},json_object('bankRevisionId',COALESCE(json_extract(scores.value,'$.referenceBank.id'),json_extract(run.value,'$.manifest.bank.id')),'evaluatorRevisionId',json_extract(scores.value,'$.evaluator.id'),'referenceHash',${referenceHash("COALESCE(json_extract(scores.value,'$.referenceBank.questions'),json_extract(run.value,'$.manifest.questions'))", "json_extract(run.value,'$.manifest.questions')")})),'assessments',json(COALESCE((SELECT json_group_array(json(${compactAssessment("item.value")})) FROM json_each(scores.value,'$.assessments') item),'[]'))) AS value FROM records scores JOIN records run ON run.kind='run' AND run.id=scores.run_id WHERE scores.kind='scoreSet' AND scores.run_id=? AND json_extract(scores.value,'$.kind')!='original' AND json_extract(scores.value,'$.published')=1 AND NOT EXISTS(SELECT 1 FROM records pass WHERE pass.kind='assessmentPass' AND pass.id='scores_' || scores.id) ORDER BY scores.ordinal`,
+      )
+      .all(runId)
+      .map((row) => JSON.parse(String(row.value)));
+  }
   assessmentPassObservations(runId: string): AssessmentPass[] {
     return this.db
       .prepare(
@@ -398,13 +727,17 @@ export class Database {
       .all(runId)
       .map((row) => JSON.parse(row.value as string) as AssessmentPass);
   }
-  eventCounts(runId: string): Record<string, number> {
+  eventCounts(runId: string, attemptIds?: string[]): Record<string, number> {
     return Object.fromEntries(
       this.db
         .prepare(
-          "SELECT type, COUNT(*) AS total FROM events WHERE run_id=? GROUP BY type",
+          "SELECT type, COUNT(*) AS total FROM events WHERE run_id=? AND (? IS NULL OR attempt_id IN (SELECT value FROM json_each(?))) GROUP BY type",
         )
-        .all(runId)
+        .all(
+          runId,
+          attemptIds ? JSON.stringify(attemptIds) : null,
+          attemptIds ? JSON.stringify(attemptIds) : null,
+        )
         .map((row) => [String(row.type), Number(row.total)]),
     );
   }
@@ -495,13 +828,20 @@ export class Database {
       .get(attemptId);
     return row?.data ? (JSON.parse(row.data as string) as Json) : undefined;
   }
-  originalJudgeUsage(runId: string): UsageReport[] {
+  originalJudgeUsage(runId: string, attemptIds?: string[]): UsageReport[] {
     return this.db
       .prepare(
-        `SELECT json_extract(value,'$.judge.usage') AS usage,0 AS pending FROM records WHERE kind='assessment' AND run_id=? AND (json_type(value,'$.judge') IS NOT NULL OR json_type(value,'$.judgeError') IS NOT NULL)
-    UNION ALL SELECT NULL AS usage,1 AS pending FROM events WHERE run_id=? AND type='judge.request' AND NOT EXISTS(SELECT 1 FROM records WHERE kind='assessment' AND run_id=events.run_id AND json_extract(value,'$.attemptId')=events.attempt_id) GROUP BY attempt_id`,
+        `SELECT COALESCE(json_extract(value,'$.judgeUsage'),json_extract(value,'$.judge.usage')) AS usage,0 AS pending FROM records WHERE kind='assessment' AND json_extract(value,'$.judgeAdmitted') IS NOT 0 AND run_id=? AND (? IS NULL OR json_extract(value,'$.attemptId') IN (SELECT value FROM json_each(?))) AND (json_type(value,'$.judge') IS NOT NULL OR json_type(value,'$.judgeError') IS NOT NULL)
+    UNION ALL SELECT NULL AS usage,1 AS pending FROM events WHERE run_id=? AND (? IS NULL OR attempt_id IN (SELECT value FROM json_each(?))) AND type='judge.request' AND NOT EXISTS(SELECT 1 FROM records WHERE kind='assessment' AND run_id=events.run_id AND json_extract(value,'$.attemptId')=events.attempt_id) GROUP BY attempt_id`,
       )
-      .all(runId, runId)
+      .all(
+        runId,
+        attemptIds ? JSON.stringify(attemptIds) : null,
+        attemptIds ? JSON.stringify(attemptIds) : null,
+        runId,
+        attemptIds ? JSON.stringify(attemptIds) : null,
+        attemptIds ? JSON.stringify(attemptIds) : null,
+      )
       .map((row) => ({
         ...(row.usage
           ? { usage: JSON.parse(row.usage as string) as UsageReport["usage"] }
@@ -686,7 +1026,7 @@ export class Database {
   idempotent(
     key: string,
     hash: string,
-  ): { kind: string; id: string } | undefined {
+  ): { kind: string; id: string; response?: Json } | undefined {
     const row = this.db
       .prepare("SELECT * FROM idempotency WHERE key=?")
       .get(key);
@@ -696,19 +1036,32 @@ export class Database {
         "idempotency_conflict",
         "This idempotency key was already used with different input.",
       );
-    return { kind: row.kind as string, id: row.record_id as string };
+    return {
+      kind: row.kind as string,
+      id: row.record_id as string,
+      ...(row.response
+        ? { response: JSON.parse(String(row.response)) as Json }
+        : {}),
+    };
   }
   remember(
     key: string,
     hash: string,
     kind: RecordKind,
     recordId: string,
+    response?: Json,
   ): void {
     this.db
       .prepare(
-        "INSERT INTO idempotency(key,hash,kind,record_id) VALUES (?,?,?,?)",
+        "INSERT INTO idempotency(key,hash,kind,record_id,response) VALUES (?,?,?,?,?)",
       )
-      .run(key, hash, kind, recordId);
+      .run(
+        key,
+        hash,
+        kind,
+        recordId,
+        response === undefined ? null : canonical(response),
+      );
   }
   close(): void {
     this.db.close();

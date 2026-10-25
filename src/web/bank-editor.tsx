@@ -1,233 +1,347 @@
-import { useState } from "react";
-import { AnswerSize } from "./answer-size.js";
-import type { BankRevision, Question } from "../contracts.js";
+import { useRef, useState, useEffect } from "react";
+import {
+  answerFormatSchema,
+  questionSchema,
+  type EvaluatorSettings,
+  type Json,
+  type Question,
+  type Verdict,
+} from "../contracts.js";
 import { command } from "./api.js";
-import { parseQuestions, replaceExpectedAnswer } from "./drafts.js";
-import { AnswerFormatSummary } from "./answer-format.js";
-import { ErrorNotice, Field, Icon, Modal, Tabs, json } from "./ui.js";
+import { AnswerSize } from "./answer-size.js";
+import { QuestionGradingFields } from "./question-grading.js";
+import { ErrorNotice, Field, Modal, json } from "./ui.js";
 
+function answerKind(value: Json): string {
+  return typeof value === "number"
+    ? "number"
+    : typeof value === "string"
+      ? "text"
+      : "json";
+}
+function readAnswer(value: string, mode: string, label: string): Json {
+  if (mode === "number") {
+    if (!value.trim())
+      throw new Error(`${label} cannot be blank. Enter a finite number.`);
+    const number = Number(value);
+    if (!Number.isFinite(number))
+      throw new Error(`${label} must be a finite number.`);
+    return number;
+  }
+  return mode === "json" ? (JSON.parse(value) as Json) : value;
+}
 export function BankEditor({
-  source,
+  question,
+  settings,
   onClose,
   onSaved,
+  onRemove,
 }: {
-  source: BankRevision | "new";
+  question: Question;
+  settings: EvaluatorSettings;
   onClose: () => void;
-  onSaved: (value: BankRevision) => void;
+  onSaved: (question: Question, settings: EvaluatorSettings) => void;
+  onRemove?: () => void;
 }) {
-  const [name, setName] = useState(source === "new" ? "" : source.name);
-  const [questions, setQuestions] = useState<Question[]>(
-    source === "new"
-      ? [{ id: "q1", text: "", expected: "", tags: [] }]
-      : source.questions,
+  const [value, setValue] = useState(question);
+  const [rules, setRules] = useState(settings);
+  const [reference, setReference] = useState(
+    typeof question.expected === "string"
+      ? question.expected
+      : json(question.expected),
   );
-  const [mode, setMode] = useState("author");
-  const [importText, setImportText] = useState("");
+  const [referenceMode, setReferenceMode] = useState(
+    answerKind(question.expected),
+  );
+  const [format, setFormat] = useState(
+    question.answerFormat ? json(question.answerFormat) : "",
+  );
+  const [sample, setSample] = useState("");
+  const [sampleMode, setSampleMode] = useState(answerKind(question.expected));
+  const [assessment, setAssessment] = useState<{
+    key: string;
+    verdict: Verdict;
+  } | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [pending, setPending] = useState(false);
-  const update = (index: number, changes: Partial<Question>) =>
-    setQuestions((items) =>
-      items.map((item, position) =>
-        position === index ? { ...item, ...changes } : item,
-      ),
-    );
-  const submit = async () => {
-    setPending(true);
+  const generation = useRef(0);
+  const assessmentKey = JSON.stringify({
+    value,
+    rules,
+    reference,
+    referenceMode,
+    format,
+    sample,
+    sampleMode,
+  });
+  useEffect(
+    () => () => {
+      generation.current++;
+    },
+    [],
+  );
+  const assemble = () => {
+    const expected = readAnswer(reference, referenceMode, "Reference answer");
+    return questionSchema.parse({
+      ...value,
+      expected,
+      answerFormat: format.trim()
+        ? answerFormatSchema.parse(JSON.parse(format))
+        : undefined,
+    });
+  };
+  const check = async () => {
+    const request = ++generation.current;
     setError(null);
+    setAssessment(null);
+    setPending(true);
     try {
-      const payload = {
-        name,
-        questions: mode === "import" ? parseQuestions(importText) : questions,
-      };
-      const value =
-        source === "new"
-          ? await command("banks.create", payload)
-          : await command("banks.revise", {
-              ...payload,
-              bankId: source.bankId,
-            });
-      onSaved(value);
+      const verdict = await command("banks.check-answer", {
+        question: assemble(),
+        settings: {
+          ...rules,
+          questionOverrides: {
+            ...rules.questionOverrides,
+            [value.id]: rules.questionOverrides[question.id] ?? {},
+          },
+        },
+        answer: readAnswer(sample, sampleMode, "Sample answer"),
+      });
+      if (generation.current === request)
+        setAssessment({ key: assessmentKey, verdict });
     } catch (cause) {
-      setError(cause);
+      if (generation.current === request) setError(cause);
     } finally {
-      setPending(false);
+      if (generation.current === request) setPending(false);
     }
   };
   return (
-    <Modal
-      title={
-        source === "new"
-          ? "Create question bank"
-          : "Publish a new question revision"
-      }
-      onClose={onClose}
-    >
-      <ErrorNotice error={error} />
-      <Field label="Bank name" required>
-        <input
-          aria-label="Bank name"
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          placeholder="Sales analytics"
-        />
-      </Field>
-      <Tabs
-        label="Question authoring method"
-        value={mode}
-        onChange={setMode}
-        items={[
-          { value: "author", label: "Write questions" },
-          { value: "import", label: "Import JSON or CSV" },
-        ]}
-      >
-        {mode === "import" ? (
-          <div className="stack">
-            <p className="subtle">
-              JSON accepts a questions array or a bank export. CSV requires
-              question and expected columns, with optional id and tags.
-              Publishing a typed answer shares its public format with the
-              target. Expected values and result counts stay private.
-            </p>
-            <input
-              aria-label="Import question file"
-              type="file"
-              accept=".json,.csv"
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) void file.text().then(setImportText);
-              }}
-            />
+    <Modal title={`Question ${question.id}`} onClose={onClose}>
+      <div className="bank-question-editor stack">
+        <ErrorNotice error={error} />
+        <section className="bank-editor-section stack">
+          <h3>Question sent to the target</h3>
+          <Field label="Question" required>
             <textarea
-              aria-label="Question import content"
-              className="code-input"
-              rows={13}
-              value={importText}
-              onChange={(event) => setImportText(event.target.value)}
-              placeholder={
-                "id,question,expected\nq1,What was total revenue?,12500"
+              aria-label="Question"
+              rows={3}
+              value={value.text}
+              onChange={(event) =>
+                setValue({ ...value, text: event.target.value })
               }
             />
-          </div>
-        ) : (
-          <div className="stack">
-            {questions.map((question, index) => (
-              <div key={index} className="question-editor">
-                <div className="row">
-                  <span className="eyebrow">Question {index + 1}</span>
-                  <button
-                    className="text-button danger"
-                    disabled={questions.length === 1}
-                    onClick={() =>
-                      setQuestions((items) =>
-                        items.filter((_, position) => index !== position),
-                      )
-                    }
-                  >
-                    Remove
-                  </button>
-                </div>
-                <Field label="Question">
-                  <textarea
-                    aria-label={`Question ${index + 1}`}
-                    value={question.text}
-                    rows={2}
-                    onChange={(event) =>
-                      update(index, { text: event.target.value })
-                    }
-                  />
-                </Field>
-                <Field
-                  label="Expected answer"
-                  help="Enter plain text, a number, or a JSON value. Expected values stay private. For typed tables, publication records the declared column names, types, and null rules as the public answer format."
-                >
-                  <textarea
-                    aria-label={`Expected answer ${index + 1}`}
-                    defaultValue={
-                      typeof question.expected === "string"
-                        ? question.expected
-                        : json(question.expected)
-                    }
-                    rows={2}
-                    onBlur={(event) => {
-                      let value = event.target.value;
-                      try {
-                        value = JSON.parse(value);
-                      } catch {
-                        /* Preserve plain text. */
-                      }
-                      update(index, replaceExpectedAnswer(question, value));
-                    }}
-                  />
-                </Field>
-                {question.answerFormat && (
-                  <AnswerFormatSummary format={question.answerFormat} />
-                )}
-                <AnswerSize answer={question.expected} />
-                <details className="disclosure">
-                  <summary>Question ID and tags</summary>
-                  <div className="form-grid">
-                    <Field label="Question ID">
-                      <input
-                        aria-label={`Question ID ${index + 1}`}
-                        value={question.id}
-                        onChange={(event) =>
-                          update(index, { id: event.target.value })
-                        }
-                      />
-                    </Field>
-                    <Field label="Tags">
-                      <input
-                        aria-label={`Tags ${index + 1}`}
-                        value={question.tags.join(", ")}
-                        onChange={(event) =>
-                          update(index, {
-                            tags: event.target.value
-                              .split(",")
-                              .map((value) => value.trim())
-                              .filter(Boolean),
-                          })
-                        }
-                        placeholder="revenue, aggregation"
-                      />
-                    </Field>
-                  </div>
-                </details>
-              </div>
-            ))}
-            <button
-              className="button secondary"
-              onClick={() =>
-                setQuestions((items) => [
-                  ...items,
-                  {
-                    id: `q${items.length + 1}`,
-                    text: "",
-                    expected: "",
-                    tags: [],
-                  },
-                ])
-              }
+          </Field>
+          <details className="disclosure">
+            <summary>Public context and answer instructions</summary>
+            <div className="stack">
+              <Field
+                label="Public context"
+                help="The target receives this context. Keep expected values and private criteria out of this field."
+              >
+                <textarea
+                  aria-label="Public context"
+                  rows={3}
+                  value={value.context ?? ""}
+                  onChange={(event) =>
+                    setValue({
+                      ...value,
+                      context: event.target.value || undefined,
+                    })
+                  }
+                />
+              </Field>
+              <Field
+                label="Public answer instructions"
+                help="Describe required precision, units, or ordering. Configure matching rules separately below; the evaluator does not infer rules from this text."
+              >
+                <textarea
+                  aria-label="Public answer instructions"
+                  rows={3}
+                  value={value.evaluationGuidance ?? ""}
+                  onChange={(event) =>
+                    setValue({
+                      ...value,
+                      evaluationGuidance: event.target.value || undefined,
+                    })
+                  }
+                />
+              </Field>
+              <Field
+                label="Public answer format (JSON)"
+                help='Leave blank to derive the public format at publication. For example: {"type":"scalar","valueType":"decimal","nullable":false}. Public formats contain structure, never reference values.'
+              >
+                <textarea
+                  aria-label="Public answer format"
+                  className="code-input"
+                  rows={4}
+                  value={format}
+                  onChange={(event) => setFormat(event.target.value)}
+                />
+              </Field>
+            </div>
+          </details>
+        </section>
+        <section className="bank-editor-section stack">
+          <h3>Private reference answer</h3>
+          <p className="subtle">
+            The evaluator and enabled judges receive the reference. The target
+            never receives it.
+          </p>
+          <Field label="Reference value type">
+            <select
+              aria-label="Reference value type"
+              value={referenceMode}
+              onChange={(event) => {
+                setReferenceMode(event.target.value);
+                if (!sample) setSampleMode(event.target.value);
+              }}
             >
-              <Icon name="plus" />
-              Add question
-            </button>
+              <option value="text">Text</option>
+              <option value="number">Number</option>
+              <option value="json">JSON value</option>
+            </select>
+          </Field>
+          <Field label="Reference answer">
+            <textarea
+              aria-label="Reference answer"
+              rows={4}
+              className={referenceMode === "json" ? "code-input" : undefined}
+              value={reference}
+              onChange={(event) => setReference(event.target.value)}
+            />
+          </Field>
+          <AnswerSize
+            answer={
+              referenceMode === "text"
+                ? reference
+                : (() => {
+                    try {
+                      return readAnswer(
+                        reference,
+                        referenceMode,
+                        "Reference answer",
+                      );
+                    } catch {
+                      return reference;
+                    }
+                  })()
+            }
+          />
+        </section>
+        <section className="bank-editor-section stack">
+          <QuestionGradingFields
+            questionId={question.id}
+            settings={rules}
+            onSettings={setRules}
+          />
+        </section>
+        <section className="bank-editor-section stack">
+          <h3>Try an answer</h3>
+          <p className="subtle">
+            This uses the engine's deterministic evaluator. It does not invoke a
+            target or judge.
+          </p>
+          <Field label="Sample value type">
+            <select
+              aria-label="Sample value type"
+              value={sampleMode}
+              onChange={(event) => setSampleMode(event.target.value)}
+            >
+              <option value="text">Text</option>
+              <option value="number">Number</option>
+              <option value="json">JSON value</option>
+            </select>
+          </Field>
+          <Field label="Sample answer">
+            <textarea
+              aria-label="Sample answer"
+              rows={3}
+              value={sample}
+              onChange={(event) => setSample(event.target.value)}
+            />
+          </Field>
+          <button
+            className="button secondary"
+            disabled={pending}
+            onClick={() => void check()}
+          >
+            {pending ? "Checking..." : "Check answer"}
+          </button>
+          {assessment?.key === assessmentKey && (
+            <p className="notice" role="status">
+              <strong>
+                {assessment.verdict.status === "correct"
+                  ? "Pass"
+                  : assessment.verdict.status === "incorrect"
+                    ? "Fail"
+                    : assessment.verdict.status}
+              </strong>
+              : {assessment.verdict.explanation}
+            </p>
+          )}
+        </section>
+        <details className="disclosure">
+          <summary>Question ID and tags</summary>
+          <div className="form-grid">
+            <Field label="Question ID">
+              <input
+                aria-label="Question ID"
+                value={value.id}
+                onChange={(event) =>
+                  setValue({ ...value, id: event.target.value })
+                }
+              />
+            </Field>
+            <Field label="Tags">
+              <input
+                aria-label="Tags"
+                value={value.tags.join(", ")}
+                onChange={(event) =>
+                  setValue({
+                    ...value,
+                    tags: event.target.value
+                      .split(",")
+                      .map((tag) => tag.trim())
+                      .filter(Boolean),
+                  })
+                }
+              />
+            </Field>
           </div>
+        </details>
+        {onRemove && (
+          <details className="disclosure">
+            <summary>Remove question</summary>
+            <p className="subtle">
+              Remove this question and its evaluator overrides from the draft.
+              Earlier published revisions stay available.
+            </p>
+            <button className="button danger" onClick={onRemove}>
+              Remove from draft
+            </button>
+          </details>
         )}
-      </Tabs>
+      </div>
       <footer className="modal-footer">
-        <p>
-          Publication creates an immutable revision. Existing runs keep their
-          original questions.
-        </p>
-        <button
-          className="button primary"
-          disabled={pending || !name.trim()}
-          onClick={() => {
-            void submit();
-          }}
-        >
-          {pending ? "Publishing..." : "Publish bank"}
-        </button>
+        <p>Save into this bank's draft, then review and publish the changes.</p>
+        <div className="actions">
+          <button className="button secondary" onClick={onClose}>
+            Discard edits
+          </button>
+          <button
+            className="button primary"
+            onClick={() => {
+              setError(null);
+              try {
+                onSaved(assemble(), rules);
+              } catch (cause) {
+                setError(cause);
+              }
+            }}
+          >
+            Save draft
+          </button>
+        </div>
       </footer>
     </Modal>
   );

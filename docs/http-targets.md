@@ -50,7 +50,8 @@ Resume requires acknowledgment before sending another attempt that could duplica
 The harness never automatically retries a failed request.
 
 The default request deadline is 120 seconds, configurable from 1 second to 10 minutes.
-Request bodies are limited to 1 MiB and response bodies to 4 MiB, with the configured evidence limit applied separately.
+Request bodies use the smaller of 1 MiB and the invocation's `maxOutputBytes` limit.
+Decoded response bodies use the smaller of 4 MiB and `maxOutputBytes`.
 Redirects, cookies, invalid certificates, malformed UTF-8 or JSON, missing answer selections, and asynchronous 202 responses are unsupported.
 HTTP 204 and non-success statuses are execution failures.
 A received answer with the wrong public structure is completed evidence with an incorrect assessment, after configured representation policies apply.
@@ -89,3 +90,12 @@ The CLI and web API call the same operations:
 
 Run CLI discovery to obtain the exact JSON schemas.
 The legacy `runs.export-agent` operation remains available for managed targets.
+
+## Implementation and verification
+
+[HTTP configuration](../src/contracts/http-target.ts) owns endpoint, header, and JSON Pointer validation.
+[buildHttpRequest](../src/runtime/targets/http-mapping.ts) preserves public input types.
+[executeHttpTarget](../src/runtime/targets/http.ts) owns transport bounds and failure classification.
+[External target architecture](external-targets.md) describes dispatch checkpoints, credential retention, and recovery ownership.
+[HTTP acceptance tests](../tests/acceptance/http-target.test.ts) exercise the shared application, server, and CLI workflow through loopback fixtures.
+The dated [verification record](http-target-verification.md) does not establish current live endpoint or native Mac compatibility.

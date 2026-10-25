@@ -4,6 +4,7 @@ import { command, useResource } from "./api.js";
 import { Answer } from "./answer.js";
 import { AssessmentScore } from "./assessment-controls.js";
 import { ErrorNotice, Field, Modal, Status } from "./ui.js";
+import { questionEvidence } from "./question-evidence.js";
 
 type ReviewChange = {
   choice: "note" | "correct" | "incorrect" | "excluded";
@@ -34,11 +35,12 @@ export function ReviewDialog({
   const change = changes[selected] ?? { choice: "note", note: "" };
   const judgment = pass.judgments.find((item) => item.resultId === selected);
   const result = view.results.find((item) => item.id === selected);
+  const source = result ? questionEvidence(view, result, pass) : undefined;
   const evidence = useResource(
     "runs.attempt",
-    { runId: view.run.id, attemptId: result?.completedAttemptId ?? "" },
+    { runId: view.run.id, attemptId: source?.attempt?.id ?? "" },
     undefined,
-    !!result?.completedAttemptId,
+    !!source?.completed,
   );
   const question = (
     pass.configuration.referenceBank ?? view.run.manifest.bank
@@ -124,11 +126,16 @@ export function ReviewDialog({
         <details className="disclosure">
           <summary>Recorded answer and reference</summary>
           <h3>Recorded answer</h3>
+          {source?.fromRerun && (
+            <p className="subtle">
+              Applied rerun answer. Original failed attempts remain saved.
+            </p>
+          )}
           {evidence.data?.attempt.output ? (
             <Answer value={evidence.data.attempt.output.answer} />
           ) : (
             <p className="subtle">
-              {result?.completedAttemptId
+              {source?.completed
                 ? "Loading saved answer..."
                 : "No answer recorded."}
             </p>
@@ -142,7 +149,7 @@ export function ReviewDialog({
             {judgment?.explanation ?? "No judgment recorded."}
           </span>
         </div>
-        {result?.status !== "completed" && (
+        {!source?.completed && (
           <p className="notice">
             This question has no completed answer. Review notes stay saved
             alongside its execution status.
@@ -157,10 +164,10 @@ export function ReviewDialog({
             }
           >
             <option value="note">Keep judgment and add a note</option>
-            <option value="correct" disabled={result?.status !== "completed"}>
+            <option value="correct" disabled={!source?.completed}>
               Pass
             </option>
-            <option value="incorrect" disabled={result?.status !== "completed"}>
+            <option value="incorrect" disabled={!source?.completed}>
               Fail
             </option>
             <option value="excluded">Exclude from this score</option>

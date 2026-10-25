@@ -11,22 +11,18 @@ import {
 import { AppError } from "../domain/errors.js";
 import { Database } from "../storage/database.js";
 import { acquireOwnerLock } from "../storage/owner-lock.js";
-import { AssessmentPassService, summarizePass } from "./assessment-passes.js";
+import { AssessmentPassService } from "./assessment-passes.js";
 import { BankFindingService } from "./bank-findings.js";
 import { UsageProjection } from "./usage-projection.js";
 import { runPerformance } from "./performance.js";
-import { digest } from "../domain/identity.js";
 import { CatalogService } from "./catalog.js";
-import {
-  accuracy,
-  gradedCount,
-  unscorableCount,
-  EvaluationService,
-} from "./evaluations.js";
+import { EvaluationService } from "./evaluations.js";
+import { ComparisonService } from "./comparisons.js";
 import { ResearchService } from "./research.js";
 import { RunService } from "./runs.js";
 import { JevService } from "./jev.js";
-import { savedTarget } from "../contracts/targets.js";
+import { AnswerSources } from "./answer-sources.js";
+import { RetryApplicationService } from "./retry-applications.js";
 
 export interface Application {
   execute<K extends CommandName>(
@@ -91,10 +87,17 @@ export async function createApplication(options: {
     options.dataDirectory,
   );
   const findings = new BankFindingService(db, catalog, passes);
+  const answers = new AnswerSources(db);
+  const retryApplications = new RetryApplicationService(
+    db,
+    passes,
+    evaluations,
+  );
   const usage = new UsageProjection(
     db,
     runtime.normalizeRecordedUsage?.bind(runtime),
   );
+  const comparisons = new ComparisonService(db, passes, usage);
   const runs = new RunService(
     db,
     runtime,
@@ -127,53 +130,27 @@ export async function createApplication(options: {
   const shutdownController = new AbortController();
   const admitted = new Set<Promise<unknown>>();
   let shutdown: Promise<void> | undefined;
-  function listRuns(limit = 100, offset = 0) {
-    const records = db.list("run", { limit, offset, descending: true });
-    const items = records.map((run) => {
-      const target = savedTarget(run.manifest);
-      const assessmentPasses = passes.list(run.id);
-      const selectedAssessmentPassId =
-        run.selectedAssessmentPassId ?? assessmentPasses[0]?.id;
-      const selectedAssessment = assessmentPasses.find(
-        (pass) => pass.id === selectedAssessmentPassId,
-      );
-      const results = db.list("result", { runId: run.id });
-      const assessments = evaluations
-        .summaries(run.id)
-        .find((scores) => scores.kind === "original")!.assessments;
-      return {
-        id: run.id,
-        assessmentPasses: assessmentPasses.map(summarizePass),
-        selectedAssessmentPassId,
-        performance: runPerformance(db, run.id, usage),
-        name: run.name,
-        status: run.status,
-        createdAt: run.createdAt,
-        ...(run.retryOf ? { retryOf: run.retryOf } : {}),
-        bankName: run.manifest.bank.name,
-        bankId: run.manifest.bank.bankId,
-        model: target.kind === "managed" ? target.agent.model : null,
-        harness: target.kind === "managed" ? target.agent.harness : null,
-        target: savedTarget(run.manifest),
-        completed: results.filter((r) => r.status === "completed").length,
-        failed: results.filter((r) => r.status === "failed").length,
-        graded: selectedAssessment?.coverage.judged ?? gradedCount(assessments),
-        unscorable:
-          selectedAssessment?.coverage.excluded ?? unscorableCount(assessments),
-        total: results.length,
-        accuracy:
-          selectedAssessment?.accuracy ??
-          (selectedAssessment ? null : accuracy(assessments)),
-        ...(run.researchSessionId
-          ? { researchSessionId: run.researchSessionId }
-          : {}),
-      };
-    });
-    const total = db.count("run");
+  function listRuns(query: CommandInput<"runs.list"> = {}) {
+    const page = db.runPage(query);
     return {
-      runs: items,
-      total,
-      nextOffset: offset + items.length < total ? offset + items.length : null,
+      ...page,
+      runs: page.runs.map((run) => {
+        const assessmentPasses = passes.summaries(run.id);
+        const selectedAssessmentPassId =
+          run.selectedAssessmentPassId ?? assessmentPasses[0]?.id;
+        const selectedAssessment = assessmentPasses.find(
+          (pass) => pass.id === selectedAssessmentPassId,
+        );
+        return {
+          ...run,
+          assessmentPasses,
+          selectedAssessmentPassId,
+          ...db.runOutcomeCounts(run.id),
+          graded: selectedAssessment?.coverage.judged ?? 0,
+          unscorable: selectedAssessment?.coverage.excluded ?? 0,
+          accuracy: selectedAssessment?.accuracy ?? null,
+        };
+      }),
     };
   }
   async function workspace(): Promise<WorkspaceView> {
@@ -284,6 +261,26 @@ export async function createApplication(options: {
         return runtime.discover();
       case "banks.create":
         return catalog.createBank(commandSchemas["banks.create"].parse(input));
+      case "banks.publish":
+        return catalog.publishBank(
+          commandSchemas["banks.publish"].parse(input),
+        );
+      case "banks.check-answer":
+        return evaluations.checkAnswer(
+          commandSchemas["banks.check-answer"].parse(input),
+        );
+      case "banks.calibrate-draft":
+        return evaluations.calibrateDraft(
+          commandSchemas["banks.calibrate-draft"].parse(input),
+        );
+      case "banks.preview-draft":
+        return evaluations.previewDraft(
+          commandSchemas["banks.preview-draft"].parse(input),
+        );
+      case "banks.export-package":
+        return catalog.exportPackage(
+          commandSchemas["banks.export-package"].parse(input),
+        );
       case "banks.get": {
         const value = commandSchemas["banks.get"].parse(input);
         return {
@@ -328,19 +325,23 @@ export async function createApplication(options: {
         return runs.launch(commandSchemas["runs.launch"].parse(input));
       case "runs.list": {
         const value = commandSchemas["runs.list"].parse(input);
-        return listRuns(value.limit, value.offset);
+        return listRuns(value);
       }
       case "runs.get": {
         const value = commandSchemas["runs.get"].parse(input);
         return {
-          ...passes.enrich(runs.view(value.runId, value.cursor)),
+          ...retryApplications.enrich(
+            passes.enrich(runs.view(value.runId, value.cursor)),
+          ),
           performance: runPerformance(db, value.runId, usage),
         };
       }
       case "runs.observe": {
         const value = commandSchemas["runs.observe"].parse(input);
         return {
-          ...passes.enrich(runs.observe(value.runId, value.cursor)),
+          ...retryApplications.enrich(
+            passes.enrich(runs.observe(value.runId, value.cursor)),
+          ),
           performance: runPerformance(db, value.runId, usage),
         };
       }
@@ -350,14 +351,9 @@ export async function createApplication(options: {
       }
       case "runs.attempt-events": {
         const value = commandSchemas["runs.attempt-events"].parse(input);
-        const attempt = db.require("attempt", value.attemptId);
-        if (attempt.runId !== value.runId)
-          throw new AppError(
-            "not_found",
-            "The attempt does not belong to this run.",
-          );
+        const { attempt } = answers.authorize(value.runId, value.attemptId);
         const events = db.events(
-          { runId: value.runId, attemptId: value.attemptId },
+          { runId: attempt.runId, attemptId: value.attemptId },
           value.cursor,
           { limit: 200 },
         );
@@ -375,6 +371,10 @@ export async function createApplication(options: {
       case "runs.retry-failed":
         return runs.retryFailed(
           commandSchemas["runs.retry-failed"].parse(input),
+        );
+      case "runs.apply-retry":
+        return retryApplications.apply(
+          commandSchemas["runs.apply-retry"].parse(input),
         );
       case "runs.control": {
         const value = commandSchemas["runs.control"].parse(input);
@@ -430,90 +430,9 @@ export async function createApplication(options: {
         const value = commandSchemas["runs.publish-score"].parse(input);
         return evaluations.publish(value.runId, value.scoreSetId);
       }
-      case "runs.review":
-        return evaluations.review(commandSchemas["runs.review"].parse(input));
       case "runs.compare": {
         const value = commandSchemas["runs.compare"].parse(input);
-        const comparison = evaluations.compare(
-          value.runIds,
-          value.evaluatorRevisionId,
-        );
-        if (value.evaluatorRevisionId) return comparison;
-        const fingerprints: string[] = [];
-        const rows = comparison.rows.map((row) => {
-          const run = db.require("run", row.runId);
-          const selectedId =
-            run.selectedAssessmentPassId ?? passes.list(row.runId)[0]!.id;
-          const pass = passes.get(row.runId, selectedId);
-          const results = db.list("result", { runId: row.runId });
-          const slots = (ids: string[]) =>
-            results
-              .filter((r) => ids.includes(r.id))
-              .map((r) => `${r.questionId}:${r.repetition}`)
-              .sort();
-          fingerprints.push(
-            digest({
-              source: pass.source,
-              settings: {
-                evaluator: pass.configuration.evaluator?.settings,
-                judge: pass.configuration.judge,
-                jev: pass.configuration.jevJudge
-                  ? {
-                      model: pass.configuration.jevJudge.model,
-                      settings: pass.configuration.jevJudge.profile.settings,
-                    }
-                  : undefined,
-              },
-              questions: run.manifest.questions
-                .map(({ expected: _expected, ...question }) => question)
-                .sort((a, b) => a.id.localeCompare(b.id)),
-              referenceHash: pass.basis.referenceHash,
-              eligible: slots(pass.basis.eligibleResultIds),
-              excluded: slots(pass.basis.excludedResultIds),
-            }),
-          );
-          return {
-            ...row,
-            accuracy: pass.accuracy,
-            graded: pass.coverage.judged,
-            unscorable: pass.coverage.excluded,
-            scoreSetId: pass.id,
-            questionDigest: digest({
-              publicQuestions: run.manifest.questions.map(
-                ({ expected: _expected, ...question }) => question,
-              ),
-              references: pass.basis.referenceHash,
-              eligible: slots(pass.basis.eligibleResultIds),
-            }),
-            evaluatorRevisionId: pass.basis.evaluatorRevisionId,
-            bankRevisionId: pass.basis.bankRevisionId,
-            assessmentPass: summarizePass(pass),
-            performance: runPerformance(db, row.runId, usage),
-          };
-        });
-        const warnings: string[] = [];
-        if (
-          rows.some(
-            (row) =>
-              row.status !== "completed" ||
-              row.assessmentPass.status === "running",
-          )
-        )
-          warnings.push("Some selected runs or assessments are incomplete.");
-        if (rows.some((row) => row.assessmentPass.coverage.eligible === 0))
-          warnings.push(
-            "No eligible question slots remain under the selected assessment policy.",
-          );
-        if (new Set(fingerprints).size > 1)
-          warnings.push(
-            "Selected assessment sources, settings, reference answers, or eligible question slots differ.",
-          );
-        return {
-          ...comparison,
-          rows,
-          warnings,
-          comparable: warnings.length === 0,
-        };
+        return comparisons.compare(value.runIds, value.evaluatorRevisionId);
       }
       case "blueprints.save": {
         const value = commandSchemas["blueprints.save"].parse(input);
@@ -534,6 +453,15 @@ export async function createApplication(options: {
           commandSchemas["connections.delete"].parse(input).connectionId,
         );
         return { deleted: true };
+      case "connections.resources": {
+        const value = commandSchemas["connections.resources"].parse(input);
+        if (!runtime.listConnectionResources)
+          throw new AppError(
+            "unavailable",
+            "This runtime does not support browsing connection resources.",
+          );
+        return runtime.listConnectionResources(value);
+      }
       case "connections.test":
         return runtime.testConnection(
           commandSchemas["connections.test"].parse(input).connectionId,

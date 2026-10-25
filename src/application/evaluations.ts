@@ -3,19 +3,24 @@ import type {
   BankRevision,
   AttemptRecord,
   EvaluationPreview,
+  EvaluatorDraft,
+  CommandValue,
+  CalibrationReport,
+  Question,
+  Verdict,
   EvaluatorRevision,
-  HumanReview,
   ResultRecord,
-  RunComparison,
   RunRecord,
   ScoreSet,
   ScoreSetSummary,
 } from "../contracts.js";
+import { AnswerSources } from "./answer-sources.js";
 import { AppError } from "../domain/errors.js";
 import { digest, id, now } from "../domain/identity.js";
 import { grade } from "../evaluation/scoring.js";
 import { Database } from "../storage/database.js";
-import { calibrateSettings } from "./calibration.js";
+import { calibrateSettings, validateQuestionPolicy } from "./calibration.js";
+import { prepareQuestions } from "./catalog.js";
 import { savedTarget } from "../contracts/targets.js";
 import {
   evaluatorEvidenceRequirement,
@@ -44,6 +49,63 @@ export function accuracy(assessments: Assessment[]): number | null {
 }
 export class EvaluationService {
   constructor(private readonly db: Database) {}
+  async checkAnswer(
+    input: CommandValue<"banks.check-answer">,
+  ): Promise<Verdict> {
+    const [question] = prepareQuestions([input.question]);
+    validateQuestionPolicy(question!, input.settings);
+    const effective = {
+      ...input.settings,
+      ...input.settings.questionOverrides[question!.id],
+    };
+    return grade(
+      question!.expected,
+      input.answer,
+      effective,
+      question!.answerFormat,
+    );
+  }
+  private draftReference(
+    questions: Question[],
+    bankId = "draft",
+    name = "Question bank draft",
+  ): BankRevision {
+    const prepared = prepareQuestions(questions);
+    const hash = digest(prepared);
+    return {
+      id: `draft_${hash}`,
+      bankId,
+      number: 0,
+      name,
+      createdAt: now(),
+      questions: prepared,
+      digest: hash,
+    };
+  }
+  async calibrateDraft(
+    input: CommandValue<"banks.calibrate-draft">,
+  ): Promise<CalibrationReport> {
+    return calibrateSettings(
+      this.draftReference(input.questions),
+      input.settings,
+    );
+  }
+  async previewDraft(
+    input: CommandValue<"banks.preview-draft">,
+  ): Promise<EvaluationPreview> {
+    const bank = this.db.require("bank", input.bankId);
+    const reference = this.draftReference(input.questions, bank.id, bank.name);
+    const createdAt = now();
+    const draft: EvaluatorDraft = {
+      id: `preview_${digest({ questions: reference.questions, settings: input.settings })}`,
+      bankId: bank.id,
+      name: "Question bank draft",
+      settings: input.settings,
+      createdAt,
+      updatedAt: createdAt,
+    };
+    return this.previewSettings(draft, input.runIds, reference);
+  }
   summaries(runId: string): ScoreSetSummary[] {
     const saved = this.db.scoreSetSummaries(runId);
     if (!saved.some((scores) => scores.kind === "original")) {
@@ -154,7 +216,7 @@ export class EvaluationService {
             question.expected,
             attempt.output.answer,
             effective,
-            observation === "answer-only" ? question.answerFormat : undefined,
+            question.answerFormat,
           )
         : {
             status: "unavailable",
@@ -223,8 +285,8 @@ export class EvaluationService {
     referenceBank?: BankRevision,
   ): Promise<Assessment[]> {
     const results = this.db
-      .list("result", { runId: run.id, status: "completed" })
-      .filter((r) => r.completedAttemptId);
+      .list("result", { runId: run.id })
+      .filter((r) => new AnswerSources(this.db).source(r));
     if (!results.length)
       throw new AppError(
         "evidence_unavailable",
@@ -236,7 +298,10 @@ export class EvaluationService {
         await this.assess(
           run,
           result,
-          this.db.require("attempt", result.completedAttemptId!),
+          new AnswerSources(this.db).verify(
+            result,
+            new AnswerSources(this.db).source(result)!,
+          ),
           evaluator,
           referenceBank,
         ),
@@ -248,9 +313,10 @@ export class EvaluationService {
   private referenceBasis(
     run: RunRecord,
     bankRevisionId?: string,
+    inlineBank?: BankRevision,
   ): BankRevision | undefined {
-    if (!bankRevisionId) return undefined;
-    const bank = this.db.require("bankRevision", bankRevisionId);
+    if (!bankRevisionId && !inlineBank) return undefined;
+    const bank = inlineBank ?? this.db.require("bankRevision", bankRevisionId!);
     if (bank.bankId !== run.manifest.bank.bankId)
       throw new AppError(
         "incompatible_basis",
@@ -292,6 +358,16 @@ export class EvaluationService {
     bankRevisionId?: string,
   ): Promise<EvaluationPreview> {
     const draft = this.db.require("evaluatorDraft", draftId);
+    const reference = bankRevisionId
+      ? this.db.require("bankRevision", bankRevisionId)
+      : undefined;
+    return this.previewSettings(draft, runIds, reference);
+  }
+  private async previewSettings(
+    draft: EvaluatorDraft,
+    runIds: string[],
+    reference?: BankRevision,
+  ): Promise<EvaluationPreview> {
     const evaluator: EvaluatorRevision = {
       ...draft,
       number: 0,
@@ -305,7 +381,9 @@ export class EvaluationService {
           "incompatible_basis",
           "Preview runs must belong to the draft question bank.",
         );
-      const referenceBank = this.referenceBasis(run, bankRevisionId);
+      const referenceBank = this.referenceBasis(run, reference?.id, reference);
+      for (const question of referenceBank?.questions ?? run.manifest.questions)
+        validateQuestionPolicy(question, draft.settings);
       const assessments = await this.assessSaved(run, evaluator, referenceBank);
       const previous = this.original(runId).assessments;
       runs.push({
@@ -325,6 +403,8 @@ export class EvaluationService {
             questionId: question.id,
             question: question.text,
             expected: question.expected,
+            answer: this.db.require("attempt", assessment.attemptId).output!
+              .answer,
             repetition: result.repetition,
             before,
             after: assessment.deterministic,
@@ -341,10 +421,17 @@ export class EvaluationService {
           .filter((change) => digest(change.before) !== digest(change.after)),
       });
     }
-    const calibration = await this.calibrate(draftId, bankRevisionId);
-    const referenceBank = bankRevisionId
-      ? this.db.require("bankRevision", bankRevisionId)
-      : undefined;
+    const calibrationReference =
+      reference ??
+      this.db.require(
+        "bankRevision",
+        this.db.require("bank", draft.bankId).latestRevisionId,
+      );
+    const calibration = await calibrateSettings(
+      calibrationReference,
+      draft.settings,
+    );
+    const referenceBank = reference;
     const summary = referenceBank
       ? (({ questions: _questions, ...metadata }) => metadata)(referenceBank)
       : undefined;
@@ -364,108 +451,5 @@ export class EvaluationService {
       );
     if (scores.published) return scores;
     return this.db.update("scoreSet", { ...scores, published: true });
-  }
-  review(input: Omit<HumanReview, "id" | "createdAt">): HumanReview {
-    this.db.require("run", input.runId);
-    const result = this.db.require("result", input.resultId);
-    if (result.runId !== input.runId || !result.completedAttemptId)
-      throw new AppError(
-        "evidence_unavailable",
-        "Review requires a completed result from this run.",
-      );
-    if (
-      input.scoreSetId &&
-      ![
-        this.original(input.runId),
-        ...this.db.list("scoreSet", { runId: input.runId }),
-      ].some((s) => s.id === input.scoreSetId)
-    )
-      throw new AppError(
-        "invalid_input",
-        "The score set does not belong to this run.",
-      );
-    return this.db.insert(
-      "review",
-      { ...input, id: id("review"), createdAt: now() },
-      true,
-    );
-  }
-  compare(runIds: string[], evaluatorRevisionId?: string): RunComparison {
-    const warnings: string[] = [];
-    const rows = runIds.map((runId) => {
-      const run = this.db.require("run", runId);
-      const target = savedTarget(run.manifest);
-      const scores = evaluatorRevisionId
-        ? this.db
-            .list("scoreSet", { runId })
-            .filter(
-              (s) => s.evaluator.id === evaluatorRevisionId && s.published,
-            )
-            .at(-1)
-        : this.original(runId);
-      const results = this.db.list("result", { runId });
-      if (
-        scores &&
-        scores.assessments.filter((assessment) =>
-          ["correct", "incorrect"].includes(assessment.deterministic.status),
-        ).length !== results.length
-      )
-        warnings.push(
-          "Some runs have missing answers or unavailable deterministic assessments.",
-        );
-      return {
-        runId,
-        name: run.name,
-        target,
-        status: run.status,
-        model: target.kind === "managed" ? target.agent.model : null,
-        harness: target.kind === "managed" ? target.agent.harness : null,
-        bankRevisionId: run.manifest.bank.id,
-        questionDigest: digest({
-          slots: results
-            .map((result) => `${result.questionId}:${result.repetition}`)
-            .sort(),
-          targetQuestions: run.manifest.questions.map(
-            ({ expected: _expected, ...question }) => question,
-          ),
-          references: run.manifest.questions.map((question) => {
-            const reference = scores?.referenceBank?.questions.find(
-              (item) => item.id === question.id,
-            );
-            return {
-              id: question.id,
-              expected: reference ? reference.expected : question.expected,
-            };
-          }),
-        }),
-        evaluatorRevisionId: scores?.evaluator.id ?? null,
-        scoreSetId: scores?.id ?? null,
-        accuracy: scores ? accuracy(scores.assessments) : null,
-        graded: scores ? gradedCount(scores.assessments) : 0,
-        unscorable: scores ? unscorableCount(scores.assessments) : 0,
-        completed: results.filter((r) => r.status === "completed").length,
-        failed: results.filter((r) => r.status === "failed").length,
-        total: results.length,
-        repetitions: run.manifest.repetitions,
-      };
-    });
-    if (new Set(rows.map((r) => r.questionDigest)).size > 1)
-      warnings.push(
-        "Question sets, public answer formats, or expected answers differ.",
-      );
-    if (
-      new Set(rows.map((r) => r.evaluatorRevisionId)).size > 1 ||
-      rows.some((r) => r.evaluatorRevisionId === null)
-    )
-      warnings.push(
-        "Evaluator revisions differ or the selected revision has not been scored.",
-      );
-    if (rows.some((r) => r.status !== "completed"))
-      warnings.push("Some runs are incomplete.");
-    return {
-      comparable: warnings.length === 0,
-      warnings: [...new Set(warnings)],
-      rows,
-    };
   }
 }

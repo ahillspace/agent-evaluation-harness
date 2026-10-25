@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { parseArgs } from "node:util";
 import { createApplication } from "../src/application/application.js";
 import {
   agentSchema,
@@ -9,7 +10,10 @@ import {
 import { targetFixture } from "../tests/fixtures/runtime-targets.js";
 
 // Deliberately isolated, deterministic provider fixtures. No network or model calls.
-const directory = resolve(".aeh/redesign-preview");
+const { values } = parseArgs({
+  options: { "data-directory": { type: "string" } },
+});
+const directory = resolve(values["data-directory"] ?? ".aeh/redesign-preview");
 const agent = agentSchema.parse({
   harness: "codex",
   model: "fixture-target",
@@ -61,9 +65,9 @@ const runtime: RuntimePort = {
     };
   },
   judge: async (input) => ({
-    verdict: input.question.id !== "q2",
+    verdict: input.evidence.question.id !== "q2",
     explanation:
-      input.question.id === "q2"
+      input.evidence.question.id === "q2"
         ? "Fixture content disagreement."
         : "The saved answer matches the expected value.",
     usage: { inputTokens: 30, outputTokens: 10, costUsd: 0 },

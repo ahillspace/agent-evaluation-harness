@@ -110,6 +110,58 @@ async function fixture() {
   };
 }
 
+it("rejects stale and uncalibrated bank revisions across independent HTTP editors", async () => {
+  const { request } = await fixture();
+  const created = await request("banks.create", {
+    name: "Two editors",
+    questions: [{ id: "q1", text: "Count?", expected: 42 }],
+    evaluator: {
+      calibrationExamples: [
+        {
+          id: "known",
+          questionId: "q1",
+          answer: 42,
+          expectedStatus: "correct",
+        },
+      ],
+    },
+  });
+  expect(created.response.ok).toBe(true);
+  const revision = created.body as BankRevision;
+  const [firstRead, secondRead] = await Promise.all([
+    request("banks.get", { bankId: revision.bankId }),
+    request("banks.get", { bankId: revision.bankId }),
+  ]);
+  const first = firstRead.body as import("../../src/contracts.js").BankDetail;
+  const second = secondRead.body as import("../../src/contracts.js").BankDetail;
+  const input = (detail: typeof first) => ({
+    bankId: revision.bankId,
+    baseRevisionId: detail.bank.latestRevisionId,
+    baseEvaluatorRevisionId: detail.bank.activeEvaluatorRevisionId,
+    name: "Edited bank",
+    questions: revision.questions,
+  });
+  const saved = await request("banks.revise", input(first));
+  expect(saved.response.ok).toBe(true);
+  const stale = await request("banks.revise", {
+    ...input(second),
+    name: "Stale overwrite",
+  });
+  expect(stale.response.ok).toBe(false);
+  expect(stale.body).toMatchObject({ error: { code: "conflict" } });
+  const latest = (await request("banks.get", { bankId: revision.bankId }))
+    .body as typeof first;
+  const invalid = await request("banks.revise", {
+    ...input(latest),
+    questions: [{ ...revision.questions[0]!, expected: 0 }],
+  });
+  expect(invalid.response.ok).toBe(false);
+  expect(invalid.body).toMatchObject({ error: { code: "calibration_failed" } });
+  expect(
+    (await request("banks.get", { bankId: revision.bankId })).body,
+  ).toEqual(latest);
+});
+
 const agent: AgentConfig = {
   harness: "codex",
   model: "fixture-model",

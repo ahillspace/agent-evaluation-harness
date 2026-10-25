@@ -316,7 +316,7 @@ it("retries only failed LLM judgments and preserves the original pass and refere
     },
     judge: async (input) => {
       judgeCalls++;
-      if (input.question.id === "q2" && judgeCalls === 2)
+      if (input.evidence.question.id === "q2" && judgeCalls === 2)
         throw Error("temporary judge failure");
       if (judgeCalls === 3) {
         enterRetry();

@@ -244,7 +244,7 @@ export async function startServer(
   let closed = false;
   return {
     server,
-    url: `http://${host}:${address.port}`,
+    url: `http://${host === "::1" ? `[${host}]` : host}:${address.port}`,
     async close() {
       if (closed) return;
       closed = true;

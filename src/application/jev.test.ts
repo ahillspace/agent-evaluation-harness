@@ -626,13 +626,16 @@ it.each([429, 529])(
       }),
     });
     runtime.classifier = new JevClassifier({
+      snapshot: async () => {
+        throw new Error("This test does not probe connections.");
+      },
       freeze: async () => ({
         connectionId: "typesafe",
         provider: "typesafe",
         settings: {},
         credentialFields: ["apiKey"],
       }),
-      credentials: async () => ({ apiKey: "fixture-secret" }),
+      resolveCredentials: async () => ({ apiKey: "fixture-secret" }),
       redactionSecrets: async () => [],
     });
     const requests: unknown[] = [];

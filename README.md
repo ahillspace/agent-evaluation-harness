@@ -25,7 +25,7 @@ Use Node.js 22.13.0 or newer and npm.
 From this repository, run:
 
 ```sh
-npm install
+npm ci
 npm run build
 npm start
 ```
@@ -122,7 +122,8 @@ Configuration exports use credential placeholders and omit the question bank and
 - [External HTTP agents](docs/http-targets.md): endpoint configuration, mapping, and remote-work limits.
 - [Evaluator design](docs/evaluator-design.md): comparison policies and calibration.
 - [Architecture](docs/architecture.md): engine boundaries, immutable evidence, and lifecycle ownership.
-- [Validation record](docs/observation-redesign-validation.md): executed checks and known limitations.
+- [Architecture audit](docs/architecture-audit.md): current source coverage, findings, and verification limits.
+- [Delivery validation record](docs/observation-redesign-validation.md): historical checks for the observation work.
 
 ## Develop and validate
 

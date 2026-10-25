@@ -1,6 +1,6 @@
 import { savedTarget, targetLabel } from "../contracts/targets.js";
 import { useState } from "react";
-import type { RunComparison, WorkspaceView } from "../contracts.js";
+import type { RunComparison, RunStatus, WorkspaceView } from "../contracts.js";
 import { command, useResource } from "./api.js";
 import { JudgeSavedAnswers } from "./judge-saved.js";
 import { RunOutcomes } from "./run-outcomes.js";
@@ -34,10 +34,14 @@ export function Results({
   const [scoreSelections, setScoreSelections] = useState<
     Record<string, string>
   >({});
-  const page = useResource("runs.list", { limit: 100, offset }, 5000);
   const [selected, setSelected] = useState<string[]>([]),
     [query, setQuery] = useState(""),
-    [status, setStatus] = useState("");
+    [status, setStatus] = useState<RunStatus | "">("");
+  const page = useResource(
+    "runs.list",
+    { limit: 100, offset, search: query, ...(status ? { status } : {}) },
+    5000,
+  );
   const [error, setError] = useState<unknown>(null),
     [comparison, setComparison] = useState<RunComparison | null>(null),
     [exported, setExported] = useState<{ id: string; value: unknown } | null>(
@@ -46,13 +50,7 @@ export function Results({
     [saving, setSaving] = useState<string | null>(null),
     [name, setName] = useState(""),
     [pending, setPending] = useState(false);
-  const runs = (page.data?.runs ?? workspace.runs).filter(
-    (run) =>
-      `${run.name} ${run.bankName} ${run.target ? targetLabel(run.target) : run.model}`
-        .toLowerCase()
-        .includes(query.toLowerCase()) &&
-      (!status || run.status === status),
-  );
+  const runs = page.data?.runs ?? [];
   return (
     <>
       <PageHeading
@@ -76,14 +74,20 @@ export function Results({
           <div className="results-toolbar">
             <input
               aria-label="Search runs"
-              placeholder="Filter this page by run, bank, or agent"
+              placeholder="Search all runs by run, bank, or agent"
               value={query}
-              onChange={(event) => setQuery(event.target.value)}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setOffset(0);
+              }}
             />
             <select
               aria-label="Filter run status"
               value={status}
-              onChange={(event) => setStatus(event.target.value)}
+              onChange={(event) => {
+                setStatus(event.target.value as RunStatus | "");
+                setOffset(0);
+              }}
             >
               <option value="">All statuses</option>
               {[
@@ -161,10 +165,12 @@ export function Results({
                     </td>
                     <td>
                       <span>
-                        {run.target ? targetLabel(run.target) : run.model}
+                        {run.targetKind === "external"
+                          ? run.targetName
+                          : `${run.harness} / ${run.model}`}
                       </span>
                       <small>
-                        {run.target?.kind === "external"
+                        {run.targetKind === "external"
                           ? "External agent"
                           : run.harness}
                       </small>
@@ -256,18 +262,24 @@ export function Results({
             </table>
           </div>
           {!runs.length && (
-            <p className="panel-body subtle">No runs match these filters.</p>
+            <p className="panel-body subtle" role="status">
+              {!page.data && !page.error
+                ? "Loading runs..."
+                : page.error
+                  ? "Runs could not be loaded."
+                  : "No runs match these filters."}
+            </p>
           )}
           <div className="pagination">
             <span>
-              {offset + 1}-
-              {Math.min(offset + 100, page.data?.total ?? workspace.totalRuns)}{" "}
-              of {page.data?.total ?? workspace.totalRuns} saved runs
+              {runs.length ? offset + 1 : 0}-
+              {runs.length ? offset + runs.length : 0} of{" "}
+              {page.data?.total ?? 0} matching runs
             </span>
             <div className="actions">
               <button
                 className="button secondary"
-                disabled={offset === 0}
+                disabled={offset === 0 || !page.data}
                 onClick={() => setOffset(Math.max(0, offset - 100))}
               >
                 Previous

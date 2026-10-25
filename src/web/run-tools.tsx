@@ -2,6 +2,7 @@ import type { WorkspaceView } from "../contracts.js";
 import type { SetupDraftProps } from "./setup-types.js";
 import { ToolCatalog, type ToolChoice } from "./tools.js";
 import { Field } from "./ui.js";
+import { ConnectionResources } from "./connection-resources.js";
 
 export function RunTools({
   draft,
@@ -17,6 +18,14 @@ export function RunTools({
   discoverTools: () => Promise<void>;
 }) {
   const connections = workspace.connections;
+  const environment = connections.find((item) => item.id === draft.connectionId)
+    ?.settings.mcpEnv;
+  const datasourceScope =
+    environment &&
+    typeof environment === "object" &&
+    !Array.isArray(environment)
+      ? environment.INCLUDE_DATASOURCE_IDS
+      : undefined;
   return (
     <>
       <Field
@@ -26,7 +35,12 @@ export function RunTools({
         <select
           aria-label="Tableau connection"
           value={draft.connectionId}
-          onChange={(event) => set("connectionId", event.target.value)}
+          onChange={(event) => {
+            set("connectionId", event.target.value);
+            set("resourceId", "");
+            set("resourceName", "");
+            set("resourceProjectName", "");
+          }}
         >
           <option value="">No Tableau connection</option>
           {connections
@@ -45,17 +59,26 @@ export function RunTools({
         . Your setup draft stays saved when you leave this page.
       </p>
       {draft.connectionId && (
-        <Field
-          label="Datasource or resource ID"
-          help="Suggest this Tableau resource to the agent. This guides its questions and does not restrict which resources the connection can access."
-        >
-          <input
-            aria-label="Datasource or resource ID"
-            value={draft.resourceId}
-            onChange={(event) => set("resourceId", event.target.value)}
-            placeholder="Optional resource ID"
-          />
-        </Field>
+        <ConnectionResources
+          key={draft.connectionId}
+          connectionId={draft.connectionId}
+          selected={
+            draft.resourceId
+              ? {
+                  id: draft.resourceId,
+                  name:
+                    draft.resourceName ||
+                    `Saved datasource (${draft.resourceId})`,
+                  projectName: draft.resourceProjectName || undefined,
+                }
+              : undefined
+          }
+          onChange={(resource) => {
+            set("resourceId", resource?.id ?? "");
+            set("resourceName", resource?.name ?? "");
+            set("resourceProjectName", resource?.projectName ?? "");
+          }}
+        />
       )}
       <div className="row">
         <div>
@@ -107,6 +130,29 @@ export function RunTools({
       </details>
       <details className="disclosure">
         <summary>Tool configuration details</summary>
+        {typeof datasourceScope === "string" && (
+          <p className="subtle">
+            Configured MCP datasource restriction:{" "}
+            <code>{datasourceScope}</code>
+          </p>
+        )}
+        {draft.connectionId && (
+          <Field
+            label="Datasource or resource ID"
+            help="The exact datasource LUID is preserved at launch. Enter an ID here if discovery is unavailable."
+          >
+            <input
+              aria-label="Datasource or resource ID"
+              value={draft.resourceId}
+              onChange={(event) => {
+                set("resourceId", event.target.value);
+                set("resourceName", "");
+                set("resourceProjectName", "");
+              }}
+              placeholder="Optional resource ID"
+            />
+          </Field>
+        )}
         <p className="subtle">
           Connection settings and the selected resource are frozen at launch.
           Exported agent JSON preserves these settings.

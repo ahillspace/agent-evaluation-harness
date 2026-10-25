@@ -54,6 +54,13 @@
 ## Product
 
 - Question banks supports creation, import, editing, and evaluator revision management.
+- Publishing a bank draft creates question and evaluator revisions atomically after validating formats, policies, and calibration examples.
+- Stale source revisions and concurrent publication changes reject the draft without partial publication.
+- Every bank creation and revision entry point calibrates the proposed content; existing-bank publication requires both revision guards.
+- Historical findings cannot correct or exclude a changed question, and rejected calibration or competing decisions leave no partial publication.
+- A second editor retains unsaved changes when another editor publishes; draft recovery fetches current published content and preserves edits on failure.
+- Inline sample checks, calibration, and saved-answer previews use proposed questions and rules without provider calls or catalog writes.
+- Complete versioned bank exports preserve questions, evaluator settings, optional Jev profiles, and source revision identifiers.
 - Question imports accept validated JSON and CSV with visible row errors.
 - Question authoring supports expected JSON values, tags, and public context.
 - Advanced tool selection exposes discovered tools and freezes the selected allowlist.
@@ -62,7 +69,18 @@
 - Run Setup supports question selection, connection, harness, model, prompt, repetitions, and optional research.
 - Observe shows question progress, actual activity, answer, grading, and acknowledged controls.
 - Results supports saved observation, comparisons, human review, rescoring, blueprints, and tested agent JSON export.
+- Results filters all saved Runs before pagination, with matching Unicode normalization for search text and stored labels.
+- Run summaries exclude full target configurations and evidence while preserving selected scores, live coverage, and applied answer counts.
+- Bank grading previews page the selected bank independently of the latest workspace Runs and preserve selection across pages.
+- Catalog migration adds scoped query indexes transactionally and preserves existing record bytes after success or failure.
 - Refresh preserves selected records and never launches work.
+- Lost Run and research launch responses recover with the same persisted request and idempotency key after navigation or reload.
+- Concurrent research launch retries wait for one complete baseline receipt, and restart reconnects an existing baseline without repeated work.
+- Research initialization without a saved baseline reports an explicit failure and cannot navigate to an empty Run identifier.
+- Acknowledged launches clear pending requests, while an intentional new evaluation receives a new key.
+- Datasource selection shows names and projects, preserves exact IDs across pages, distinguishes empty results from errors, and retains manual-ID recovery.
+- Datasource pages use provider-owned bounded queries, and search semantics match the provider's supported filters.
+- Settings follows direct and browser-history route changes without a competing selected-tab state.
 - Keyboard navigation and narrow layouts remain usable.
 - No synthetic telemetry is presented as a real provider result.
 
@@ -129,3 +147,11 @@ Clearly distinguish implementation coverage from checks blocked by local authent
 - Execution failures remain separate from incorrect answers; all physical attempts and available usage remain inspectable.
 - Safe transient failures receive bounded retries through the same admission controls as ordinary work.
 - Manual retries preserve original evidence and disclose possible duplicate external actions.
+- Applying a completed linked retry makes its sealed answer available in the original Run without changing original attempts, manifests, or saved scores.
+- Application rejects unrelated Runs, incompatible frozen configurations, mismatched repetitions, unsealed answers, and silent replacement of previously applied answers.
+- Updated deterministic, LLM, and Jev scores preserve untouched judgments and retain the physical source of each applied judgment.
+- Applying retries makes no target or judge provider call, and unavailable compatible model judgments remain explicitly unjudged.
+- Updated human scores preserve unrelated review decisions, and historical score selection retrieves the answer that score originally assessed.
+- Applied answers support observation, human review, saved-answer rescoring, findings, and exports through the same application contracts.
+- Repeating an identical application is safe, and a failed application cannot leave partial answer selections or scores.
+- Replaying an application request returns its saved receipt even after a later application replaces an answer.

@@ -5,6 +5,11 @@ import {
   type JudgeEvidence,
 } from "../contracts.js";
 import { JevClassifier } from "./jev.js";
+import { ConnectionService } from "./connections.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 afterEach(() => vi.unstubAllGlobals());
 const criteria = jevProfileSettingsSchema.parse({});
@@ -56,7 +61,21 @@ const evidence: JudgeEvidence = {
 const make = () =>
   new JevClassifier({
     freeze: async () => connection,
-    credentials: async () => ({ apiKey: "fixture-secret" }),
+    snapshot: async () => ({
+      connection: {
+        id: connection.connectionId,
+        name: "Jev",
+        provider: connection.provider,
+        settings: {},
+        credentialFields: ["apiKey"],
+        hasCredentials: true,
+      },
+      credentials: { apiKey: "fixture-secret" },
+      materialize: () => {
+        throw new Error("Jev probes do not materialize provider environments.");
+      },
+    }),
+    resolveCredentials: async () => ({ apiKey: "fixture-secret" }),
     redactionSecrets: async () => ["other-secret"],
   });
 const response = () => ({
@@ -89,6 +108,72 @@ const invoke = (judge: JevClassifier, overrides = {}) =>
     onRequest: () => {},
     ...overrides,
   });
+
+it("uses frozen Jev and evidence credentials after independent rotations", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "aeh-jev-binding-"));
+  const values = new Map<string, string>();
+  const connections = new ConnectionService(directory, {
+    allocate: async () => randomUUID(),
+    owns: async (reference) => values.has(reference),
+    read: async (reference) => values.get(reference)!,
+    write: async (reference, value) => {
+      values.set(reference, value);
+    },
+    delete: async (reference) => {
+      values.delete(reference);
+    },
+  });
+  const judge = new JevClassifier(connections);
+  try {
+    const savedJudge = await connections.save({
+      name: "Jev",
+      provider: "typesafe",
+      settings: {},
+      credentials: { apiKey: "historical-jev-key" },
+    });
+    const savedTarget = await connections.save({
+      name: "Target",
+      provider: "openai",
+      settings: {},
+      credentials: { apiKey: "historical-target-key" },
+    });
+    const judgeBinding = await judge.resolveConnection(savedJudge.id);
+    const targetBinding = await connections.freeze({
+      connectionId: savedTarget.id,
+      provider: savedTarget.provider,
+      settings: {},
+      credentialFields: [],
+    });
+    await connections.save({
+      ...savedJudge,
+      credentials: { apiKey: "replacement-jev-key" },
+    });
+    await connections.save({
+      ...savedTarget,
+      credentials: { apiKey: "replacement-target-key" },
+    });
+    const fetch = vi.fn(async () => Response.json(response()));
+    vi.stubGlobal("fetch", fetch);
+    await invoke(judge, {
+      configuration: { ...configuration, connection: judgeBinding },
+      evidence: {
+        ...evidence,
+        finalText: "historical-target-key",
+        publicAgent: { ...evidence.publicAgent!, connections: [targetBinding] },
+      },
+    });
+    const options = (fetch.mock.calls as unknown[][])[0]?.[1] as RequestInit;
+    expect(JSON.stringify(options.headers)).toContain("historical-jev-key");
+    expect(JSON.stringify(options.headers)).not.toContain(
+      "replacement-jev-key",
+    );
+    expect(String(options.body)).not.toContain("historical-target-key");
+    expect(String(options.body)).toContain("[REDACTED]");
+  } finally {
+    await judge.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 it("judges answer-only evidence without inventing an agent or internal activity", async () => {
   vi.stubGlobal(

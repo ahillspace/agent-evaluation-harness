@@ -36,9 +36,10 @@ export function EvaluatorPreview({ preview }: { preview: EvaluationPreview }) {
       </div>
       {preview.referenceBank && (
         <p className="notice">
-          Corrected references: {preview.referenceBank.name}, revision{" "}
-          {preview.referenceBank.number}. Original run references remain
-          unchanged.
+          {preview.referenceBank.number === 0
+            ? `Draft references: ${preview.referenceBank.name}.`
+            : `Corrected references: ${preview.referenceBank.name}, revision ${preview.referenceBank.number}.`}{" "}
+          Original run references remain unchanged.
         </p>
       )}
       {preview.calibration && (
@@ -52,6 +53,7 @@ export function EvaluatorPreview({ preview }: { preview: EvaluationPreview }) {
               <thead>
                 <tr>
                   <th>Question</th>
+                  <th>Submitted answer</th>
                   <th>Original</th>
                   <th>Draft</th>
                   <th>Explanation</th>
@@ -69,6 +71,18 @@ export function EvaluatorPreview({ preview }: { preview: EvaluationPreview }) {
                         {row.questionId} · Repetition {row.repetition}
                         {row.changed ? " · Changed" : ""}
                       </small>
+                    </td>
+                    <td>
+                      {row.answer !== undefined &&
+                      (typeof row.answer === "object" ||
+                        String(row.answer).length > 160) ? (
+                        <details className="disclosure">
+                          <summary>View submitted answer</summary>
+                          <Answer value={row.answer} />
+                        </details>
+                      ) : (
+                        <Answer value={row.answer} />
+                      )}
                     </td>
                     <td>
                       <span

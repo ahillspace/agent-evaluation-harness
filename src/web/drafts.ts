@@ -32,6 +32,8 @@ export interface SetupDraft {
   tools: string;
   connectionId: string;
   resourceId: string;
+  resourceName: string;
+  resourceProjectName: string;
   providerConnectionId: string;
   providerConnectionProvider: string;
   originalConnections: AgentConfig["connections"];
@@ -89,6 +91,8 @@ export function initialSetup(): SetupDraft {
     tools: "",
     connectionId: "",
     resourceId: "",
+    resourceName: "",
+    resourceProjectName: "",
     providerConnectionId: "",
     providerConnectionProvider: "",
     originalConnections: [],
@@ -191,6 +195,8 @@ export function createLaunch(draft: SetupDraft): LaunchInput {
       connectionId: draft.connectionId,
       provider: "tableau",
       resourceId: draft.resourceId || undefined,
+      resourceName: draft.resourceName || undefined,
+      resourceProjectName: draft.resourceProjectName || undefined,
     });
   if (draft.providerConnectionId)
     connections.push({
@@ -301,6 +307,12 @@ export function restoreSetup(source: Blueprint | RunRecord): SetupDraft {
     resourceId:
       agent?.connections.find((item) => item.provider === "tableau")
         ?.resourceId ?? "",
+    resourceName:
+      agent?.connections.find((item) => item.provider === "tableau")
+        ?.resourceName ?? "",
+    resourceProjectName:
+      agent?.connections.find((item) => item.provider === "tableau")
+        ?.resourceProjectName ?? "",
     providerConnectionId:
       agent?.connections.find((item) => item.provider !== "tableau")
         ?.connectionId ?? "",

@@ -22,6 +22,10 @@ import { EvaluationService } from "./evaluations.js";
 import { RunService } from "./runs.js";
 import { checkResearchBudget } from "./research-budget.js";
 import { validateResearchProposal } from "../domain/research-proposal.js";
+import { AnswerSources } from "./answer-sources.js";
+
+/** The complete serialized research evidence response is limited to 16 MiB. */
+export const MAX_RESEARCH_EVIDENCE_BYTES = 16 * 1024 * 1024;
 
 export function researchJevChoice(
   record:
@@ -39,6 +43,10 @@ export function researchJevChoice(
 
 export class ResearchService {
   private readonly jobs = new Map<string, Promise<void>>();
+  private readonly launches = new Map<
+    string,
+    { hash: string; receipt: Promise<ResearchView> }
+  >();
   private readonly controllers = new Map<string, AbortController>();
   private closing = false;
   constructor(
@@ -49,9 +57,41 @@ export class ResearchService {
     private readonly directory: string,
   ) {}
   recover(): void {
-    for (const session of this.db
+    for (let session of this.db
       .list("research")
       .filter((s) => !isTerminal(s.status))) {
+      if (!session.baselineRunId) {
+        const baselineInput = {
+          ...session.configuration.baseline,
+          name: `${session.name}: baseline`,
+          idempotencyKey: `research:${session.id}:baseline`,
+        };
+        const receipt = this.db.idempotent(
+          `run:${baselineInput.idempotencyKey}`,
+          digest(baselineInput),
+        );
+        const baseline = receipt
+          ? this.db.require("run", receipt.id)
+          : undefined;
+        if (!baseline || baseline.researchSessionId !== session.id) {
+          this.db.update("research", {
+            ...session,
+            status: "failed",
+            intent: "halt",
+            error:
+              "Research initialization was interrupted before its baseline was saved. Start a new research session explicitly.",
+            updatedAt: now(),
+          });
+          continue;
+        }
+        session = {
+          ...session,
+          baselineRunId: baseline.id,
+          currentRunId: baseline.id,
+          bestRunId: baseline.id,
+          runIds: [baseline.id],
+        };
+      }
       const continuityLost =
         session.phase === "researching" && !session.conversationId;
       this.db.update("research", {
@@ -83,6 +123,29 @@ export class ResearchService {
     }
   }
   async launch(input: ResearchInput): Promise<ResearchView> {
+    if (this.closing)
+      throw new AppError("unavailable", "The engine is shutting down.");
+    const key = input.idempotencyKey;
+    if (!key) return this.initialize(input);
+    const hash = digest(input);
+    const pending = this.launches.get(key);
+    if (pending) {
+      if (pending.hash !== hash)
+        throw new AppError(
+          "idempotency_conflict",
+          "This idempotency key was already used with different input.",
+        );
+      return pending.receipt;
+    }
+    const receipt = this.initialize(input);
+    this.launches.set(key, { hash, receipt });
+    try {
+      return await receipt;
+    } finally {
+      this.launches.delete(key);
+    }
+  }
+  private async initialize(input: ResearchInput): Promise<ResearchView> {
     if (
       (input.selectionMetric === "llm" && !input.baseline.judge.enabled) ||
       (input.selectionMetric === "jev" && !input.baseline.jevJudge)
@@ -102,7 +165,7 @@ export class ResearchService {
     const hash = digest(input);
     if (key) {
       const existing = this.db.idempotent(key, hash);
-      if (existing) return this.view(existing.id);
+      if (existing) return this.launchReceipt(existing.id);
     }
     const bank = this.db.require("bankRevision", input.baseline.bankRevisionId);
     const invocationCount =
@@ -132,15 +195,10 @@ export class ResearchService {
       turns: [],
     };
     const session = this.db.transaction(() => {
-      if (key) {
-        const existing = this.db.idempotent(key, hash);
-        if (existing) return this.db.require("research", existing.id);
-      }
       this.db.insert("research", initial);
       if (key) this.db.remember(key, hash, "research", sessionId);
       return initial;
     });
-    if (session.id !== sessionId) return this.view(session.id);
     try {
       const baseline = await this.runs.launch(
         {
@@ -167,7 +225,18 @@ export class ResearchService {
       });
       throw error;
     }
-    return this.view(sessionId);
+    return this.launchReceipt(sessionId);
+  }
+  private launchReceipt(sessionId: string): ResearchView {
+    const receipt = this.view(sessionId);
+    if (!receipt.session.baselineRunId || !receipt.session.currentRunId)
+      throw new AppError(
+        "launch_incomplete",
+        receipt.session.error ??
+          "Research initialization did not save a baseline. Start a new research session explicitly.",
+        { sessionId },
+      );
+    return receipt;
   }
   view(sessionId: string, cursor = 0): ResearchView {
     const session = this.db.researchSummary(sessionId);
@@ -233,52 +302,93 @@ export class ResearchService {
         includeGold: request.includeGold ?? false,
       },
     });
-    return {
+    const response = {
       runId: view.run.id,
       agent: managedAgent(savedTarget(view.run.manifest)) as unknown as Json,
-      results: results.map((result) => {
-        const question = view.run.manifest.questions.find(
-          (q) => q.id === result.questionId,
-        )!;
-        return {
-          resultId: result.id,
-          repetition: result.repetition,
-          question: question.text,
-          context: question.context ?? null,
-          status: result.status,
-          jevAssessments: view.jevAssessments
-            .filter(
-              (record) => record.resultId === result.id && record.published,
-            )
-            .map((record) => ({
-              assessmentId: record.id,
-              status: record.status,
-              checks: (record.checks as unknown as Json) ?? null,
-              reviewRequired: record.reviewRequired ?? false,
-            })),
-          attempts: this.db
-            .list("attempt", { runId: request.runId, resultId: result.id })
-            .map((a) => ({
-              id: a.id,
-              status: a.status,
-              output: (a.output as unknown as Json) ?? null,
-              error: a.error ?? null,
-              events: this.db
-                .events({ runId: request.runId })
-                .filter(
-                  (e) =>
-                    e.attemptId === a.id &&
-                    (request.includeGold ||
-                      !(
-                        e.type.startsWith("evaluation.") ||
-                        e.type.startsWith("judge.")
-                      )),
-                ) as unknown as Json,
-            })),
-          ...(request.includeGold ? { expected: question.expected } : {}),
-        };
-      }),
+      results: [] as Json[],
     };
+    let bytes = 0;
+    const charge = (value: unknown, comma = false) => {
+      bytes += Buffer.byteLength(JSON.stringify(value)) + Number(comma);
+      if (bytes > MAX_RESEARCH_EVIDENCE_BYTES)
+        throw new AppError(
+          "evidence_limit",
+          `Research evidence exceeds the 16 MiB serialized response limit. ${request.resultId ? "This result cannot be returned in full." : "Select a resultId to request one result at a time."} No partial evidence was returned.`,
+        );
+    };
+    charge(response);
+    const answers = new AnswerSources(this.db);
+    const applications = answers.applications(request.runId);
+    for (const result of results) {
+      const question = view.run.manifest.questions.find(
+        (q) => q.id === result.questionId,
+      )!;
+      const resultEvidence = {
+        resultId: result.id,
+        repetition: result.repetition,
+        question: question.text,
+        context: question.context ?? null,
+        status: result.answerSource ? "completed" : result.status,
+        ...(result.answerSource
+          ? { answerSource: result.answerSource as unknown as Json }
+          : {}),
+        jevAssessments: view.jevAssessments
+          .filter((record) => record.resultId === result.id && record.published)
+          .map((record) => ({
+            assessmentId: record.id,
+            status: record.status,
+            checks: (record.checks as unknown as Json) ?? null,
+            reviewRequired: record.reviewRequired ?? false,
+          })),
+        attempts: [] as Json[],
+        ...(request.includeGold ? { expected: question.expected } : {}),
+      };
+      charge(resultEvidence, response.results.length > 0);
+      response.results.push(resultEvidence);
+      const attemptIds = new Set([
+        ...result.attemptIds,
+        ...applications.flatMap((application) =>
+          application.bindings
+            .filter((binding) => binding.resultId === result.id)
+            .map((binding) => binding.source.attemptId),
+        ),
+      ]);
+      for (const attemptId of attemptIds) {
+        const { attempt } = answers.authorize(request.runId, attemptId);
+        const attemptEvidence = {
+          id: attempt.id,
+          runId: attempt.runId,
+          resultId: attempt.resultId,
+          status: attempt.status,
+          output: (attempt.output as unknown as Json) ?? null,
+          error: attempt.error ?? null,
+          events: [] as Json[],
+        };
+        charge(attemptEvidence, resultEvidence.attempts.length > 0);
+        resultEvidence.attempts.push(attemptEvidence);
+        let cursor = 0;
+        for (;;) {
+          const page = this.db.events(
+            { runId: attempt.runId, attemptId },
+            cursor,
+            { limit: 500 },
+          );
+          if (!page.length) break;
+          for (const event of page) {
+            if (
+              !request.includeGold &&
+              (event.type.startsWith("evaluation.") ||
+                event.type.startsWith("judge."))
+            )
+              continue;
+            charge(event, attemptEvidence.events.length > 0);
+            attemptEvidence.events.push(event as unknown as Json);
+          }
+          cursor = page.at(-1)!.sequence;
+        }
+      }
+    }
+    return response;
   }
   private schedule(sessionId: string): void {
     if (this.jobs.has(sessionId) || this.closing) return;

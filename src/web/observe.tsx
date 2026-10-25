@@ -19,6 +19,7 @@ import {
 import { RunConfiguration } from "./run-configuration.js";
 import { ResearchPanel } from "./research-observation.js";
 import { RetryFailures } from "./retry-failures.js";
+import { RetryResults } from "./retry-results.js";
 import {
   ControlButtons,
   DownloadButton,
@@ -156,12 +157,13 @@ export function Observe({
           )}
       </PageHeading>
       <ErrorNotice error={error ?? resource.error ?? passDetail.error} />
-      {run.retryOf && (
-        <p className="notice">
-          This run retries {run.retryOf.resultIds.length} failed questions from{" "}
-          <a href={`#/observe/${run.retryOf.runId}`}>the original run</a>.
-        </p>
-      )}
+      <RetryResults
+        view={view}
+        onSaved={() => {
+          setSelectedId("");
+          refresh();
+        }}
+      />
       <section
         className="observation-totals"
         aria-label="Run progress and totals"

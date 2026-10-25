@@ -11,6 +11,92 @@ import type { AgentConfig, RuntimeEvent } from "../contracts.js";
 import type { ProcessSupervisor } from "./process-supervisor.js";
 import { ProcessSupervisor as Supervisor } from "./process-supervisor.js";
 
+it.skipIf(!["win32", "darwin"].includes(process.platform))(
+  "admits complete parallel Bedrock bridge plans at invocation capacity one",
+  async () => {
+    const directory = await mkdtemp(
+      path.join(tmpdir(), "aeh-bedrock-capacity-"),
+    );
+    const supervisor = createProcessSupervisor({
+      stateDirectory: directory,
+      maxConcurrentInvocations: 1,
+    });
+    const fetch = vi.fn(async () =>
+      Response.json({
+        output: {
+          message: { role: "assistant", content: [{ text: "Finished" }] },
+        },
+        stopReason: "end_turn",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    try {
+      await supervisor.recover();
+      const input = {
+        agent: {
+          harness: "bedrock" as const,
+          model: "fixture",
+          systemPrompt: "Answer.",
+          settings: {},
+          tools: [],
+          connections: [
+            {
+              connectionId: "fixture",
+              provider: "amazon-bedrock",
+              settings: {
+                baseUrl: "https://fixture.invalid",
+                region: "us-east-1",
+              },
+              credentialFields: ["apiKey"],
+            },
+          ],
+        },
+        directory,
+        prompt: "Question",
+        role: "target" as const,
+        mcp: [
+          {
+            name: "fixture",
+            command: process.execPath,
+            args: [
+              "-e",
+              `require('node:readline').createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.id!==undefined)console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result:r.method==='tools/list'?{tools:[]}:{protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'fixture',version:'1'}}}))})`,
+            ],
+            env: {},
+            tools: [],
+          },
+        ],
+        env: { AWS_BEARER_TOKEN_BEDROCK: "fixture-token" },
+        supervisor,
+        signal: new AbortController().signal,
+        timeoutMs: 8000,
+        sanitize: (value: string) => value,
+      };
+      const results = await Promise.allSettled([
+        invokeBedrock(input),
+        invokeBedrock(input),
+      ]);
+      expect(results.map((result) => result.status)).toEqual([
+        "fulfilled",
+        "fulfilled",
+      ]);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(supervisor.activeReservations).toBe(0);
+      await expect(invokeBedrock(input)).resolves.toMatchObject({
+        cleanup: "complete",
+      });
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(supervisor.activeReservations).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  20000,
+);
+
 it.each(["http", "tls"])(
   "preserves %s diagnostics and prior usage through real MCP cleanup failure",
   async (mode) => {

@@ -106,13 +106,8 @@ export function providerProbe(
   const validated = modelProviderSettings(provider, settings);
   // Bedrock Converse has no models route; a model invocation would incur usage.
   if (provider === "amazon-bedrock") return undefined;
-  const defaults: Record<string, string> = {
-    openai: "https://api.openai.com/v1",
-    anthropic: "https://api.anthropic.com/v1",
-    openrouter: "https://openrouter.ai/api/v1",
-  };
   return {
-    url: `${String(validated.baseUrl ?? defaults[provider]).replace(/\/$/, "")}/models`,
+    url: `${effectiveModelEndpoint(provider, validated)}/models`,
     headers: {
       ...(provider === "anthropic" && validated.authMode !== "bearer"
         ? { "x-api-key": secret }
@@ -122,4 +117,21 @@ export function providerProbe(
         : {}),
     },
   };
+}
+
+export function effectiveModelEndpoint(
+  provider: string,
+  settings: Record<string, Json>,
+): string {
+  const validated = modelProviderSettings(provider, settings);
+  const defaults: Record<string, string> = {
+    openai: "https://api.openai.com/v1",
+    anthropic: "https://api.anthropic.com/v1",
+    openrouter: "https://openrouter.ai/api/v1",
+    "amazon-bedrock": `https://bedrock-runtime.${String(validated.region)}.amazonaws.com`,
+  };
+  return new URL(String(validated.baseUrl ?? defaults[provider])).href.replace(
+    /\/+$/,
+    "",
+  );
 }

@@ -12,19 +12,9 @@ export function checkResearchBudget(
     ? [...new Set([...session.runIds, additionalRunId])]
     : session.runIds;
   const attempts = db.list("attempt", { runId: runIds });
-  const judgeUsage = attempts
-    .filter(
-      (attempt) =>
-        attempt.status === "completed" &&
-        db.require("run", attempt.runId).manifest.judge.enabled,
-    )
-    .map(
-      (attempt) =>
-        db
-          .list("assessment", { resultId: attempt.resultId })
-          .find((assessment) => assessment.attemptId === attempt.id)?.judge
-          ?.usage,
-    );
+  const judgeUsage = runIds.flatMap((runId) =>
+    db.originalJudgeUsage(runId).map((report) => report.usage),
+  );
   return researchBudgetReason(
     session,
     attempts,

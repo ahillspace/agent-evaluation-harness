@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   agentSchema,
+  commandSchemas,
   connectionBindingSchema,
   judgeSchema,
   targetSchema,
@@ -44,13 +45,33 @@ const draftSchema = z.object({
     profileRevisionId: z.string().optional(),
   }),
 });
+export const pendingLaunchSchema = z.discriminatedUnion("operation", [
+  z.object({
+    operation: z.literal("runs.launch"),
+    input: commandSchemas["runs.launch"].refine(
+      (input) => !!input.idempotencyKey,
+      "A pending launch requires an idempotency key.",
+    ),
+  }),
+  z.object({
+    operation: z.literal("research.launch"),
+    input: commandSchemas["research.launch"].extend({
+      idempotencyKey: z.string().min(1),
+    }),
+  }),
+]);
+export type PendingLaunch = z.infer<typeof pendingLaunchSchema>;
 const snapshotSchema = z.object({
   version: z.literal(1),
   section: z.enum(["agent", "questions", "tools", "evaluation", "research"]),
   source: z.string(),
   draft: draftSchema,
+  pendingLaunch: pendingLaunchSchema.optional(),
 });
-function rejectCredentialSettings(draft: SetupDraft): void {
+function rejectCredentialSettings(
+  draft: SetupDraft,
+  pendingLaunch?: PendingLaunch,
+): void {
   const sensitiveKey =
     /"(?:api[-_]?key|password|secret|token|patValue|authorization|access[-_]?token|refresh[-_]?token|client[-_]?secret|credentials?)"\s*:/iu;
   const settings = [
@@ -60,6 +81,7 @@ function rejectCredentialSettings(draft: SetupDraft): void {
     JSON.stringify(draft.originalConnections),
     JSON.stringify(draft.originalJudge),
     JSON.stringify(draft.originalResearcher),
+    JSON.stringify(pendingLaunch),
   ];
   if (settings.some((value) => value && sensitiveKey.test(value)))
     throw new Error(
@@ -72,15 +94,21 @@ export function encodeSetupDraft(
   draft: SetupDraft,
   section: string,
   source: string,
+  pendingLaunch?: PendingLaunch,
 ): string {
-  rejectCredentialSettings(draft);
+  rejectCredentialSettings(draft, pendingLaunch);
   return JSON.stringify(
-    snapshotSchema.parse({ version: 1, section, source, draft }),
+    snapshotSchema.parse({ version: 1, section, source, draft, pendingLaunch }),
   );
 }
-export function decodeSetupDraft(
-  value: string | null,
-): { draft: SetupDraft; section: string; source: string } | undefined {
+export function decodeSetupDraft(value: string | null):
+  | {
+      draft: SetupDraft;
+      section: string;
+      source: string;
+      pendingLaunch?: PendingLaunch;
+    }
+  | undefined {
   if (!value) return undefined;
   try {
     const raw = JSON.parse(value) as { draft?: unknown };
@@ -101,7 +129,7 @@ export function decodeSetupDraft(
       },
     });
     const draft = { ...initialSetup(), ...parsed.draft } as SetupDraft;
-    rejectCredentialSettings(draft);
+    rejectCredentialSettings(draft, parsed.pendingLaunch);
     return { ...parsed, draft };
   } catch {
     return undefined;

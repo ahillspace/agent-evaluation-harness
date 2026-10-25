@@ -12,6 +12,7 @@ import { McpSession } from "./mcp-session.js";
 import { providerExecutionFailure } from "./execution-failure.js";
 import {
   cleanupFailure,
+  type ProcessInvocation,
   type ProcessSupervisor,
 } from "./process-supervisor.js";
 
@@ -164,23 +165,34 @@ export async function invokeBedrock(input: {
     env,
   );
   const clients: McpSession[] = [];
+  let invocation: ProcessInvocation | undefined;
   const tools = new Map<
     string,
     { client: McpSession; name: string; spec: Json }
   >();
   const execute = async () => {
     try {
-      for (const bridge of bridges) {
-        const client = new McpSession(input.supervisor, {
-          executable: bridge.command,
-          args: bridge.args,
-          env,
-          cwd: input.directory,
-          timeoutMs: input.timeoutMs,
-          signal: input.signal,
-          processLimit: 5,
-          maxOutputBytes: input.maxOutputBytes ?? 4_000_000,
-        });
+      if (bridges.length) {
+        invocation = await input.supervisor.acquireInvocation(
+          bridges.map((bridge) => ({
+            executable: bridge.command,
+            args: bridge.args,
+            env,
+            cwd: input.directory,
+            timeoutMs: input.timeoutMs,
+            signal: input.signal,
+            processLimit: 5,
+            maxOutputBytes: input.maxOutputBytes ?? 4_000_000,
+          })),
+          input.signal,
+        );
+        input = { ...input, signal: invocation.signal };
+      }
+      for (const [index, bridge] of bridges.entries()) {
+        const client = new McpSession(
+          (interaction) => invocation!.run(index, interaction),
+          input.signal,
+        );
         clients.push(client);
         let cursor: string | undefined;
         const seen = new Set<string>();
@@ -442,8 +454,11 @@ export async function invokeBedrock(input: {
   const settled = await Promise.allSettled(
     clients.map((client) => client.close()),
   );
-  const failed = settled.find((result) => result.status === "rejected");
-  if (failed?.status === "rejected") {
+  const cleanup = await invocation?.close();
+  if (
+    cleanup === "unavailable" ||
+    settled.some((result) => result.status === "rejected")
+  ) {
     if (completed) completed.cleanup = "unavailable";
     else {
       throw cleanupFailure(

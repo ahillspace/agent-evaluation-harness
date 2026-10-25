@@ -9,6 +9,7 @@ import { savedTarget } from "../contracts/targets.js";
 import { AppError } from "../domain/errors.js";
 import { digest, id, now } from "../domain/identity.js";
 import { isTerminal } from "../domain/lifecycle.js";
+import { AnswerSources } from "./answer-sources.js";
 import { Database } from "../storage/database.js";
 
 /** Creates independent failed-slot runs without changing source evidence or research decisions. */
@@ -41,7 +42,7 @@ export class RunRetries {
       ? input.resultIds.map((resultId) =>
           failed.find((result) => result.id === resultId),
         )
-      : failed;
+      : failed.filter((result) => !new AnswerSources(this.db).source(result));
     if (
       !selected.length ||
       selected.some((result) => !result) ||
@@ -115,7 +116,11 @@ export class RunRetries {
     run: RunRecord,
     results: ResultRecord[],
   ): NonNullable<RunView["retryEligibility"]> {
-    const failed = results.filter((result) => result.status === "failed");
+    const failed = results.filter(
+      (result) =>
+        result.status === "failed" &&
+        !new AnswerSources(this.db).source(result),
+    );
     const settled =
       !this.isActive(run.id) &&
       ["completed", "failed", "halted", "cancelled", "paused"].includes(

@@ -1,5 +1,9 @@
 # Question-level custom evaluators
 
+This proposal records an earlier design discussion.
+Its existing-design descriptions are historical and do not define the current implementation.
+See [evaluator design](evaluator-design.md) and [question-bank design](question-bank-design.md) for current behavior.
+
 ## Goal
 
 Allow a bank author to add one pure custom evaluator to questions that need more than baseline comparison.

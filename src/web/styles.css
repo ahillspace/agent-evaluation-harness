@@ -657,8 +657,8 @@ tr:last-child td {
 }
 .library-layout {
   display: grid;
-  grid-template-columns: 230px minmax(0, 1fr);
-  gap: 22px;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 20px;
 }
 .collection-list {
   padding: 10px 0;
@@ -819,17 +819,149 @@ tr:last-child td {
   color: var(--muted);
   margin: 5px 0 0;
 }
-.question-editor {
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 18px;
-  background: var(--panel);
+.bank-workspace {
+  min-width: 0;
 }
-.question-editor > .row {
-  margin-bottom: 15px;
+.bank-workspace .panel-heading {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 16px;
 }
-.question-editor .eyebrow {
+.bank-workspace .panel-heading > div:first-child {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+.bank-workspace .panel-heading h2 {
+  overflow-wrap: anywhere;
+}
+.bank-workspace .tabs {
   margin: 0;
+}
+.bank-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 20px 24px 16px;
+}
+.bank-toolbar input[type="search"] {
+  flex: 1 1 220px;
+  width: auto;
+  min-width: 140px;
+}
+.bank-toolbar select {
+  flex: 0 1 180px;
+  width: auto;
+  min-width: 120px;
+}
+.bank-question-button {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.bank-question-button:hover {
+  color: var(--accent);
+  background: transparent;
+}
+.bank-question-button small {
+  display: block;
+  margin-top: 7px;
+}
+.bank-rule-summary {
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.bank-effective-rules {
+  border: 1px solid var(--accent-line);
+  background: var(--selected);
+  border-radius: 6px;
+  padding: 14px 16px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.bank-effective-rules p:last-child,
+.bank-effective-rules ul:last-child {
+  margin-bottom: 0;
+}
+.bank-draft-status {
+  color: var(--accent);
+  font-size: 11px;
+}
+.bank-question-editor {
+  min-width: 0;
+}
+.bank-editor-section {
+  padding: 4px 0 20px;
+  border-bottom: 1px solid var(--line);
+}
+.bank-editor-section:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.bank-editor-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.bank-import-preview {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 16px;
+  font-size: 12px;
+  min-width: 0;
+}
+.bank-history-section + .bank-history-section {
+  border-top: 1px solid var(--line);
+  padding-top: 20px;
+}
+.bank-history-section h3 {
+  font-size: 13px;
+}
+.bank-finding {
+  border-bottom: 1px solid var(--line);
+  padding: 18px 0;
+  min-width: 0;
+}
+.bank-finding:last-child {
+  border-bottom: 0;
+}
+.bank-finding > .row {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+.bank-finding h4 {
+  margin: 10px 0 6px;
+  font-size: 13px;
+}
+.bank-finding p {
+  margin-bottom: 0;
+  font-size: 12px;
+}
+.bank-grading {
+  max-width: 960px;
+}
+.bank-grading > .disclosure {
+  min-width: 0;
+}
+.bank-workspace .question-table > table {
+  min-width: 720px;
+}
+.bank-workspace .question-table th:first-child,
+.bank-workspace .question-table td:first-child {
+  width: 40%;
+}
+.bank-workspace .question-table th:last-child,
+.bank-workspace .question-table td:last-child {
+  width: 135px;
 }
 .code-input {
   font: 11px/1.8 var(--mono);
@@ -1009,6 +1141,11 @@ tr:last-child td {
 }
 .setup-main .panel-heading {
   padding: 25px 28px;
+}
+.setup-fields {
+  border: 0;
+  margin: 0;
+  min-width: 0;
 }
 .setup-main .panel-body {
   padding: 27px 28px;
@@ -2386,6 +2523,36 @@ tr:last-child td {
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
+}
+.retry-results {
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.retry-results > p,
+.retry-result-row p {
+  margin: 0;
+}
+.retry-results > details,
+.retry-results > p + .retry-result-row {
+  margin-top: 8px;
+}
+.retry-result-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.retry-result-row + .retry-result-row {
+  margin-top: 8px;
+}
+.answer-provenance {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12px;
 }
 .run-progress-line {
   display: flex;

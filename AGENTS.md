@@ -9,6 +9,8 @@ Do not invoke no-mistakes, create commits, push, or send external messages witho
 ## Architecture
 
 Read `docs/build-charter.md`, `docs/architecture.md`, and `docs/acceptance.md` before substantial changes.
+Use `docs/architecture-audit.md` for the reviewed baseline, known gaps, and validation limits.
+Keep architectural truth in its canonical documentation owner rather than repeating it here.
 The application layer owns all product rules and lifecycle decisions.
 The CLI and HTTP server call the same application operations.
 React owns presentation and draft form state.
@@ -31,5 +33,8 @@ Do not import, symlink, edit, or delete its files or data.
 ## Checks
 
 Run `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build` for substantial changes.
+`npm run validate` also runs formatting and production import-boundary checks.
+Maintained TypeScript scripts participate in type checking; verify their workflows in isolated workspaces when changing them.
+For documentation changes, check formatting, local links and anchors, source claims, and navigation.
 Use bounded local tests before costly provider calls.
 Record actual validation and limitations; never claim unexecuted checks passed.

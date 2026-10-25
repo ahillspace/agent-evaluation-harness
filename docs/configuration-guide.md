@@ -3,6 +3,31 @@
 An evaluation run records how one frozen agent configuration answers selected questions.
 Use the same bank across runs to compare configurations, and inspect evidence before changing the agent or scoring rules.
 
+## Local engine configuration
+
+The server owns one local workspace; the browser and CLI share that server's application operations.
+[`startServer`](../src/server.ts) resolves these settings in the following order:
+
+| Setting             | Resolution order                                                                                           |
+| ------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Workspace directory | `dataDirectory` option, then `AEH_DATA_DIRECTORY`, then `.aeh` relative to the server's working directory. |
+| Listening port      | `port` option, then `PORT`, then `4381`.                                                                   |
+| Listening host      | `host` option, then `127.0.0.1`; only loopback hosts are accepted.                                         |
+| CLI endpoint        | `--url`, then `AEH_URL`, then `http://127.0.0.1:4381`; see [CLI usage](cli.md).                            |
+
+The compiled web app uses relative `/api` requests against its serving origin.
+The [Vite configuration](../vite.config.ts) serves development at port `5181` and proxies `/api` to port `4381`.
+Changing `PORT` does not update that development proxy.
+No shared configuration file resolves these transport settings.
+
+The engine trusts local clients and has no user sign-in or per-command authorization layer.
+The server rejects non-loopback bind addresses and foreign `Host` headers.
+Browser origins must match the request host, except the accepted development origins at `localhost:5181` and `127.0.0.1:5181`.
+Requests without an `Origin` header can use the local API, as the CLI does.
+These checks do not isolate the engine from other local processes.
+Command bodies have an 8,000,000-byte limit, and static responses include a content security policy and path containment check.
+[`startServer`](../src/server.ts) owns these transport checks; the [runtime guide](runtime.md) owns provider, process, and credential boundaries.
+
 ## Set up accounts and connections
 
 Open **Settings** to inspect installed harnesses and manage reusable connections.
@@ -37,6 +62,14 @@ Connection discovery does not prove that a gateway accepts every model or invoca
 
 Create a Tableau connection for the intended server and site, then test it from **Settings**.
 In **Run**, select the connection and allowed actions under **Tools**.
+Choose a datasource by its name and project from **Datasource**.
+Open **Find another datasource** to browse pages or search for an exact name.
+The list contains published datasources visible to the saved Tableau account.
+Tableau supports exact datasource-name filtering and rejects commas or ampersands in filters, including encoded values; browse for those names instead.
+See Tableau's [datasource API](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_data_sources.htm#query_data_sources) and [filter rules](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_concepts_filtering_and_sorting.htm).
+**Tool configuration details** shows the exact datasource ID and any configured MCP datasource restriction.
+Use its manual ID field when discovery is unavailable.
+The selected name and project accompany the exact ID in saved configurations, but selection provides prompt guidance without changing access permissions.
 The engine manages the Tableau MCP process; an empty tool selection exposes no Tableau tools.
 When you check a connection or run with Tableau tools, the harness starts a local stdio MCP process using the saved Tableau server, site, and token.
 By default, it runs `npx -y @tableau/mcp-server@4.13.3`.
@@ -112,8 +145,35 @@ Typed declarations derive public answer formats without disclosing expected valu
 Imports can supply an explicit `answerFormat`.
 Published evaluation requirements describe applicable representation, duplicate, and ordering rules.
 
-Publishing edits creates another bank revision.
+Use **Questions** to search the bank and edit one question at a time.
+The question editor shows the reference answer beside its effective grading rules.
+An override applies only to that question; reset it to use the bank's shared rules again.
+Use **Check answer** to try an answer against the current draft without calling a model.
+
+Use **Grading** to change shared answer rules, check calibration examples, or preview the draft against saved answers.
+Calibration examples are sample answers with a known correct or incorrect outcome; they help catch unintended rule changes before publication.
+Advanced rules and custom JavaScript evaluators are available in focused disclosures.
+Optional Jev profiles are published separately; other model judges are configured when setting up a run.
+Judge scores remain separate from deterministic answer matching.
+
+Question and grading edits stay in a draft until you select **Publish changes**.
+Drafts survive navigation and refresh in the same browser tab and workspace.
+Browser drafts use `sessionStorage`, keyed by the durable workspace identity; they are not published engine records.
+[`bankDraftKey`](../src/web/bank-draft.ts) scopes bank drafts, and [`setupDraftKey`](../src/web/setup-draft.ts) scopes launch drafts.
+Publication saves questions and deterministic rules together after checking calibration examples.
+If another edit has changed the published bank or rules, reload the current version before publishing your draft.
 Existing runs retain their original questions, references, and grading settings.
+Use **History** to inspect published versions and **Export bank** to download questions and rules together.
+Import reviews show which settings are included before you create a bank.
+CSV imports support question text, expected answers, IDs, and tags.
+Use a versioned JSON bank package to retain public context, answer instructions, evaluator settings, and optional Jev profile settings.
+[`parseBankImport`](../src/web/bank-import.ts) rejects unsupported CSV columns instead of silently dropping them.
+An imported Jev profile remains a draft until you publish and activate it separately, after publishing the bank.
+The bank and evaluator publish together through [`CatalogService.publishBank`](../src/application/catalog.ts); Jev profile publication is a separate operation.
+
+Use **Findings** to review reported concerns and open their source answers.
+Findings are suggestions, not confirmed errors.
+Accepting a correction or exclusion publishes an explicit change while preserving previous run evidence.
 
 Expected-answer size indicators estimate tokens from serialized content.
 Yellow starts at approximately 2,000 tokens; red starts at approximately 32,000 tokens for the relevant Jev context estimate.
@@ -140,8 +200,19 @@ Advanced JSON editors describe supported settings and validate input.
 Put credentials in **Connections**, not advanced JSON or prompts.
 
 Setup drafts survive navigation and refresh within the same tab and workspace.
-**Reset** discards the draft, and a successful launch clears it.
+The browser saves the complete launch request before sending it.
+If the launch response is lost, **Retry launch** recovers the same Run or research session, including after navigation or refresh.
+The form stays fixed while that request is unresolved.
+An acknowledged launch clears the saved request.
+If browser storage cannot save the complete pending request, the browser does not send the launch.
+**Reset setup** discards the draft and starts a separate request; an earlier accepted launch remains saved in Results.
 Unavailable saved dependencies stay visible so you can replace them deliberately.
+
+The form's authentication selection overrides `authSource` in advanced model settings.
+[`roleSettings`](../src/web/drafts.ts) sets `connection` when you select a saved provider connection, and `local` otherwise.
+Reuse restores frozen settings into a new draft through [`hydrateSetupSource`](../src/web/setup-source.ts).
+Launch resolves the target and selected judge connections before saving the new immutable manifest through [`RunService.launch`](../src/application/runs.ts).
+Reusing a configuration does not modify the earlier Run.
 
 For external agents, configure request and response mapping in **Settings**.
 Request preview does not call the endpoint; an explicit sample request does.
@@ -153,6 +224,14 @@ See [external HTTP agents](http-targets.md) for configuration and evidence limit
 Select a question to inspect its submitted answer, reference, attempts, recorded activity, and judgments.
 Use **Summary** for run-level outcomes and performance.
 Execution failures and judge errors remain distinct from incorrect answers.
+
+Observation uses HTTP polling, not a persistent push connection.
+[`useObservation`](../src/web/observation-stream.ts) first requests `runs.get`, then requests `runs.observe` without resending the frozen manifest.
+It merges events by durable sequence, drains 200-event pages, and retries after request failures.
+Selected attempt evidence and assessment details load through separate queries.
+[`Observe`](../src/web/observe.tsx) uses engine-provided allowed actions and refreshes observation after a control request succeeds.
+Pause, Halt, Resume, and Cancel affect engine work; leaving the page does not send one of these controls.
+See [launch and control](architecture.md#launch-observe-and-control) for admission, interruption, and startup recovery behavior.
 
 Choose a named saved score to inspect its judgments and coverage.
 Accuracy is `correct / judged`, where judged means a completed correct-or-incorrect decision.
@@ -238,6 +317,16 @@ After active work settles, **Rerun failed questions** creates a linked run conta
 It uses the original frozen configuration and retains the original attempts and scores.
 When prior actions could repeat, the app requires acknowledgment.
 Incorrect answers do not trigger automatic execution retries.
+
+After a linked rerun finishes, choose **Apply rerun results** to include its completed answers in the original Run.
+The original Run also lists linked reruns that have answers ready to apply.
+The app creates updated scores and keeps the original failures, answers, and scores available.
+Each applied answer identifies its source rerun.
+Applying results does not call the target agent or judges again.
+Compatible saved judge decisions carry forward; missing compatible decisions remain unjudged.
+Existing human review decisions on other questions stay in the updated human score.
+Only completed answers from a linked rerun with the same frozen configuration qualify.
+Replacing an answer already applied from another rerun requires an explicit replacement choice.
 
 ## Run bounded research
 

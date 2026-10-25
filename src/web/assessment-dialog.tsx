@@ -76,7 +76,7 @@ export function AssessmentDialog({
   }));
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const canJudge = view.results.some((result) => result.status === "completed");
+  const canJudge = view.progress.completed > 0;
   const create = async () => {
     setPending(true);
     setError(null);

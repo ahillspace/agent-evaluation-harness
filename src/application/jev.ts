@@ -1,3 +1,4 @@
+import { buildJudgeEvidence } from "./judge-evidence.js";
 import {
   jsonSchema,
   jevProfileSettingsSchema,
@@ -10,13 +11,11 @@ import {
   type JevJudgeSelection,
   type JevProfileRevision,
   type JevProfileSettings,
-  type Json,
   type RuntimePort,
 } from "../contracts.js";
 import { AppError, errorMessage } from "../domain/errors.js";
 import { digest, id, now } from "../domain/identity.js";
 import { Database } from "../storage/database.js";
-import { savedTarget } from "../contracts/targets.js";
 import { evidenceSupports } from "../domain/evidence-requirements.js";
 
 function evidenceForClassificationRequest(
@@ -194,105 +193,6 @@ export class JevService {
       ),
     };
   }
-  private evidence(
-    runId: string,
-    attemptId: string,
-    basis?: { evaluator: EvaluatorRevision; referenceBank?: BankRevision },
-  ): JudgeEvidence {
-    const run = this.db.require("run", runId);
-    const attempt = this.db.require("attempt", attemptId);
-    if (
-      attempt.runId !== runId ||
-      attempt.status !== "completed" ||
-      !attempt.output ||
-      !attempt.finishedAt
-    )
-      throw new AppError(
-        "evidence_unavailable",
-        "Jev requires a completed attempt from this Run.",
-      );
-    if (digest(attempt.output) !== attempt.evidenceHash)
-      throw new AppError(
-        "evidence_integrity",
-        "The sealed attempt evidence hash does not match.",
-      );
-    const result = this.db.require("result", attempt.resultId);
-    const question = (
-      basis?.referenceBank?.questions ?? run.manifest.questions
-    ).find((item) => item.id === result.questionId);
-    if (!question)
-      throw new AppError(
-        "evidence_unavailable",
-        "The frozen question is unavailable.",
-      );
-    const { expected, ...publicQuestion } = question;
-    const target = savedTarget(run.manifest);
-    const observationLevel =
-      attempt.output.evidenceScope ??
-      (target.kind === "external" ? "answer-only" : "internal-activity");
-    let trace: JudgeEvidence["trace"];
-    if (observationLevel === "answer-only")
-      trace = { format: "unavailable", entries: null };
-    else if (
-      attempt.output.transcript !== undefined &&
-      attempt.output.transcript !== null &&
-      !(
-        Array.isArray(attempt.output.transcript) &&
-        attempt.output.transcript.length === 0
-      )
-    )
-      trace = {
-        format: "provider_transcript",
-        entries: attempt.output.transcript,
-      };
-    else {
-      const entries: Json[] = [];
-      let cursor = 0;
-      for (;;) {
-        const page = this.db.events({ runId, attemptId }, cursor, {
-          limit: 5000,
-        });
-        for (const event of page)
-          if (
-            !/^(evaluation|judge|jev|review|research|assessment)\./.test(
-              event.type,
-            )
-          )
-            entries.push(jsonSchema.parse(event));
-        if (page.length < 5000) break;
-        cursor = page.at(-1)!.sequence;
-      }
-      trace = { format: "recorded_events", entries };
-    }
-    const { questionOverrides, ...base } = (
-      basis?.evaluator ?? run.manifest.evaluator
-    ).settings;
-    const effective = { ...base, ...questionOverrides[question.id] };
-    const { code: _code, ...referenceCriteria } = effective;
-    return {
-      schemaVersion: 1,
-      runId,
-      resultId: result.id,
-      attemptId,
-      repetition: result.repetition,
-      question: publicQuestion,
-      expected,
-      finalAnswer: attempt.output.answer,
-      finalText: attempt.output.text,
-      publicTarget: target,
-      observationLevel,
-      startedAt: attempt.startedAt,
-      finishedAt: attempt.finishedAt,
-      ...(attempt.output.terminalReason
-        ? { terminalReason: attempt.output.terminalReason }
-        : {}),
-      referenceCriteria: jsonSchema.parse({
-        ...referenceCriteria,
-        customEvaluation: effective.mode === "custom",
-      }),
-      trace,
-    };
-  }
   async preview(
     input: CommandInput<"jev.preview">,
   ): Promise<JevAssessmentRecord> {
@@ -348,7 +248,7 @@ export class JevService {
     idempotency?: { key: string; hash: string },
     basis?: { evaluator: EvaluatorRevision; referenceBank?: BankRevision },
   ): Promise<JevAssessmentRecord> {
-    const evidence = this.evidence(runId, attemptId, basis);
+    const evidence = buildJudgeEvidence(this.db, runId, attemptId, basis);
     const override =
       configuration.profile.settings.questionOverrides[evidence.question.id];
     const criteria = jevProfileSettingsSchema.parse({

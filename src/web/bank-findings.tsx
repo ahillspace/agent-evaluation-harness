@@ -1,16 +1,18 @@
 import { useState } from "react";
 import type { BankFinding, BankRevision } from "../contracts.js";
 import { command, useResource } from "./api.js";
-import { ErrorNotice, Field, date, json } from "./ui.js";
+import { ErrorNotice, Field, SectionIntro, date, json } from "./ui.js";
 
 export function BankFindings({
   bankId,
   revision,
   onSaved,
+  onEditQuestion,
 }: {
   bankId: string;
   revision?: BankRevision;
   onSaved: () => void;
+  onEditQuestion?: (questionId: string) => void;
 }) {
   const findings = useResource("banks.findings", { bankId });
   const [showResolved, setShowResolved] = useState(false);
@@ -19,19 +21,11 @@ export function BankFindings({
   );
   return (
     <div className="panel-body stack">
-      <div className="row">
-        <div>
-          <h3>Question findings</h3>
-          <p className="subtle">
-            Review suspected reference, wording, duplicate, and datasource
-            issues. Corrections publish a new revision; previous evidence stays
-            available.
-          </p>
-        </div>
-        <button className="button secondary" onClick={findings.refresh}>
-          Refresh findings
-        </button>
-      </div>
+      <SectionIntro
+        title="Findings"
+        description="Review reported concerns about questions, expected answers, or grading rules."
+        details="A finding is a concern reported from a saved answer. It is not a confirmed mistake. Review the source answer, edit the question rules, or record a decision. Publishing a correction or exclusion creates a new revision; previous runs and scores stay unchanged."
+      />
       <ErrorNotice error={findings.error} />
       <label className="check-row">
         <input
@@ -46,6 +40,7 @@ export function BankFindings({
           key={finding.id}
           finding={finding}
           revision={revision}
+          onEditQuestion={onEditQuestion}
           onSaved={() => {
             findings.refresh();
             onSaved();
@@ -66,10 +61,12 @@ function Finding({
   finding,
   revision,
   onSaved,
+  onEditQuestion,
 }: {
   finding: BankFinding;
   revision?: BankRevision;
   onSaved: () => void;
+  onEditQuestion?: (questionId: string) => void;
 }) {
   const [action, setAction] = useState("record");
   const [note, setNote] = useState("");
@@ -105,7 +102,7 @@ function Finding({
     }
   };
   return (
-    <article className="panel panel-body stack">
+    <article className="bank-finding stack">
       <div className="row">
         <div>
           <span className="tag">{finding.kind}</span>{" "}
@@ -115,14 +112,24 @@ function Finding({
             {finding.questionId} · {date(finding.createdAt)}
           </p>
         </div>
-        {finding.runId && (
-          <a
-            className="button secondary"
-            href={`#/observe/${finding.runId}${sourceQuery.size ? `?${sourceQuery.toString()}` : ""}`}
-          >
-            Open source evidence
-          </a>
-        )}
+        <div className="actions">
+          {onEditQuestion && (
+            <button
+              className="button secondary"
+              onClick={() => onEditQuestion(finding.questionId)}
+            >
+              Edit question rules
+            </button>
+          )}
+          {finding.runId && (
+            <a
+              className="button secondary"
+              href={`#/observe/${finding.runId}${sourceQuery.size ? `?${sourceQuery.toString()}` : ""}`}
+            >
+              View source answer
+            </a>
+          )}
+        </div>
       </div>
       <p>{finding.note}</p>
       {finding.resolution ? (
@@ -134,78 +141,83 @@ function Finding({
             : ""}
         </p>
       ) : (
-        <>
-          <ErrorNotice error={error} />
-          <Field label="Resolution">
-            <select
-              aria-label={`Resolution for ${finding.questionId}`}
-              value={action}
-              onChange={(event) => setAction(event.target.value)}
-            >
-              <option value="record">
-                Accept finding without changing references
-              </option>
-              <option value="correct">Publish corrected expected answer</option>
-              <option value="exclude">
-                Exclude from future accuracy until reviewed
-              </option>
-            </select>
-          </Field>
-          {action === "correct" && (
-            <Field label="Corrected expected answer (JSON)">
+        <details className="disclosure">
+          <summary>Review finding</summary>
+          <div className="stack">
+            <ErrorNotice error={error} />
+            <Field label="Resolution">
+              <select
+                aria-label={`Resolution for ${finding.questionId}`}
+                value={action}
+                onChange={(event) => setAction(event.target.value)}
+              >
+                <option value="record">
+                  Accept finding without changing references
+                </option>
+                <option value="correct">
+                  Publish corrected expected answer
+                </option>
+                <option value="exclude">
+                  Exclude from future accuracy until reviewed
+                </option>
+              </select>
+            </Field>
+            {action === "correct" && (
+              <Field label="Corrected expected answer (JSON)">
+                <textarea
+                  aria-label={`Corrected expected answer for ${finding.questionId}`}
+                  rows={8}
+                  value={expected}
+                  onChange={(event) => setExpected(event.target.value)}
+                />
+              </Field>
+            )}
+            {action === "exclude" && (
+              <p className="notice">
+                Publishes an evaluator revision that marks this question as
+                needing review. Existing scores keep their original question
+                counts.
+              </p>
+            )}
+            <Field label="Resolution note">
               <textarea
-                aria-label={`Corrected expected answer for ${finding.questionId}`}
-                rows={8}
-                value={expected}
-                onChange={(event) => setExpected(event.target.value)}
+                aria-label={`Resolution note for ${finding.questionId}`}
+                rows={3}
+                value={note}
+                onChange={(event) => setNote(event.target.value)}
               />
             </Field>
-          )}
-          {action === "exclude" && (
-            <p className="notice">
-              Publishes an evaluator revision that marks this question as
-              needing review. Existing scores keep their original question
-              counts.
-            </p>
-          )}
-          <Field label="Resolution note">
-            <textarea
-              aria-label={`Resolution note for ${finding.questionId}`}
-              rows={3}
-              value={note}
-              onChange={(event) => setNote(event.target.value)}
-            />
-          </Field>
-          <Field label="Reviewer">
-            <input
-              aria-label={`Reviewer for ${finding.questionId}`}
-              value={reviewer}
-              onChange={(event) => setReviewer(event.target.value)}
-            />
-          </Field>
-          <div className="actions">
-            <button
-              className="button primary"
-              disabled={pending || !reviewer.trim()}
-              onClick={() => void resolve("accepted")}
-            >
-              {pending
-                ? "Saving..."
-                : action === "correct"
-                  ? "Publish correction"
-                  : action === "exclude"
-                    ? "Publish exclusion"
-                    : "Accept finding"}
-            </button>
-            <button
-              className="button secondary"
-              disabled={pending || !reviewer.trim()}
-              onClick={() => void resolve("dismissed")}
-            >
-              Dismiss finding
-            </button>
+            <Field label="Reviewer">
+              <input
+                aria-label={`Reviewer for ${finding.questionId}`}
+                value={reviewer}
+                onChange={(event) => setReviewer(event.target.value)}
+              />
+            </Field>
+            <div className="actions">
+              <button
+                className="button primary"
+                disabled={pending || !reviewer.trim()}
+                onClick={() => void resolve("accepted")}
+              >
+                {pending
+                  ? "Saving..."
+                  : action === "correct"
+                    ? "Publish correction"
+                    : action === "exclude"
+                      ? "Publish exclusion"
+                      : "Accept finding"}
+              </button>
+              <button
+                className="button secondary"
+                disabled={pending || !reviewer.trim()}
+                onClick={() => void resolve("dismissed")}
+              >
+                Dismiss finding
+              </button>
+            </div>
           </div>
-        </>
+        </details>
       )}
     </article>
   );

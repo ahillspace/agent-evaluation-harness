@@ -5,7 +5,7 @@ import {
   type JevProviderResult,
   type Json,
 } from "../contracts.js";
-import type { ConnectionService } from "./connections.js";
+import type { ConnectionService, ConnectionSnapshot } from "./connections.js";
 import { withInvocationDeadline } from "./deadline.js";
 import { redact } from "./harness.js";
 import { JevFailure, jevHttp, TYPESAFE_ENDPOINT } from "./jev-http.js";
@@ -46,7 +46,7 @@ const modelListSchema = z.object({
 });
 type Connections = Pick<
   ConnectionService,
-  "freeze" | "credentials" | "redactionSecrets"
+  "freeze" | "resolveCredentials" | "redactionSecrets" | "snapshot"
 >;
 
 export class JevClassifier implements ClassificationJudgePort {
@@ -92,10 +92,22 @@ export class JevClassifier implements ClassificationJudgePort {
       return binding;
     });
   }
-  testConnection(connectionId: string) {
+  testConnection(connection: string | ConnectionSnapshot) {
     return this.admit(() =>
       withInvocationDeadline(20_000, this.stopped.signal, async (signal) => {
-        const { apiKey } = await this.connections.credentials(connectionId);
+        const snapshot =
+          typeof connection === "string"
+            ? await this.connections.snapshot(connection)
+            : connection;
+        if (
+          snapshot.connection.provider !== "typesafe" ||
+          Object.keys(snapshot.connection.settings).length
+        )
+          throw new JevFailure(
+            "configuration_error",
+            "Jev requires a TypeSafe connection using the official endpoint.",
+          );
+        const { apiKey } = snapshot.credentials;
         if (!apiKey)
           throw new JevFailure(
             "authentication_failed",
@@ -174,8 +186,8 @@ export class JevClassifier implements ClassificationJudgePort {
               "unsupported_evidence",
               "The Jev profile does not declare compatibility with answer-only evidence.",
             );
-          const { apiKey } = await this.connections.credentials(
-            input.configuration.connection.connectionId,
+          const { apiKey } = await this.connections.resolveCredentials(
+            input.configuration.connection,
           );
           if (!apiKey)
             throw new JevFailure(
@@ -188,12 +200,10 @@ export class JevClassifier implements ClassificationJudgePort {
           const secrets = [
             apiKey,
             ...(await this.connections.redactionSecrets(
-              (
-                input.evidence.publicAgent?.connections ??
+              input.evidence.publicAgent?.connections ??
                 (input.evidence.publicTarget?.kind === "managed"
                   ? input.evidence.publicTarget.agent.connections
-                  : [])
-              ).map((connection) => connection.connectionId),
+                  : []),
             )),
           ];
           const fallbackCriteria = criteria.answerOnlyFallback;

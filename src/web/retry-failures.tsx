@@ -22,7 +22,7 @@ export function RetryFailures({ view }: { view: RunView }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>();
   const key = useRef<string | undefined>(undefined);
-  const failed = view.results.filter((result) => result.status === "failed");
+  const failed = view.retryEligibility?.resultIds ?? [];
   if (!failed.length) return null;
   const settled = view.retryEligibility?.available ?? false;
   const uncertain = view.retryEligibility?.requiresAcknowledgment ?? true;
@@ -54,8 +54,10 @@ export function RetryFailures({ view }: { view: RunView }) {
               are excluded.
             </p>
             <p className="subtle">
-              This creates a linked run. Original attempts, scores, and research
-              decisions stay unchanged. New attempts can incur additional usage.
+              This creates a linked run. Apply its completed answers to update
+              this run's results and scores. Original attempts, scores, and
+              research decisions stay available. New attempts can incur
+              additional usage.
             </p>
             {uncertain && (
               <label className="check-row">

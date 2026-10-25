@@ -4,9 +4,11 @@ import { Field } from "./ui.js";
 export function EvaluatorPolicy({
   settings,
   onChange,
+  showDecimalPlaces = true,
 }: {
   settings: EvaluatorSettings;
   onChange: (settings: EvaluatorSettings) => void;
+  showDecimalPlaces?: boolean;
 }) {
   return (
     <div className="stack">
@@ -112,8 +114,15 @@ export function EvaluatorPolicy({
                   })
                 }
               >
-                {["variant", "base", "accent", "case"].map((value) => (
-                  <option key={value}>{value}</option>
+                {Object.entries({
+                  variant: "Match case and accents",
+                  base: "Ignore case and accents",
+                  accent: "Match accents, ignore case",
+                  case: "Match case, ignore accents",
+                }).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
                 ))}
               </select>
             </Field>
@@ -234,27 +243,29 @@ export function EvaluatorPolicy({
         ))}
       </div>
       <div className="form-grid">
-        <Field
-          label="Decimal places"
-          help="Compare numeric values after rounding to this precision. Leave blank to use tolerances. Column rules can set different precision for currency and counts."
-        >
-          <input
-            aria-label="Decimal places"
-            type="number"
-            min="0"
-            max="12"
-            value={settings.decimalPlaces ?? ""}
-            onChange={(event) =>
-              onChange({
-                ...settings,
-                decimalPlaces:
-                  event.target.value === ""
-                    ? undefined
-                    : Number(event.target.value),
-              })
-            }
-          />
-        </Field>
+        {showDecimalPlaces && (
+          <Field
+            label="Decimal places"
+            help="Compare numeric values after rounding to this precision. Leave blank to use tolerances. Column rules can set different precision for currency and counts."
+          >
+            <input
+              aria-label="Decimal places"
+              type="number"
+              min="0"
+              max="12"
+              value={settings.decimalPlaces ?? ""}
+              onChange={(event) =>
+                onChange({
+                  ...settings,
+                  decimalPlaces:
+                    event.target.value === ""
+                      ? undefined
+                      : Number(event.target.value),
+                })
+              }
+            />
+          </Field>
+        )}
         <Field
           label="Date comparison"
           help="Calendar date compares the stated date. Instant compares timezone-qualified timestamps as moments in time. Choose only the meaning required by the question."
@@ -341,10 +352,6 @@ export function EvaluatorPolicy({
           />
         </Field>
       )}
-      <p className="subtle">
-        These are bank defaults. Use question overrides for rules that apply to
-        selected questions only.
-      </p>
     </div>
   );
 }

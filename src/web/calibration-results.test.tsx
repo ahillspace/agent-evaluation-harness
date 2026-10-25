@@ -11,7 +11,7 @@ import { EvaluatorPolicy } from "./evaluator-policy.js";
 import { evaluatorSettingsSchema } from "../contracts.js";
 import type { BankRevision } from "../contracts.js";
 import type { ComponentProps } from "react";
-import { BankEvaluator } from "./bank-evaluator.js";
+import { BankGrading } from "./bank-grading.js";
 
 it("warns about ignored reference policies without mapping them into evaluator settings", () => {
   const question = {
@@ -44,15 +44,24 @@ it("offers calibration without requiring a saved run and keeps advanced rules co
     evaluatorRevisions: [],
     evaluatorDrafts: [],
     runs: [],
-  } as unknown as ComponentProps<typeof BankEvaluator>["workspace"];
+  } as unknown as ComponentProps<typeof BankGrading>["workspace"];
   const html = renderToStaticMarkup(
-    <BankEvaluator workspace={workspace} bankId="bank" refresh={() => {}} />,
+    <BankGrading
+      workspace={workspace}
+      bankId="bank"
+      questions={[]}
+      evaluatorName="Rules"
+      onEvaluatorName={() => {}}
+      settings={evaluatorSettingsSchema.parse({})}
+      onSettings={() => {}}
+      refresh={() => {}}
+    />,
   );
   expect(html).toContain("Check calibration");
   expect(html).not.toContain(
     '<button class="button secondary" disabled="">Check calibration',
   );
-  expect(html).toContain("Publication always checks calibration");
+  expect(html).toContain("Failed examples block publication");
   expect(html).not.toContain("<details open");
 });
 

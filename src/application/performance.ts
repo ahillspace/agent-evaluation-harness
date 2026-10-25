@@ -1,5 +1,6 @@
 import type { RunPerformance, UsageReport } from "../contracts.js";
 import { uncachedInput, UsageProjection } from "./usage-projection.js";
+import { AnswerSources } from "./answer-sources.js";
 import { Database } from "../storage/database.js";
 
 type Usage =
@@ -65,13 +66,26 @@ export function runPerformance(
   projection?: UsageProjection,
 ): RunPerformance {
   const run = db.require("run", runId);
-  const attempts = projection?.attempts(runId) ?? db.attemptSummaries(runId);
-  const results = db.list("result", { runId });
+  const answers = new AnswerSources(db);
+  const physical = answers.physicalAttempts(runId);
+  const sourceRuns = [...new Set(physical.values())];
+  const ownAttempts = projection?.attempts(runId) ?? db.attemptSummaries(runId);
+  const attempts = [
+    ...ownAttempts,
+    ...sourceRuns
+      .filter((sourceRunId) => sourceRunId !== runId)
+      .flatMap(
+        (sourceRunId) =>
+          projection?.attempts(sourceRunId) ?? db.attemptSummaries(sourceRunId),
+      )
+      .filter((attempt) => physical.has(attempt.id)),
+  ];
+  const results = answers.results(runId);
   const latencies = attempts
     .filter((a) => a.status === "completed" && a.finishedAt)
     .map((a) => Date.parse(a.finishedAt!) - Date.parse(a.startedAt));
-  const start = attempts.length
-    ? Math.min(...attempts.map((a) => Date.parse(a.startedAt)))
+  const start = ownAttempts.length
+    ? Math.min(...ownAttempts.map((a) => Date.parse(a.startedAt)))
     : null;
   const settled = [
     "completed",
@@ -83,6 +97,16 @@ export function runPerformance(
   ].includes(run.status);
   const end = settled ? Date.parse(run.updatedAt) : Date.now();
   const events = db.eventCounts(runId);
+  for (const sourceRunId of sourceRuns.filter((value) => value !== runId)) {
+    const counts = db.eventCounts(
+      sourceRunId,
+      [...physical]
+        .filter(([, owner]) => owner === sourceRunId)
+        .map(([attemptId]) => attemptId),
+    );
+    for (const [type, count] of Object.entries(counts))
+      events[type] = (events[type] ?? 0) + count;
+  }
   const toolCalls = (events["tool.started"] ?? 0) + (events["tool.call"] ?? 0);
   const turns =
     (events["turn.started"] ?? 0) +
@@ -132,24 +156,42 @@ export function runPerformance(
     for (let index = 0; index < parent.interruptedTurns; index++)
       researcherUsage.push({});
   }
-  const originalJudges = db.originalJudgeUsage(runId);
-  const jev = db.jevSummaries(runId).flatMap((a) =>
-    a.fallbackApplied
-      ? [
-          {
-            usage: a.fallbackUsage,
-            pending: false,
-          },
-          {
-            usage: a.fallbackResultUsage,
-            pending: a.status === "pending",
-          },
-        ]
-      : [{ usage: a.usage, pending: a.status === "pending" }],
-  );
+  const originalJudges = [
+    ...db.originalJudgeUsage(runId),
+    ...sourceRuns
+      .filter((owner) => owner !== runId)
+      .flatMap((owner) =>
+        db.originalJudgeUsage(
+          owner,
+          [...physical]
+            .filter(([, runOwner]) => runOwner === owner)
+            .map(([attemptId]) => attemptId),
+        ),
+      ),
+  ];
+  const jev = sourceRuns
+    .flatMap((owner) => db.jevSummaries(owner))
+    .filter((assessment) => physical.has(assessment.attemptId))
+    .flatMap((a) =>
+      a.fallbackApplied
+        ? [
+            {
+              usage: a.fallbackUsage,
+              pending: false,
+            },
+            {
+              usage: a.fallbackResultUsage,
+              pending: a.status === "pending",
+            },
+          ]
+        : [{ usage: a.usage, pending: a.status === "pending" }],
+    );
   const llm = [
     ...new Map(
-      db.passJudgeUsage(runId).map((report) => [report.judgmentId, report]),
+      db
+        .passJudgeUsage(runId)
+        .filter((report) => !report.judgmentId.startsWith("original_llm_"))
+        .map((report) => [report.judgmentId, report]),
     ).values(),
   ];
   const judgeUsage = [...originalJudges, ...jev, ...llm];
@@ -163,9 +205,13 @@ export function runPerformance(
       maximum: latencies.length ? Math.max(...latencies) : null,
     },
     attempts: attempts.length,
-    retries: attempts.filter((a) => a.number > 1).length,
-    answered: results.filter((r) => r.status === "completed").length,
-    failures: results.filter((r) => r.status === "failed").length,
+    retries: attempts.filter((a) => a.number > 1 || a.runId !== runId).length,
+    answered: results.filter((r) => r.answerSource).length,
+    failures: results.filter((r) => r.status === "failed" && !r.answerSource)
+      .length,
+    recoveredResults: results.filter((r) => r.answerSource?.applicationId)
+      .length,
+    originalFailures: results.filter((r) => r.status === "failed").length,
     target: {
       ...aggregateUsage(
         attempts.map((a) => ({

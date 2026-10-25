@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,6 +11,9 @@ import { SecretStoreError, type SecretStore } from "./secrets/store.js";
 import { migrateConnections } from "./connection-migration.js";
 import { ConnectionStorage } from "./connection-storage.js";
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import { JevClassifier } from "./jev.js";
+import { jsonSchema } from "../contracts.js";
 
 class MemorySecrets implements SecretStore {
   readonly values = new Map<string, string>();
@@ -51,6 +54,413 @@ async function fixture() {
 }
 
 const cleanup: Array<() => Promise<void>> = [];
+it("freezes and reuses optional connection metadata as JSON-compatible snapshots", async () => {
+  const { service } = await fixture();
+  const saved = await service.save({
+    name: "Model",
+    provider: "openai",
+    settings: {},
+    credentials: { apiKey: "fixture-json-key" },
+  });
+  const frozen = await service.freeze({
+    connectionId: saved.id,
+    provider: saved.provider,
+    settings: {},
+    credentialFields: [],
+  });
+  expect(jsonSchema.parse(frozen)).toEqual(frozen);
+  expect(frozen).not.toHaveProperty("resourceId");
+  const reused = await service.freeze({
+    ...frozen,
+    resourceId: undefined,
+    resourceName: undefined,
+    resourceProjectName: undefined,
+  });
+  expect(jsonSchema.parse(reused)).toEqual(frozen);
+  expect(reused).not.toHaveProperty("resourceId");
+  const metadata = {
+    resourceId: "resource",
+    resourceName: "",
+    resourceProjectName: "Project",
+  };
+  const named = await service.freeze({
+    connectionId: saved.id,
+    provider: saved.provider,
+    settings: {},
+    credentialFields: [],
+    ...metadata,
+  });
+  expect(named).toMatchObject(metadata);
+  expect(await service.freeze(named)).toMatchObject(metadata);
+});
+it("keeps frozen endpoint A paired with key A after rotating to endpoint B and key B", async () => {
+  const requests: Array<{ endpoint: string; authorization?: string }> = [];
+  const listen = async (endpoint: string) => {
+    const server = createServer((request, response) => {
+      requests.push({ endpoint, authorization: request.headers.authorization });
+      response.end("{}");
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    cleanup.push(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+          server.closeAllConnections();
+        }),
+    );
+    const address = server.address();
+    if (!address || typeof address === "string")
+      throw new Error("Missing port.");
+    return `http://127.0.0.1:${address.port}/v1`;
+  };
+  const endpointA = await listen("A");
+  const endpointB = await listen("B");
+  const { service } = await fixture();
+  const saved = await service.save({
+    name: "Gateway",
+    provider: "openai",
+    settings: { baseUrl: endpointA },
+    credentials: { apiKey: "frozen-key-A" },
+  });
+  const selection = {
+    connectionId: saved.id,
+    provider: saved.provider,
+    settings: {},
+    credentialFields: [],
+  };
+  const frozenA = await service.freeze(selection);
+  await service.save({
+    ...saved,
+    settings: { baseUrl: endpointB },
+    credentials: { apiKey: "replacement-key-B" },
+  });
+  const frozenB = await service.freeze(selection);
+  for (const binding of [frozenA, frozenB]) {
+    const { env } = await service.materialize([binding], []);
+    await fetch(`${env.OPENAI_BASE_URL}/models`, {
+      headers: { authorization: `Bearer ${env.OPENAI_API_KEY}` },
+    });
+  }
+  expect(requests).toEqual([
+    { endpoint: "A", authorization: "Bearer frozen-key-A" },
+    { endpoint: "B", authorization: "Bearer replacement-key-B" },
+  ]);
+});
+it("keeps frozen Tableau credentials after catalog deletion", async () => {
+  const { service } = await fixture();
+  const saved = await service.save({
+    name: "Tableau",
+    provider: "tableau",
+    settings: { server: "https://tableau.example", patName: "original" },
+    credentials: { patValue: "original-pat" },
+  });
+  const frozen = await service.freeze({
+    connectionId: saved.id,
+    provider: saved.provider,
+    settings: {},
+    credentialFields: [],
+  });
+  await service.delete(saved.id);
+  const material = await service.materialize([frozen], ["tableau.*"]);
+  expect(material.mcp[0]?.env.PAT_VALUE).toBe("original-pat");
+});
+it("rejects legacy frozen endpoint mismatches instead of borrowing current credentials", async () => {
+  const { service } = await fixture();
+  const saved = await service.save({
+    name: "Gateway",
+    provider: "openai",
+    settings: { baseUrl: "https://new.example/v1" },
+    credentials: { apiKey: "replacement-key" },
+  });
+  await expect(
+    service.materialize(
+      [
+        {
+          connectionId: saved.id,
+          provider: saved.provider,
+          settings: { baseUrl: "https://old.example/v1" },
+          credentialFields: ["apiKey"],
+        },
+      ],
+      [],
+    ),
+  ).rejects.toThrow(/rebind/i);
+});
+it("binds credentials to effective endpoints while excluding resource display metadata", async () => {
+  const { service } = await fixture();
+  const saved = await service.save({
+    name: "Default",
+    provider: "openai",
+    settings: {},
+    credentials: { apiKey: "default-secret" },
+  });
+  const first = await service.freeze({
+    connectionId: saved.id,
+    provider: saved.provider,
+    settings: {},
+    credentialFields: [],
+  });
+  await service.save({
+    ...saved,
+    name: "Renamed",
+    settings: {
+      baseUrl: "https://API.OPENAI.COM:443/v1/",
+      authMode: "api-key",
+    },
+  });
+  const equivalent = await service.freeze({
+    connectionId: saved.id,
+    provider: saved.provider,
+    settings: {},
+    resourceId: "new-resource",
+    resourceName: "Renamed resource",
+    credentialFields: [],
+  });
+  expect(equivalent.credentialBinding).toEqual(first.credentialBinding);
+  expect(await service.resolveCredentials(equivalent)).toEqual({
+    apiKey: "default-secret",
+  });
+  await expect(
+    service.resolveCredentials({
+      ...first,
+      settings: { baseUrl: "https://other.example/v1" },
+    }),
+  ).rejects.toThrow(/identity/i);
+  await expect(
+    service.resolveCredentials({ ...first, provider: "anthropic" }),
+  ).rejects.toThrow(/identity/i);
+  await expect(
+    service.save({
+      ...saved,
+      settings: { baseUrl: "https://other.example/v1" },
+    }),
+  ).rejects.toThrow(/re-enter credentials/i);
+});
+it("protects a captured settings and credential pair during concurrent replacement", async () => {
+  const { service, secrets } = await fixture();
+  const saved = await service.save({
+    name: "Gateway",
+    provider: "openai",
+    settings: { baseUrl: "https://old.example/v1" },
+    credentials: { apiKey: "old-secret" },
+  });
+  let releaseRead!: () => void;
+  let enteredRead!: () => void;
+  const released = new Promise<void>((resolve) => {
+    releaseRead = resolve;
+  });
+  const entered = new Promise<void>((resolve) => {
+    enteredRead = resolve;
+  });
+  const originalRead = secrets.read.bind(secrets);
+  vi.spyOn(secrets, "read").mockImplementationOnce(async (reference) => {
+    enteredRead();
+    await released;
+    return originalRead(reference);
+  });
+  const snapshot = service.snapshot(saved.id);
+  await entered;
+  const replacement = service.save({
+    ...saved,
+    settings: { baseUrl: "https://new.example/v1" },
+    credentials: { apiKey: "new-secret" },
+  });
+  releaseRead();
+  const captured = await snapshot;
+  await replacement;
+  expect(captured.connection.settings.baseUrl).toBe("https://old.example/v1");
+  expect(captured.credentials).toEqual({ apiKey: "old-secret" });
+  expect(captured.materialize([]).env).toMatchObject({
+    OPENAI_BASE_URL: "https://old.example/v1",
+    OPENAI_API_KEY: "old-secret",
+  });
+  expect((await service.snapshot(saved.id)).credentials).toEqual({
+    apiKey: "new-secret",
+  });
+});
+it("retires unused credentials after a transient snapshot while its captured pair remains usable", async () => {
+  const { service, secrets, storage } = await fixture();
+  const saved = await service.save({
+    name: "Probe only",
+    provider: "tableau",
+    settings: { server: "https://old.example", patName: "old" },
+    credentials: { patValue: "probe-old-secret" },
+  });
+  const captured = await service.snapshot(saved.id);
+  const oldReference = (await storage.read()).records[0]!.secretReference!;
+  await service.save({
+    ...saved,
+    settings: { server: "https://new.example", patName: "new" },
+    credentials: { patValue: "probe-new-secret" },
+  });
+  expect(secrets.values.has(oldReference)).toBe(false);
+  await service.delete(saved.id);
+  expect(secrets.values.size).toBe(0);
+  expect((await storage.read()).retainedReferences).toEqual([]);
+  expect(captured.connection.settings.server).toBe("https://old.example");
+  expect(captured.credentials).toEqual({ patValue: "probe-old-secret" });
+  expect(captured.materialize(["tableau.*"]).mcp[0]?.env).toMatchObject({
+    SERVER: "https://old.example",
+    PAT_NAME: "old",
+    PAT_VALUE: "probe-old-secret",
+  });
+});
+it("retires a Jev probe credential during rotation without changing its in-flight request", async () => {
+  const { service, secrets, storage } = await fixture();
+  const saved = await service.save({
+    name: "Probe only",
+    provider: "typesafe",
+    settings: {},
+    credentials: { apiKey: "probe-original-jev" },
+  });
+  const classifier = new JevClassifier(service);
+  let authorization: string | null = null;
+  const request = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(async (_url, options) => {
+      authorization = new Headers(options?.headers).get("authorization");
+      await service.save({
+        ...saved,
+        credentials: { apiKey: "probe-replacement-jev" },
+      });
+      await service.delete(saved.id);
+      return Response.json({ models: [] });
+    });
+  try {
+    expect((await classifier.testConnection(saved.id)).ok).toBe(true);
+    expect(authorization).toBe("Bearer probe-original-jev");
+    expect(secrets.values.size).toBe(0);
+    expect((await storage.read()).retainedReferences).toEqual([]);
+  } finally {
+    request.mockRestore();
+    await classifier.close();
+  }
+});
+it("redacts retained credential versions and denies copied workspace references", async () => {
+  const source = await fixture();
+  const saved = await source.service.save({
+    name: "Provider",
+    provider: "openai",
+    settings: {},
+    credentials: { apiKey: "historical-secret" },
+  });
+  const frozen = await source.service.freeze({
+    connectionId: saved.id,
+    provider: saved.provider,
+    settings: {},
+    credentialFields: [],
+  });
+  await source.service.save({
+    ...saved,
+    credentials: { apiKey: "current-secret" },
+  });
+  expect(await source.service.redactionSecrets([frozen])).toEqual([
+    "historical-secret",
+  ]);
+  const copy = await fixture();
+  await writeFile(
+    copy.storage.filename,
+    await readFile(source.storage.filename),
+  );
+  await expect(copy.service.resolveCredentials(frozen)).rejects.toThrow(
+    /current workspace/i,
+  );
+  await copy.service.delete(saved.id);
+  expect(await source.service.resolveCredentials(frozen)).toEqual({
+    apiKey: "historical-secret",
+  });
+});
+it("upgrades compatible legacy selections explicitly without changing historical snapshots", async () => {
+  const { service, secrets, storage } = await fixture();
+  const reference = await secrets.allocate();
+  await secrets.write(reference, JSON.stringify({ apiKey: "legacy-secret" }));
+  await writeFile(
+    storage.filename,
+    JSON.stringify({
+      version: 2,
+      records: [
+        {
+          id: "legacy",
+          name: "Legacy",
+          provider: "openai",
+          settings: {},
+          credentialFields: ["apiKey"],
+          hasCredentials: true,
+          secretReference: reference,
+        },
+      ],
+      pendingDeletes: [],
+    }),
+  );
+  const legacy = {
+    connectionId: "legacy",
+    provider: "openai",
+    settings: { authMode: "api-key" },
+    credentialFields: ["apiKey"],
+  };
+  const original = JSON.stringify(legacy);
+  await expect(service.materialize([legacy], [])).rejects.toThrow(/rebind/i);
+  const upgraded = await service.freeze(legacy);
+  expect(upgraded.credentialBinding?.reference).not.toBe(reference);
+  expect(await service.resolveCredentials(upgraded)).toEqual({
+    apiKey: "legacy-secret",
+  });
+  expect(JSON.stringify(legacy)).toBe(original);
+  expect(secrets.values.has(reference)).toBe(false);
+  await expect(service.materialize([legacy], [])).rejects.toThrow(/rebind/i);
+});
+it("rebinds a copied snapshot only on explicit reuse with matching local credentials", async () => {
+  const source = await fixture();
+  const saved = await source.service.save({
+    name: "Gateway",
+    provider: "openai",
+    settings: { baseUrl: "https://original.example/v1" },
+    credentials: { apiKey: "source-secret" },
+  });
+  const frozen = await source.service.freeze({
+    connectionId: saved.id,
+    provider: saved.provider,
+    settings: {},
+    credentialFields: [],
+  });
+  const original = JSON.stringify(frozen);
+  const copy = await fixture();
+  await writeFile(
+    copy.storage.filename,
+    await readFile(source.storage.filename),
+  );
+  await copy.service.save({
+    ...saved,
+    credentials: { apiKey: "local-secret" },
+  });
+  await expect(copy.service.materialize([frozen], [])).rejects.toThrow(
+    /rebind/i,
+  );
+  const rebound = await copy.service.freeze(frozen);
+  expect(rebound.credentialBinding?.reference).not.toBe(
+    frozen.credentialBinding?.reference,
+  );
+  expect(await copy.service.resolveCredentials(rebound)).toEqual({
+    apiKey: "local-secret",
+  });
+  expect(JSON.stringify(frozen)).toBe(original);
+  await expect(copy.service.materialize([frozen], [])).rejects.toThrow(
+    /rebind/i,
+  );
+  await copy.service.save({
+    ...saved,
+    settings: { baseUrl: "https://other.example/v1" },
+    credentials: { apiKey: "another-local-secret" },
+  });
+  await expect(copy.service.freeze(frozen)).rejects.toThrow(/rebind/i);
+  const reopened = new ConnectionService(source.directory, source.secrets);
+  await reopened.delete(saved.id);
+  expect(await reopened.resolveCredentials(frozen)).toEqual({
+    apiKey: "source-secret",
+  });
+});
 it("freezes provider authentication and materializes only its selected secret", async () => {
   const { service } = await fixture();
   const saved = await service.save({
@@ -212,7 +622,7 @@ it("stores credential references and returns public connection records only", as
   expect(
     await readFile(path.join(directory, "connections.json"), "utf8"),
   ).not.toContain(secret);
-  expect((await service.credentials(record.id)).patValue).toBe(secret);
+  expect((await service.snapshot(record.id)).credentials.patValue).toBe(secret);
   const binding = await service.freeze({
     connectionId: record.id,
     provider: "tableau",
@@ -231,7 +641,9 @@ it("stores credential references and returns public connection records only", as
   expect(
     await readFile(path.join(directory, "connections.json"), "utf8"),
   ).not.toContain(secret);
-  expect(await service.credentials(typesafe.id)).toEqual({ apiKey: secret });
+  expect((await service.snapshot(typesafe.id)).credentials).toEqual({
+    apiKey: secret,
+  });
   expect(
     await service.freeze({
       connectionId: typesafe.id,
@@ -277,7 +689,25 @@ it("retains the current credential after an interrupted replacement and recovers
   await expect(
     service.save({ ...record, credentials: { apiKey: "replacement" } }),
   ).rejects.toThrow("Interrupted write");
-  expect(await service.credentials(record.id)).toEqual({ apiKey: "first" });
+  const stored = (await storage.read()).records.find(
+    (item) => item.id === record.id,
+  )!;
+  const protectedValue = JSON.parse(
+    await secrets.read(stored.secretReference!),
+  ) as { identity: string };
+  expect(
+    await service.resolveCredentials({
+      connectionId: record.id,
+      provider: record.provider,
+      settings: record.settings,
+      credentialFields: record.credentialFields,
+      credentialBinding: {
+        version: 1,
+        reference: stored.secretReference!,
+        identity: protectedValue.identity,
+      },
+    }),
+  ).toEqual({ apiKey: "first" });
   expect((await storage.read()).pendingDeletes).toHaveLength(1);
   secrets.failWrite = false;
   await migrateConnections(directory, secrets);
@@ -297,7 +727,25 @@ it("publishes replacement before retirement and retries failed cleanup after res
   await expect(
     service.save({ ...record, credentials: { apiKey: "replacement" } }),
   ).rejects.toThrow();
-  expect(await service.credentials(record.id)).toEqual({
+  const stored = (await storage.read()).records.find(
+    (item) => item.id === record.id,
+  )!;
+  const protectedValue = JSON.parse(
+    await secrets.read(stored.secretReference!),
+  ) as { identity: string };
+  expect(
+    await service.resolveCredentials({
+      connectionId: record.id,
+      provider: record.provider,
+      settings: record.settings,
+      credentialFields: record.credentialFields,
+      credentialBinding: {
+        version: 1,
+        reference: stored.secretReference!,
+        identity: protectedValue.identity,
+      },
+    }),
+  ).toEqual({
     apiKey: "replacement",
   });
   expect((await storage.read()).pendingDeletes).toHaveLength(1);
@@ -345,7 +793,9 @@ it("converts legacy records once and imports foreign metadata without ciphertext
   await migrateConnections(directory, secrets, async () =>
     JSON.stringify({ apiKey: "first" }),
   );
-  expect(await service.credentials("legacy")).toEqual({ apiKey: "first" });
+  expect((await service.snapshot("legacy")).credentials).toEqual({
+    apiKey: "first",
+  });
   expect(await readFile(storage.filename, "utf8")).not.toContain("ciphertext");
   const copy = await fixture();
   await writeFile(copy.storage.filename, JSON.stringify(legacy));

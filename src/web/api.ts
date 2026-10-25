@@ -5,6 +5,17 @@ import type {
   CommandResultMap,
 } from "../contracts.js";
 
+export class CommandError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = "CommandError";
+  }
+}
+
 export async function command<K extends CommandName>(
   operation: K,
   input: CommandInput<K>,
@@ -18,8 +29,10 @@ export async function command<K extends CommandName>(
   });
   const body = await response.json();
   if (!response.ok)
-    throw new Error(
+    throw new CommandError(
       body.error?.message ?? `Request failed (${response.status}).`,
+      response.status,
+      body.error?.code,
     );
   return body as CommandResultMap[K];
 }

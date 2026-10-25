@@ -2,7 +2,11 @@ import { savedTarget } from "../contracts/targets.js";
 import {
   evaluatorSettingsSchema,
   type Bank,
+  type BankFinding,
   type BankRevision,
+  type BankPublication,
+  type BankExportPackage,
+  type CommandValue,
   type Blueprint,
   type EvaluatorDraft,
   type EvaluatorRevision,
@@ -17,151 +21,261 @@ import {
   referenceAnswerValue,
   validateSubmittedAnswer,
 } from "../contracts/answer-format.js";
-import { calibrateSettings, validateBankPolicies } from "./calibration.js";
+import { calibrateSettings, validateBankReferences } from "./calibration.js";
+
+export function prepareQuestions(questions: Question[]): Question[] {
+  if (
+    new Set(questions.map((question) => question.id)).size !== questions.length
+  )
+    throw new AppError(
+      "invalid_input",
+      "Question IDs must be unique within a bank.",
+    );
+  return questions.map((question) => {
+    try {
+      const derived = deriveAnswerFormat(question.expected);
+      if (
+        question.answerFormat &&
+        derived &&
+        question.answerFormat.type === "table" &&
+        derived.type === "table" &&
+        (question.answerFormat.columns.length !== derived.columns.length ||
+          question.answerFormat.columns.some((column, index) => {
+            const reference = derived.columns[index]!;
+            return (
+              column.name !== reference.name ||
+              column.type !== reference.type ||
+              (reference.nullable && !column.nullable)
+            );
+          }))
+      )
+        throw new AppError(
+          "invalid_input",
+          `Question ${question.id} has a public answer format that conflicts with its reference columns. Update both declarations before publishing.`,
+        );
+      if (question.answerFormat) {
+        const value = referenceAnswerValue(question.expected);
+        if (!validateSubmittedAnswer(question.answerFormat, value).ok)
+          throw new AppError(
+            "invalid_input",
+            `Question ${question.id} has a public answer format incompatible with its reference answer.`,
+          );
+      }
+      // Reference nullability is a grading rule, not an inferred source constraint.
+      const answerFormat =
+        question.answerFormat ??
+        (derived?.type === "table"
+          ? {
+              ...derived,
+              columns: derived.columns.map((column) => ({
+                ...column,
+                nullable: true,
+              })),
+            }
+          : derived);
+      return answerFormat ? { ...question, answerFormat } : question;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(
+        "invalid_input",
+        `Question ${question.id} has invalid table column metadata. Declare unique column names and supported types before publication.`,
+      );
+    }
+  });
+}
 
 export class CatalogService {
   constructor(private readonly db: Database) {}
-  private checkQuestions(questions: Question[]): void {
-    if (new Set(questions.map((q) => q.id)).size !== questions.length)
+  async publishBank(
+    input: CommandValue<"banks.publish">,
+    findingDecision?: {
+      source: BankFinding;
+      resolution: NonNullable<BankFinding["resolution"]>;
+    },
+  ): Promise<BankPublication> {
+    const captured = input.bankId
+      ? this.db.require("bank", input.bankId)
+      : undefined;
+    if (!captured && (input.baseRevisionId || input.baseEvaluatorRevisionId))
       throw new AppError(
         "invalid_input",
-        "Question IDs must be unique within a bank.",
+        "Publication guards require an existing bank.",
       );
-  }
-  createBank(input: {
-    name: string;
-    questions: Question[];
-    evaluator?: EvaluatorSettings;
-  }): BankRevision {
-    this.checkQuestions(input.questions);
+    if (captured && (!input.baseRevisionId || !input.baseEvaluatorRevisionId))
+      throw new AppError(
+        "invalid_input",
+        "Publishing an existing bank requires both base revision guards. Reload the bank before publishing.",
+      );
+    if (
+      captured &&
+      ((input.baseRevisionId &&
+        input.baseRevisionId !== captured.latestRevisionId) ||
+        (input.baseEvaluatorRevisionId &&
+          input.baseEvaluatorRevisionId !== captured.activeEvaluatorRevisionId))
+    )
+      throw new AppError(
+        "conflict",
+        "The published bank or active evaluator changed. Reload before publishing your draft.",
+      );
+    const questions = prepareQuestions(input.questions);
+    const bankId = captured?.id ?? id("bank");
+    const revision: BankRevision = {
+      id: id("bankrev"),
+      bankId,
+      number: captured
+        ? this.db.require("bankRevision", captured.latestRevisionId).number + 1
+        : 1,
+      createdAt: now(),
+      name: input.name,
+      questions,
+      digest: digest(questions),
+    };
+    const calibration = await calibrateSettings(
+      revision,
+      input.evaluatorSettings,
+    );
+    if (calibration.passed !== calibration.total)
+      throw new AppError(
+        "calibration_failed",
+        "Bank publication failed calibration. Review the failed examples before publishing.",
+      );
     return this.db.transaction(() => {
-      const bankId = id("bank");
-      const evaluator: EvaluatorRevision = {
-        id: id("evaluator"),
-        bankId,
-        number: 1,
-        createdAt: now(),
-        name: "Default evaluator",
-        settings: input.evaluator ?? evaluatorSettingsSchema.parse({}),
-        digest: "",
-      };
-      evaluator.digest = digest(evaluator.settings);
-      validateBankPolicies({ questions: input.questions }, evaluator.settings);
-      this.db.insert("evaluator", evaluator, true);
-      const revision = this.makeRevision(
-        bankId,
-        1,
-        input.name,
-        input.questions,
-      );
-      this.db.insert("bank", {
-        id: bankId,
-        name: input.name,
-        createdAt: now(),
-        latestRevisionId: revision.id,
-        activeEvaluatorRevisionId: evaluator.id,
-      });
-      return revision;
-    });
-  }
-  private makeRevision(
-    bankId: string,
-    number: number,
-    name: string,
-    questions: Question[],
-  ): BankRevision {
-    const publishedQuestions = questions.map((question) => {
-      try {
-        const derived = deriveAnswerFormat(question.expected);
+      if (findingDecision) {
+        const currentFinding = this.db.require(
+          "bankFinding",
+          findingDecision.source.id,
+        );
         if (
-          question.answerFormat &&
-          derived &&
-          question.answerFormat.type === "table" &&
-          derived.type === "table" &&
-          (question.answerFormat.columns.length !== derived.columns.length ||
-            question.answerFormat.columns.some((column, index) => {
-              const reference = derived.columns[index]!;
-              return (
-                column.name !== reference.name ||
-                column.type !== reference.type ||
-                (reference.nullable && !column.nullable)
-              );
-            }))
+          currentFinding.bankId !== bankId ||
+          currentFinding.status !== "open" ||
+          digest(currentFinding) !== digest(findingDecision.source)
         )
           throw new AppError(
-            "invalid_input",
-            `Question ${question.id} has a public answer format that conflicts with its reference columns. Update both declarations before publishing.`,
+            "conflict",
+            "The finding decision changed during calibration. Reload the finding before resolving it.",
           );
-        if (question.answerFormat) {
-          const value = referenceAnswerValue(question.expected);
-          if (!validateSubmittedAnswer(question.answerFormat, value).ok)
-            throw new AppError(
-              "invalid_input",
-              `Question ${question.id} has a public answer format incompatible with its reference answer.`,
-            );
-        }
-        // Reference nullability is a grading rule, not an inferred source constraint.
-        const answerFormat =
-          question.answerFormat ??
-          (derived?.type === "table"
-            ? {
-                ...derived,
-                columns: derived.columns.map((column) => ({
-                  ...column,
-                  nullable: true,
-                })),
-              }
-            : derived);
-        return answerFormat ? { ...question, answerFormat } : question;
-      } catch (error) {
-        if (error instanceof AppError) throw error;
-        throw new AppError(
-          "invalid_input",
-          `Question ${question.id} has invalid table column metadata. Declare unique column names and supported types before publication.`,
-        );
       }
-    });
-    return this.db.insert(
-      "bankRevision",
-      {
-        id: id("bankrev"),
-        bankId,
-        number,
-        createdAt: now(),
-        name,
-        questions: publishedQuestions,
-        digest: digest(publishedQuestions),
-      },
-      true,
-    );
-  }
-  reviseBank(input: {
-    bankId: string;
-    name: string;
-    questions: Question[];
-  }): BankRevision {
-    this.checkQuestions(input.questions);
-    return this.db.transaction(() => {
-      const bank = this.db.require("bank", input.bankId);
-      const previous = this.db.require("bankRevision", bank.latestRevisionId);
-      const evaluator = this.db.require(
+      const current = captured
+        ? this.db.require("bank", captured.id)
+        : undefined;
+      if (
+        current &&
+        (current.latestRevisionId !== captured!.latestRevisionId ||
+          current.activeEvaluatorRevisionId !==
+            captured!.activeEvaluatorRevisionId)
+      )
+        throw new AppError(
+          "conflict",
+          "The bank or active evaluator changed during calibration. Review the latest revision before publishing.",
+        );
+      const previousEvaluators = this.db.list("evaluator", { bankId });
+      const evaluatorRevision = this.db.insert(
         "evaluator",
-        bank.activeEvaluatorRevisionId,
+        {
+          id: id("evaluator"),
+          bankId,
+          number:
+            Math.max(0, ...previousEvaluators.map((value) => value.number)) + 1,
+          createdAt: now(),
+          name: input.evaluatorName,
+          settings: input.evaluatorSettings,
+          digest: digest(input.evaluatorSettings),
+          calibration,
+        },
+        true,
       );
-      validateBankPolicies({ questions: input.questions }, evaluator.settings);
-      const revision = this.makeRevision(
-        bank.id,
-        previous.number + 1,
-        input.name,
-        input.questions,
-      );
-      this.db.update("bank", {
-        ...bank,
+      this.db.insert("bankRevision", revision, true);
+      const bank: Bank = {
+        ...(current ?? { id: bankId, createdAt: now() }),
         name: input.name,
         latestRevisionId: revision.id,
+        activeEvaluatorRevisionId: evaluatorRevision.id,
+      };
+      if (current) this.db.update("bank", bank);
+      else this.db.insert("bank", bank);
+      if (findingDecision)
+        this.db.update("bankFinding", {
+          ...findingDecision.source,
+          status: "accepted",
+          resolution: {
+            ...findingDecision.resolution,
+            bankRevisionId: revision.id,
+          },
+        });
+      this.db.append({
+        type: "bank.published",
+        message: `Published question revision ${revision.number} and grading revision ${evaluatorRevision.number}.`,
+        data: {
+          bankId,
+          bankRevisionId: revision.id,
+          evaluatorRevisionId: evaluatorRevision.id,
+        },
       });
-      return revision;
+      return { revision, evaluatorRevision };
     });
+  }
+  exportPackage(
+    input: CommandValue<"banks.export-package">,
+  ): BankExportPackage {
+    const revision = this.db.require("bankRevision", input.bankRevisionId);
+    const bank = this.db.require("bank", revision.bankId);
+    const evaluator = this.db.require(
+      "evaluator",
+      input.evaluatorRevisionId ?? bank.activeEvaluatorRevisionId,
+    );
+    if (evaluator.bankId !== bank.id)
+      throw new AppError(
+        "incompatible_basis",
+        "The evaluator belongs to a different question bank.",
+      );
+    validateBankReferences(revision, evaluator.settings);
+    const profileId =
+      input.jevProfileRevisionId ?? bank.activeJevProfileRevisionId;
+    const profile = profileId
+      ? this.db.require("jevProfile", profileId)
+      : undefined;
+    if (profile && profile.bankId !== bank.id)
+      throw new AppError(
+        "incompatible_basis",
+        "The Jev profile belongs to a different question bank.",
+      );
+    return {
+      format: "agent-evaluation-harness/question-bank",
+      version: 1,
+      name: revision.name,
+      questions: revision.questions,
+      evaluator: { name: evaluator.name, settings: evaluator.settings },
+      ...(profile
+        ? { jevProfile: { name: profile.name, settings: profile.settings } }
+        : {}),
+      source: {
+        bankRevisionId: revision.id,
+        evaluatorRevisionId: evaluator.id,
+        ...(profile ? { jevProfileRevisionId: profile.id } : {}),
+      },
+    };
+  }
+  async createBank(input: CommandValue<"banks.create">): Promise<BankRevision> {
+    const publication = await this.publishBank({
+      name: input.name,
+      questions: input.questions,
+      evaluatorName: "Default evaluator",
+      evaluatorSettings: input.evaluator ?? evaluatorSettingsSchema.parse({}),
+    });
+    return publication.revision;
+  }
+  async reviseBank(input: CommandValue<"banks.revise">): Promise<BankRevision> {
+    const bank = this.db.require("bank", input.bankId);
+    const evaluator = this.db.require(
+      "evaluator",
+      bank.activeEvaluatorRevisionId,
+    );
+    const publication = await this.publishBank({
+      ...input,
+      evaluatorName: evaluator.name,
+      evaluatorSettings: evaluator.settings,
+    });
+    return publication.revision;
   }
   saveDraft(input: {
     bankId: string;

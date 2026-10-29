@@ -80,8 +80,9 @@ Portable command fixtures cannot establish actual Mac CLI isolation, authenticat
 
 ## Validation and release limits
 
-The [CI configuration](../.github/workflows/ci.yml) defines Windows, Linux, macOS 15, and macOS 15 Intel jobs with Node.js 22.13.0 and 24.
-Configured jobs are not evidence that a particular revision passed.
+The [local pre-push gate](architecture.md#build-tooling-and-change-placement) runs validation on the pushing machine.
+No hosted operating-system or Node.js matrix runs automatically.
+A local Windows pass does not establish macOS acceptance.
 The [runtime reliability review](runtime-review-2026-10-09.md) records earlier macOS fixture failures and subsequent local regression scope.
 The [HTTP verification record](http-target-verification.md) separately records historical Windows and Linux checks.
 Those dated records do not certify the current working tree.

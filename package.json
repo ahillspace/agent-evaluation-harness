@@ -18,6 +18,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check:architecture": "node scripts/architecture-check.mjs",
+    "hooks:install": "tsx scripts/local-ci.ts install",
     "validate": "npm run format:check && npm run check:architecture && npm run typecheck && npm run lint && npm test && npm run build"
   },
   "dependencies": {

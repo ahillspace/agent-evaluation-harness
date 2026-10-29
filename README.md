@@ -132,5 +132,26 @@ The development interface uses port 5181 and forwards API requests to port 4381.
 
 Run `npm run validate` for formatting, architecture boundaries, types, lint, tests, and the production build.
 Ordinary tests use local fixtures and do not spend model tokens.
+
+Install the local pre-push gate in each checkout after installing dependencies:
+
+```sh
+npm ci
+npm run hooks:install
+```
+
+Commit or stash changes, keep the checkout idle, and push your checked-out branch normally.
+The hook runs `npm run validate` locally before Git sends updates and reports the validated commit.
+It rejects dirty files, submodule changes, unrelated outgoing commits, and changes detected during validation.
+Tags must resolve to HEAD; push other branches from their own checked-out commits.
+Deletion-only pushes skip validation.
+An existing conflicting `core.hooksPath` stops installation without replacing your hooks.
+Custom files in Git's default hooks directory also stop installation; integrate those hooks before installing the gate.
+
+This gate uses your machine and requires no GitHub Actions minutes, account upgrade, or hosted runner.
+It validates only your local platform and Node.js version; native Mac acceptance remains separate.
+GitHub does not enforce local hooks, and clones need their own installation.
+See [local gate guarantees](docs/architecture.md#build-tooling-and-change-placement) for details and limits.
+
 Read the [build charter](docs/build-charter.md), [architecture](docs/architecture.md), and [acceptance criteria](docs/acceptance.md) before substantial changes.
 The previous repository is reference material only and is not a dependency.

@@ -1,0 +1,2 @@
+#!/bin/sh
+exec node --import tsx scripts/local-ci.ts pre-push "$@"

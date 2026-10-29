@@ -204,8 +204,25 @@ Development uses separate API and Vite processes; the default proxy targets API 
 
 The package is private.
 No installer or release-publication workflow is present.
-[CI](../.github/workflows/ci.yml) configures installation and validation on Node.js 22.13.0 and 24 across Windows, Ubuntu, macOS ARM64, and macOS Intel.
-Configured jobs do not prove those platforms passed.
+There is no active hosted CI workflow.
+The [pre-push hook](../.githooks/pre-push) calls the [local CI runner](../scripts/local-ci.ts), which owns installation and push validation.
+Install it with **npm run hooks:install** after **npm ci** in each checkout.
+The installer preserves conflicting effective **core.hooksPath** settings, including inherited settings.
+When that setting is absent, non-sample files in Git's resolved default hooks directory also prevent installation.
+
+For outgoing updates, the runner requires every non-deletion commit, including peeled annotated tags, to equal the initial HEAD.
+It rejects tracked, staged, untracked, and submodule changes before running **npm run validate** one time with closed standard input.
+It forwards validation output and failure status, then rechecks HEAD and checkout cleanliness before reporting the validated commit.
+Deletion-only pushes need no validation.
+Push unrelated branches or tags separately from their own checked-out commits.
+
+Keep the checkout idle throughout validation and push.
+These checks detect persistent changes; they do not provide a filesystem snapshot or detect changes reverted between checks.
+Ignored dependencies and generated output are outside the cleanliness check.
+The gate runs on your machine without GitHub Actions minutes or hosted runners.
+Local hooks require installation and can be bypassed by Git, so they are not server-enforced branch protection.
+Passing locally establishes results only for that machine's operating system and Node.js version.
+Native Mac acceptance and other platform checks require separate recorded results.
 Generated builds, dependencies, workspaces, and databases are ignored and are not architecture sources.
 
 | Change                  | Primary owner and verification                                             |

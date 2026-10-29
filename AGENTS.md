@@ -34,6 +34,10 @@ Do not import, symlink, edit, or delete its files or data.
 
 Run `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build` for substantial changes.
 `npm run validate` also runs formatting and production import-boundary checks.
+Install the local pre-push gate with `npm run hooks:install` after `npm ci` in each checkout.
+Push from a clean, idle checkout with all outgoing commits and tags resolving to HEAD.
+The hook runs `npm run validate`; do not bypass it to publish changes.
+See the architecture's build section for local gate guarantees and platform limits.
 Maintained TypeScript scripts participate in type checking; verify their workflows in isolated workspaces when changing them.
 For documentation changes, check formatting, local links and anchors, source claims, and navigation.
 Use bounded local tests before costly provider calls.

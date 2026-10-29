@@ -10,7 +10,7 @@ import { processEntry } from "./entry.js";
 import {
   delay,
   drainGroup,
-  groupExists,
+  inspectGroup,
   readLease,
   verifyOwner,
   processIdentity,
@@ -76,15 +76,19 @@ export class PosixProcessDriver implements ProcessDriver {
               const lease = await readLease(this.filename(input.id));
               if (lease.id !== input.id)
                 throw new Error("Scope identity mismatch.");
-              if (lease.runnerPid && groupExists(lease.runnerPid))
-                await drainGroup(lease.runnerPid, () =>
-                  verifyOwner(
-                    lease.runnerPid!,
-                    lease.runnerStarted,
-                    input.id,
-                    processEntry("posix-runner").source,
-                  ),
-                );
+              if (
+                lease.runnerPid &&
+                (await inspectGroup(lease.runnerPid)).status !== "empty"
+              )
+                await drainGroup(lease.runnerPid, {
+                  verify: () =>
+                    verifyOwner(
+                      lease.runnerPid!,
+                      lease.runnerStarted,
+                      input.id,
+                      processEntry("posix-runner").source,
+                    ),
+                });
             } finally {
               if (child.exitCode === null && child.signalCode === null)
                 child.kill("SIGKILL");
@@ -136,31 +140,26 @@ export class PosixProcessDriver implements ProcessDriver {
       // IPC disconnect gives the runner time to finish its own group shutdown.
       for (
         let attempt = 0;
-        attempt < 20 && lease.runnerPid && groupExists(lease.runnerPid);
+        attempt < 20 &&
+        lease.runnerPid &&
+        (await inspectGroup(lease.runnerPid)).status === "live";
         attempt++
       )
         await delay(50);
     }
-    if (lease.runnerPid && groupExists(lease.runnerPid)) {
-      if (
-        !(await verifyOwner(
-          lease.runnerPid,
-          lease.runnerStarted,
-          id,
-          processEntry("posix-runner").source,
-        ))
-      )
-        throw new Error(
-          "Group leader is unavailable; remaining process ownership cannot be verified.",
-        );
-      await drainGroup(lease.runnerPid, () =>
-        verifyOwner(
-          lease.runnerPid!,
-          lease.runnerStarted,
-          id,
-          processEntry("posix-runner").source,
-        ),
-      );
+    if (
+      lease.runnerPid &&
+      (await inspectGroup(lease.runnerPid)).status !== "empty"
+    ) {
+      await drainGroup(lease.runnerPid, {
+        verify: () =>
+          verifyOwner(
+            lease.runnerPid!,
+            lease.runnerStarted,
+            id,
+            processEntry("posix-runner").source,
+          ),
+      });
     }
     await unlink(filename);
   }

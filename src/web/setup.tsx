@@ -1,8 +1,9 @@
 import { ExternalAgentPicker } from "./external-agents.js";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { researchSchema } from "../contracts.js";
 import type { RuntimeCatalog, WorkspaceView } from "../contracts.js";
-import { command, navigate, useResource } from "./api.js";
+import type { JevProfileRevision } from "../contracts.js";
+import { command, CommandError, navigate, useResource } from "./api.js";
 import {
   createLaunch,
   objectJson,
@@ -14,6 +15,7 @@ import { parseToolCatalog, type ToolChoice } from "./tools.js";
 
 import { AgentSettings } from "./agent-settings.js";
 import { EvaluationSettings } from "./evaluation-settings.js";
+import { jevConfigurationIssues } from "./jev-configuration.js";
 import { RunQuestions } from "./run-questions.js";
 import { RunTools } from "./run-tools.js";
 import { ResearchSettings } from "./research-settings.js";
@@ -23,6 +25,8 @@ import {
   decodeSetupDraft,
   encodeSetupDraft,
   selectedQuestionIds,
+  pendingLaunchSchema,
+  type PendingLaunch,
 } from "./setup-draft.js";
 import { useRoleCatalog } from "./setup-discovery.js";
 import { hydrateSetupSource } from "./setup-source.js";
@@ -68,14 +72,28 @@ export function Setup({
       return undefined;
     }
   });
-  const restoreSaved = !!saved && (!source || saved.source === source);
+  const restoreSaved =
+    !!saved && (!!saved.pendingLaunch || !source || saved.source === source);
+  const mounted = useRef(false);
+  const acknowledged = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const [pendingLaunch, setPendingLaunch] = useState<PendingLaunch | undefined>(
+    () => (restoreSaved ? saved?.pendingLaunch : undefined),
+  );
   const [draft, setDraft] = useState<SetupDraft>(() =>
     restoreSaved ? saved!.draft : initialSetup(),
   );
   const [section, setSection] = useState<string>(() =>
     restoreSaved ? saved!.section : "agent",
   );
-  const [draftSource, setDraftSource] = useState(source || saved?.source || "");
+  const [draftSource, setDraftSource] = useState(
+    restoreSaved ? saved!.source : source,
+  );
   const [draftReady, setDraftReady] = useState(!source || restoreSaved);
   const [storageError, setStorageError] = useState<unknown>(null);
   const [runtime, setRuntime] = useState<RuntimeCatalog | undefined>(
@@ -86,6 +104,8 @@ export function Setup({
   const [toolsError, setToolsError] = useState<unknown>(null);
   const [modelsError, setModelsError] = useState<unknown>(null);
   const [error, setError] = useState<unknown>(null);
+  const [publishedJevProfile, setPublishedJevProfile] =
+    useState<JevProfileRevision | null>(null);
   const [pending, setPending] = useState(false);
   const [loadingSource, setLoadingSource] = useState(!!source && !restoreSaved);
   const [toolsRefresh, setToolsRefresh] = useState(0);
@@ -179,7 +199,7 @@ export function Setup({
     modelsRefresh,
   ]);
   useEffect(() => {
-    if (!draftReady) return;
+    if (!draftReady || acknowledged.current) return;
     if (!storageKey) {
       setStorageError(
         new Error(
@@ -191,13 +211,14 @@ export function Setup({
     try {
       if (
         JSON.stringify(draft) === JSON.stringify(initialSetup()) &&
-        section === "agent"
+        section === "agent" &&
+        !pendingLaunch
       )
         sessionStorage.removeItem(storageKey);
       else
         sessionStorage.setItem(
           storageKey,
-          encodeSetupDraft(draft, section, draftSource),
+          encodeSetupDraft(draft, section, draftSource, pendingLaunch),
         );
       setStorageError(null);
     } catch (cause) {
@@ -209,7 +230,7 @@ export function Setup({
         ),
       );
     }
-  }, [draft, section, draftSource, draftReady, storageKey]);
+  }, [draft, section, draftSource, draftReady, storageKey, pendingLaunch]);
   useEffect(() => {
     if (restoreSaved || !source) return;
     const controller = new AbortController();
@@ -257,6 +278,14 @@ export function Setup({
     (item) => item.id === draft.bankRevisionId,
   );
   const bankRecord = workspace.banks.find((item) => item.id === selectedBankId);
+  const jevIssues = draft.jevEnabled
+    ? jevConfigurationIssues(
+        draft.jevSelection,
+        workspace.connections,
+        detail.data ?? undefined,
+        publishedJevProfile ? [publishedJevProfile] : [],
+      )
+    : undefined;
   const published = workspace.banks.map((item) => ({
     id: item.latestRevisionId,
     name: item.name,
@@ -273,85 +302,132 @@ export function Setup({
   const launch = async () => {
     setPending(true);
     setError(null);
+    let request = pendingLaunch;
+    let persisted = !!request;
     try {
-      const input = {
-        ...createLaunch(draft),
-        idempotencyKey: crypto.randomUUID(),
-      };
-      if (draft.research && draft.targetKind === "managed") {
-        const result = await command("research.launch", {
-          ...researchOptions.parse(objectJson(draft.researchSettings)),
-          name: draft.name,
-          baseline: input,
-          researcher: {
-            harness: draft.researcherHarness,
-            model: draft.researcherModel,
-            systemPrompt: initialSetup().researcherPrompt,
-            settings: roleSettings(
-              draft.researcherSettings,
-              draft.researcherProviderConnectionId,
-            ),
-            tools: draft.originalResearcher?.tools ?? [],
-            connections: draft.researcherProviderConnectionId
-              ? [
-                  {
-                    connectionId: draft.researcherProviderConnectionId,
-                    provider: draft.researcherProviderConnectionProvider,
-                    settings:
-                      draft.originalResearcher?.connections.find(
-                        (item) =>
-                          item.connectionId ===
-                          draft.researcherProviderConnectionId,
-                      )?.settings ?? {},
-                    credentialFields:
-                      draft.originalResearcher?.connections.find(
-                        (item) =>
-                          item.connectionId ===
-                          draft.researcherProviderConnectionId,
-                      )?.credentialFields ?? [],
+      if (!request) {
+        const input = {
+          ...createLaunch(draft),
+          idempotencyKey: crypto.randomUUID(),
+        };
+        request = pendingLaunchSchema.parse(
+          draft.research && draft.targetKind === "managed"
+            ? {
+                operation: "research.launch",
+                input: {
+                  ...researchOptions.parse(objectJson(draft.researchSettings)),
+                  name: draft.name,
+                  baseline: input,
+                  researcher: {
+                    harness: draft.researcherHarness,
+                    model: draft.researcherModel,
+                    systemPrompt: initialSetup().researcherPrompt,
+                    settings: roleSettings(
+                      draft.researcherSettings,
+                      draft.researcherProviderConnectionId,
+                    ),
+                    tools: draft.originalResearcher?.tools ?? [],
+                    connections: draft.researcherProviderConnectionId
+                      ? [
+                          {
+                            connectionId: draft.researcherProviderConnectionId,
+                            provider:
+                              draft.researcherProviderConnectionProvider,
+                            settings:
+                              draft.originalResearcher?.connections.find(
+                                (item) =>
+                                  item.connectionId ===
+                                  draft.researcherProviderConnectionId,
+                              )?.settings ?? {},
+                            credentialFields:
+                              draft.originalResearcher?.connections.find(
+                                (item) =>
+                                  item.connectionId ===
+                                  draft.researcherProviderConnectionId,
+                              )?.credentialFields ?? [],
+                            credentialBinding:
+                              draft.originalResearcher?.connections.find(
+                                (item) =>
+                                  item.connectionId ===
+                                  draft.researcherProviderConnectionId,
+                              )?.credentialBinding,
+                          },
+                        ]
+                      : [],
                   },
-                ]
-              : [],
-          },
-          objective: draft.researchInstructions,
-          guidance: "",
-          allowResearcherStop: draft.allowResearcherStop,
-          stopGuidance: draft.stopGuidance || undefined,
-          selectionMetric: draft.selectionMetric,
-          maxCandidates: draft.maxCandidates,
-          maxDurationMs: draft.maxMinutes * 60_000,
-          maxTargetInvocations: draft.maxTargetInvocations,
-          maxResearcherTurns: draft.maxResearcherTurns,
-          maxTotalTokens: draft.maxTotalTokens.trim()
-            ? Number(draft.maxTotalTokens)
-            : undefined,
-          maxCostUsd: draft.maxCostUsd.trim()
-            ? Number(draft.maxCostUsd)
-            : undefined,
-          idempotencyKey: input.idempotencyKey,
-        });
-        try {
-          if (storageKey) sessionStorage.removeItem(storageKey);
-        } catch {
-          /* The run is already saved by the engine. */
-        }
-        navigate(
-          `/observe/${result.session.currentRunId}?session=${result.session.id}`,
+                  objective: draft.researchInstructions,
+                  guidance: "",
+                  allowResearcherStop: draft.allowResearcherStop,
+                  stopGuidance: draft.stopGuidance || undefined,
+                  selectionMetric: draft.selectionMetric,
+                  maxCandidates: draft.maxCandidates,
+                  maxDurationMs: draft.maxMinutes * 60_000,
+                  maxTargetInvocations: draft.maxTargetInvocations,
+                  maxResearcherTurns: draft.maxResearcherTurns,
+                  maxTotalTokens: draft.maxTotalTokens.trim()
+                    ? Number(draft.maxTotalTokens)
+                    : undefined,
+                  maxCostUsd: draft.maxCostUsd.trim()
+                    ? Number(draft.maxCostUsd)
+                    : undefined,
+                  idempotencyKey: input.idempotencyKey,
+                },
+              }
+            : { operation: "runs.launch", input },
         );
-      } else {
-        const result = await command("runs.launch", input);
-        try {
-          if (storageKey) sessionStorage.removeItem(storageKey);
-        } catch {
-          /* The run is already saved by the engine. */
-        }
-        navigate(`/observe/${result.run.id}`);
+        if (!storageKey)
+          throw new Error(
+            "Wait for the workspace identity before starting a run.",
+          );
+        sessionStorage.setItem(
+          storageKey,
+          encodeSetupDraft(draft, section, draftSource, request),
+        );
+        persisted = true;
+        acknowledged.current = false;
+        setPendingLaunch(request);
       }
+      let destination: string;
+      if (request.operation === "research.launch") {
+        const result = await command("research.launch", request.input);
+        if (!result.session.currentRunId)
+          throw new Error(
+            "The engine did not return a baseline Run for this research launch.",
+          );
+        destination = `/observe/${result.session.currentRunId}?session=${result.session.id}`;
+      } else {
+        const result = await command("runs.launch", request.input);
+        destination = `/observe/${result.run.id}`;
+      }
+      if (!mounted.current) return;
+      acknowledged.current = true;
+      setPendingLaunch(undefined);
+      try {
+        if (storageKey) sessionStorage.removeItem(storageKey);
+      } catch {
+        /* The accepted request remains safely replayable if storage is unavailable. */
+      }
+      navigate(destination);
       refresh();
     } catch (cause) {
-      setError(cause);
+      if (!mounted.current) return;
+      if (
+        cause instanceof CommandError &&
+        cause.status >= 400 &&
+        cause.status < 500 &&
+        cause.code !== "conflict"
+      ) {
+        setPendingLaunch(undefined);
+        setError(cause);
+      } else if (persisted) {
+        setError(
+          new Error(
+            `${cause instanceof Error ? cause.message : String(cause)} Retry launch to recover this same request.`,
+          ),
+        );
+      } else setError(cause);
     } finally {
-      setPending(false);
+      if (mounted.current) setPending(false);
     }
   };
   if (loadingSource)
@@ -366,13 +442,21 @@ export function Setup({
           className="button secondary"
           disabled={pending}
           onClick={() => {
-            if (!window.confirm("Discard this setup draft and start fresh?"))
+            if (
+              !window.confirm(
+                pendingLaunch
+                  ? "This launch might already be saved. Retry launch to recover it, or reset to start a separate evaluation?"
+                  : "Discard this setup draft and start fresh?",
+              )
+            )
               return;
             try {
               if (storageKey) sessionStorage.removeItem(storageKey);
             } catch {
               /* Reported by the persistence effect. */
             }
+            acknowledged.current = false;
+            setPendingLaunch(undefined);
             setDraft(initialSetup());
             setSection("agent");
             setDraftSource("");
@@ -473,7 +557,10 @@ export function Setup({
                 }
               </Help>
             </div>
-            <div className="panel-body stack">
+            <fieldset
+              className="panel-body stack setup-fields"
+              disabled={pending || !!pendingLaunch}
+            >
               {section === "questions" && (
                 <RunQuestions
                   draft={draft}
@@ -560,6 +647,7 @@ export function Setup({
                   bankRecord={bankRecord}
                   evaluatorRevisions={detail.data?.evaluatorRevisions ?? []}
                   connections={workspace.connections}
+                  onJevProfilePublished={setPublishedJevProfile}
                 />
               )}
               {section === "research" && (
@@ -571,24 +659,34 @@ export function Setup({
                   connections={workspace.connections}
                 />
               )}
-            </div>
+            </fieldset>
             <footer className="setup-footer">
               <span>
                 {bank
                   ? `${selectedQuestionIds(draft, bank.questions).length} questions × ${draft.repetitions} repetitions`
                   : "Choose a question bank"}
               </span>
+              {section !== "evaluation" &&
+                (jevIssues?.connection || jevIssues?.profile) && (
+                  <span className="notice" role="status">
+                    {jevIssues.connection ?? jevIssues.profile} Review the
+                    Evaluation section to update Jev setup.
+                  </span>
+                )}
               <button
                 className="button primary"
                 disabled={
                   pending ||
-                  !draftReady ||
-                  !bank ||
-                  (draft.questionSelection === "selected" &&
-                    !draft.questionIds.length) ||
-                  (draft.targetKind === "external"
-                    ? !draft.externalTarget
-                    : !draft.model.trim())
+                  (!pendingLaunch &&
+                    (!draftReady ||
+                      !bank ||
+                      !!jevIssues?.connection ||
+                      !!jevIssues?.profile ||
+                      (draft.questionSelection === "selected" &&
+                        !draft.questionIds.length) ||
+                      (draft.targetKind === "external"
+                        ? !draft.externalTarget
+                        : !draft.model.trim())))
                 }
                 onClick={() => {
                   void launch();
@@ -597,9 +695,11 @@ export function Setup({
                 <Icon name="run" size={16} />
                 {pending
                   ? "Starting..."
-                  : draft.research
-                    ? "Start research"
-                    : "Start run"}
+                  : pendingLaunch
+                    ? "Retry launch"
+                    : draft.research
+                      ? "Start research"
+                      : "Start run"}
               </button>
             </footer>
           </section>

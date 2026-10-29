@@ -2,8 +2,9 @@ import {
   MODEL_PROVIDERS,
   modelProviderSettings,
   providerEnvironment,
+  effectiveModelEndpoint,
 } from "./model-providers.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type {
   ConnectionBinding,
@@ -16,8 +17,18 @@ import { resolveCommand } from "./commands.js";
 import {
   ConnectionStorage,
   type StoredConnection,
+  type ConnectionFile,
 } from "./connection-storage.js";
 import { SecretStoreError, type SecretStore } from "./secrets/store.js";
+import { TYPESAFE_ENDPOINT } from "./jev-http.js";
+
+const protectedCredential = z
+  .object({
+    version: z.literal(1),
+    identity: z.string(),
+    credentials: z.record(z.string()),
+  })
+  .strict();
 
 const endpoint = z
   .string()
@@ -32,6 +43,40 @@ const endpoint = z
       !url.hash
     );
   }, "Use a server URL without credentials, a query, or a fragment.");
+const tableauEnvironment = z
+  .record(
+    z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+    z
+      .string()
+      .max(20_000)
+      .refine((value) => !value.includes("\0"), {
+        message: "MCP environment values cannot contain NUL characters.",
+      }),
+  )
+  .default({})
+  .refine((value) => Object.keys(value).length <= 100, {
+    message: "Use no more than 100 additional MCP environment variables.",
+  });
+const tableauFeatures = z
+  .record(z.string().min(1).max(200), z.boolean())
+  .default({})
+  .refine((value) => Object.keys(value).length <= 200, {
+    message: "Use no more than 200 MCP feature flags.",
+  });
+const tableauManagedEnvironment = new Set([
+  "TRANSPORT",
+  "AUTH",
+  "SERVER",
+  "SITE_NAME",
+  "PAT_NAME",
+  "PAT_VALUE",
+  "ENABLE_MCP_SITE_SETTINGS",
+  "PRODUCT_TELEMETRY_ENABLED",
+  "DISABLE_LOG_MASKING",
+  "INCLUDE_TOOLS",
+  "EXCLUDE_TOOLS",
+  "AEH_TABLEAU_FEATURE_OVERRIDES",
+]);
 const tableauSettings = z
   .object({
     server: endpoint,
@@ -42,6 +87,8 @@ const tableauSettings = z
       .array(z.string().max(2000))
       .max(100)
       .default(["-y", "@tableau/mcp-server@4.13.3"]),
+    mcpEnv: tableauEnvironment,
+    mcpFeatures: tableauFeatures,
   })
   .strict();
 export interface McpBinding {
@@ -50,6 +97,18 @@ export interface McpBinding {
   args: string[];
   env: Record<string, string>;
   tools: string[];
+  features?: Record<string, boolean>;
+}
+
+export interface ConnectionSnapshot {
+  connection: ConnectionRecord;
+  credentials: Record<string, string>;
+  materialize(tools: string[]): MaterializedConnections;
+}
+interface MaterializedConnections {
+  mcp: McpBinding[];
+  env: Record<string, string>;
+  secrets: string[];
 }
 
 export class ConnectionService {
@@ -80,6 +139,18 @@ export class ConnectionService {
               type: "array",
               items: { type: "string" },
               default: ["-y", "@tableau/mcp-server@4.13.3"],
+            },
+            mcpEnv: {
+              type: "object",
+              title: "Additional MCP environment variables",
+              additionalProperties: { type: "string" },
+              default: {},
+            },
+            mcpFeatures: {
+              type: "object",
+              title: "MCP feature flags",
+              additionalProperties: { type: "boolean" },
+              default: {},
             },
           },
           additionalProperties: false,
@@ -148,6 +219,100 @@ export class ConnectionService {
     this.mutation = next.catch(() => undefined);
     return next;
   }
+  private identity(provider: string, value: Record<string, Json>): string {
+    const settings = this.settings(provider, value);
+    const endpoint = (url: string) => new URL(url).href.replace(/\/+$/, "");
+    const identity =
+      provider === "tableau"
+        ? {
+            provider,
+            endpoint: endpoint(String(settings.server)),
+            site: settings.site,
+            patName: settings.patName,
+          }
+        : provider === "typesafe"
+          ? { provider, endpoint: TYPESAFE_ENDPOINT }
+          : {
+              provider,
+              endpoint: effectiveModelEndpoint(provider, settings),
+              authMode: settings.authMode,
+              ...(provider === "amazon-bedrock"
+                ? { region: settings.region }
+                : {}),
+            };
+    return createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+  }
+  private async readStoredCredentials(record: StoredConnection): Promise<{
+    credentials: Record<string, string>;
+    legacy: boolean;
+  }> {
+    if (
+      !record.secretReference ||
+      !(await this.secrets.owns(record.secretReference))
+    )
+      throw new Error(
+        "Rebind this connection's credentials in the current workspace before invocation.",
+      );
+    const raw: unknown = JSON.parse(
+      await this.secrets.read(record.secretReference),
+    );
+    const parsed = protectedCredential.safeParse(raw);
+    if (!parsed.success)
+      return { credentials: z.record(z.string()).parse(raw), legacy: true };
+    if (
+      parsed.data.identity !== this.identity(record.provider, record.settings)
+    )
+      throw new Error(
+        "The connection credential identity does not match its settings. Rebind its credentials.",
+      );
+    return { credentials: parsed.data.credentials, legacy: false };
+  }
+  private async stageCredential(
+    file: ConnectionFile,
+    provider: string,
+    settings: Record<string, Json>,
+    credentials: Record<string, string>,
+  ): Promise<string> {
+    const reference = await this.secrets.allocate();
+    file.pendingDeletes.push(reference);
+    await this.storage.write(file);
+    await this.secrets.write(
+      reference,
+      JSON.stringify({
+        version: 1,
+        identity: this.identity(provider, settings),
+        credentials,
+      }),
+    );
+    return reference;
+  }
+  /** Frozen bindings resolve their own credential version, never the mutable catalog. */
+  async resolveCredentials(
+    binding: ConnectionBinding,
+  ): Promise<Record<string, string>> {
+    const bound = binding.credentialBinding;
+    if (!bound || bound.version !== 1)
+      throw new Error(
+        "This frozen connection has no credential identity. Rebind it through Setup before invocation.",
+      );
+    if (bound.identity !== this.identity(binding.provider, binding.settings))
+      throw new Error(
+        "The frozen connection credential identity does not match its settings. Rebind its credentials.",
+      );
+    if (!(await this.secrets.owns(bound.reference)))
+      throw new SecretStoreError(
+        "foreign_workspace",
+        "Rebind this connection's credentials in the current workspace before invocation.",
+      );
+    const parsed = protectedCredential.safeParse(
+      JSON.parse(await this.secrets.read(bound.reference)),
+    );
+    if (!parsed.success || parsed.data.identity !== bound.identity)
+      throw new Error(
+        "The frozen connection credential identity is unavailable. Rebind its credentials.",
+      );
+    return parsed.data.credentials;
+  }
   settings(
     provider: string,
     value: Record<string, Json>,
@@ -155,6 +320,17 @@ export class ConnectionService {
     if (provider === "typesafe") return z.object({}).strict().parse(value);
     if (provider === "tableau") {
       const settings = tableauSettings.parse(value);
+      const environmentNames = Object.keys(settings.mcpEnv);
+      const normalizedEnvironmentNames = environmentNames.map((name) =>
+        name.toUpperCase(),
+      );
+      if (
+        new Set(normalizedEnvironmentNames).size !==
+        normalizedEnvironmentNames.length
+      )
+        throw new Error(
+          "MCP environment variable names must be unique regardless of case.",
+        );
       if (
         settings.mcpArgs.some((arg) =>
           /(?:api[-_]?key|password|pat[-_]?value|authorization|secret|token)[=:]/i.test(
@@ -163,6 +339,35 @@ export class ConnectionService {
         )
       )
         throw new Error("MCP arguments cannot contain credentials.");
+      if (
+        normalizedEnvironmentNames.some((name) =>
+          tableauManagedEnvironment.has(name),
+        )
+      )
+        throw new Error(
+          "MCP environment settings cannot replace credentials, transport, tool selection, or harness-managed values.",
+        );
+      if (
+        normalizedEnvironmentNames.some((name) =>
+          /(?:^|[_-])(API[_-]?KEY|ACCESS[_-]?KEY|PAT(?:[-_]?VALUE)?|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTHORIZATION|PRIVATE[_-]?KEY)$/.test(
+            name,
+          ),
+        )
+      )
+        throw new Error(
+          "Credential values must use the separate protected credential fields, not MCP environment settings.",
+        );
+      if (
+        Object.keys(settings.mcpFeatures).length &&
+        normalizedEnvironmentNames.some((name) =>
+          ["FEATURE_GATE_PROVIDER", "FEATURE_GATE_PROVIDER_CONFIG"].includes(
+            name,
+          ),
+        )
+      )
+        throw new Error(
+          "Use mcpFeatures or a custom feature gate provider, but not both.",
+        );
       return settings;
     }
     if (MODEL_PROVIDERS.some((id) => id === provider))
@@ -187,18 +392,31 @@ export class ConnectionService {
       const replacing = Boolean(
         input.credentials && Object.keys(input.credentials).length,
       );
+      if (
+        existing &&
+        !replacing &&
+        this.identity(existing.provider, existing.settings) !==
+          this.identity(input.provider, settings)
+      )
+        throw new Error(
+          "Re-enter credentials when changing the connection endpoint or authentication identity.",
+        );
+      let previous: Record<string, string> | undefined;
+      let legacy = false;
       if (secretReference && (await this.secrets.owns(secretReference))) {
-        const previous: Record<string, string> = JSON.parse(
-          await this.secrets.read(secretReference).catch((error: unknown) => {
+        const stored = await this.readStoredCredentials(existing!).catch(
+          (error: unknown) => {
             if (
               replacing &&
               error instanceof SecretStoreError &&
               error.code === "missing"
             )
-              return "{}";
+              return { credentials: {}, legacy: false };
             throw error;
-          }),
+          },
         );
+        previous = stored.credentials;
+        legacy = stored.legacy;
         if (
           Object.values(previous).some(
             (value) => value && JSON.stringify(settings).includes(value),
@@ -225,12 +443,18 @@ export class ConnectionService {
           throw new Error(
             "Credentials cannot appear in public connection settings.",
           );
-        secretReference = await this.secrets.allocate();
-        file.pendingDeletes.push(secretReference);
-        await this.storage.write(file);
-        await this.secrets.write(
-          secretReference,
-          JSON.stringify(input.credentials),
+        secretReference = await this.stageCredential(
+          file,
+          input.provider,
+          settings,
+          input.credentials,
+        );
+      } else if (legacy && previous) {
+        secretReference = await this.stageCredential(
+          file,
+          input.provider,
+          settings,
+          previous,
         );
       }
       const record: StoredConnection = {
@@ -270,27 +494,51 @@ export class ConnectionService {
       await this.storage.cleanup(file, this.secrets);
     });
   }
-  async credentials(id: string): Promise<Record<string, string>> {
-    const record = (await this.records()).find((item) => item.id === id);
-    if (!record) throw new Error("Connection does not exist.");
-    if (!record.secretReference)
-      throw new Error(`Connection ${record.name} requires credentials.`);
-    return JSON.parse(
-      await this.secrets.read(record.secretReference),
-    ) as Record<string, string>;
-  }
-  async redactionSecrets(ids: string[]): Promise<string[]> {
-    const records = await this.records();
-    const known = records.filter(
-      (record) => ids.includes(record.id) && record.hasCredentials,
-    );
+  async redactionSecrets(bindings: ConnectionBinding[]): Promise<string[]> {
     const values = await Promise.all(
-      known.map((record) => this.credentials(record.id)),
+      bindings.map((binding) => this.resolveCredentials(binding)),
     );
     return values.flatMap((credentials) => Object.values(credentials));
   }
-  async freeze(binding: ConnectionBinding): Promise<ConnectionBinding> {
-    const record = (await this.records()).find(
+  private async freezeRecord(
+    file: ConnectionFile,
+    binding: ConnectionBinding,
+  ): Promise<ConnectionBinding> {
+    if (binding.credentialBinding) {
+      try {
+        await this.resolveCredentials(binding);
+      } catch (error) {
+        // Only explicit freeze/reuse can adopt a locally re-entered credential.
+        // Invocation always resolves the original immutable binding.
+        if (
+          !(error instanceof SecretStoreError) ||
+          !["missing", "foreign_workspace"].includes(error.code)
+        )
+          throw error;
+        const current = file.records.find(
+          (record) => record.id === binding.connectionId,
+        );
+        if (
+          !current ||
+          current.provider !== binding.provider ||
+          this.identity(current.provider, current.settings) !==
+            binding.credentialBinding.identity
+        )
+          throw error;
+        return this.freezeRecord(file, {
+          ...binding,
+          credentialBinding: undefined,
+        });
+      }
+      if (
+        !file.retainedReferences.includes(binding.credentialBinding.reference)
+      ) {
+        file.retainedReferences.push(binding.credentialBinding.reference);
+        await this.storage.write(file);
+      }
+      return structuredClone(binding);
+    }
+    const record = file.records.find(
       (item) => item.id === binding.connectionId,
     );
     if (!record) throw new Error("Connection does not exist.");
@@ -302,27 +550,103 @@ export class ConnectionService {
       record.provider,
       Object.keys(binding.settings).length ? binding.settings : record.settings,
     );
+    const identity = this.identity(record.provider, settings);
+    if (identity !== this.identity(record.provider, record.settings))
+      throw new Error(
+        "Rebind the connection before reusing settings with a different endpoint or authentication identity.",
+      );
+    const stored = await this.readStoredCredentials(record);
+    if (stored.legacy) {
+      const previous = record.secretReference!;
+      const reference = await this.stageCredential(
+        file,
+        record.provider,
+        settings,
+        stored.credentials,
+      );
+      record.secretReference = reference;
+      file.pendingDeletes = file.pendingDeletes.filter(
+        (item) => item !== reference,
+      );
+      file.pendingDeletes.push(previous);
+    }
+    const reference = record.secretReference!;
+    if (!file.retainedReferences.includes(reference))
+      file.retainedReferences.push(reference);
+    await this.storage.write(file);
+    await this.storage.cleanup(file, this.secrets);
     return {
+      ...binding,
       connectionId: record.id,
       provider: record.provider,
-      resourceId: binding.resourceId,
       settings,
       credentialFields: [...record.credentialFields],
+      credentialBinding: { version: 1, reference, identity },
     };
+  }
+  freeze(binding: ConnectionBinding): Promise<ConnectionBinding> {
+    return this.serialize(async () => {
+      const frozen = await this.freezeRecord(
+        await this.storage.read(),
+        binding,
+      );
+      for (const field of [
+        "resourceId",
+        "resourceName",
+        "resourceProjectName",
+      ] as const)
+        if (frozen[field] === undefined) delete frozen[field];
+      return frozen;
+    });
+  }
+  /** Probes own an in-memory pair, without retaining a durable credential version. */
+  snapshot(id: string): Promise<ConnectionSnapshot> {
+    return this.serialize(async () => {
+      const file = await this.storage.read();
+      const record = file.records.find((item) => item.id === id);
+      if (!record) throw new Error("Connection does not exist.");
+      const settings = this.settings(record.provider, record.settings);
+      const { credentials } = await this.readStoredCredentials(record);
+      const binding: ConnectionBinding = {
+        connectionId: record.id,
+        provider: record.provider,
+        settings,
+        credentialFields: [...record.credentialFields],
+      };
+      return {
+        connection: {
+          ...(await this.public(record)),
+          settings: structuredClone(settings),
+        },
+        credentials: { ...credentials },
+        materialize: (tools) =>
+          this.materializeResolved([{ binding, credentials }], tools),
+      };
+    });
   }
   async materialize(
     bindings: ConnectionBinding[],
     tools: string[],
-  ): Promise<{
-    mcp: McpBinding[];
-    env: Record<string, string>;
-    secrets: string[];
-  }> {
+  ): Promise<MaterializedConnections> {
+    const resolved = await Promise.all(
+      bindings.map(async (binding) => ({
+        binding,
+        credentials: await this.resolveCredentials(binding),
+      })),
+    );
+    return this.materializeResolved(resolved, tools);
+  }
+  private materializeResolved(
+    resolved: Array<{
+      binding: ConnectionBinding;
+      credentials: Record<string, string>;
+    }>,
+    tools: string[],
+  ): MaterializedConnections {
     const mcp: McpBinding[] = [];
     const env: Record<string, string> = {};
     const secrets: string[] = [];
-    for (const [index, binding] of bindings.entries()) {
-      const credentials = await this.credentials(binding.connectionId);
+    for (const [index, { binding, credentials }] of resolved.entries()) {
       secrets.push(...Object.values(credentials));
       if (binding.provider === "tableau") {
         if (!tools.length) continue;
@@ -336,6 +660,7 @@ export class ConnectionService {
           command: command.executable,
           args: command.args,
           tools: selected,
+          features: settings.mcpFeatures,
           env: {
             TRANSPORT: "stdio",
             AUTH: "pat",
@@ -347,6 +672,7 @@ export class ConnectionService {
             PRODUCT_TELEMETRY_ENABLED: "false",
             DISABLE_LOG_MASKING: "false",
             ...(selected.length ? { INCLUDE_TOOLS: selected.join(",") } : {}),
+            ...settings.mcpEnv,
           },
         });
       } else {

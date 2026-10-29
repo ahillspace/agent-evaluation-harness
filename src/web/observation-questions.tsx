@@ -8,6 +8,7 @@ import { Answer } from "./answer.js";
 import { JevAssessment } from "./jev-assessment.js";
 import { ReportFinding } from "./report-finding.js";
 import { failureLabels } from "./retry-failures.js";
+import { questionEvidence } from "./question-evidence.js";
 import { TokenUsageHelp, UsageValue } from "./run-performance.js";
 import {
   ErrorNotice,
@@ -67,7 +68,7 @@ export function RunQuestions({
   const [query, setQuery] = useState("");
   const [attentionOnly, setAttentionOnly] = useState(false);
   const [finding, setFinding] = useState(false);
-  const { run, results, attempts } = view;
+  const { run, results } = view;
   const questionsById = new Map(
     run.manifest.questions.map((item) => [item.id, item]),
   );
@@ -79,11 +80,11 @@ export function RunQuestions({
     results.find((item) => item.status === "running") ??
     results[0];
   const question = questionsById.get(current?.questionId ?? "");
-  const history = attempts.filter((item) => item.resultId === current?.id);
-  const summary =
-    history.find((item) => item.id === attemptId) ??
-    history.find((item) => item.id === current?.completedAttemptId) ??
-    history.at(-1);
+  const evidence = current
+    ? questionEvidence(view, current, pass, attemptId)
+    : undefined;
+  const history = evidence?.history ?? [];
+  const summary = evidence?.attempt;
   const detail = useResource(
     "runs.attempt",
     { runId: run.id, attemptId: summary?.id ?? "" },
@@ -125,10 +126,14 @@ export function RunQuestions({
     (!pass || pass.basis.evaluatorRevisionId === run.manifest.evaluator.id
       ? run.manifest.evaluator
       : undefined);
-  const selectedStatus = (result: RunView["results"][number]) =>
-    ["failed", "interrupted"].includes(result.status)
+  const selectedStatus = (result: RunView["results"][number]) => {
+    const selectedJudgment = judgmentsByResult.get(result.id);
+    if (selectedJudgment?.attemptId) return selectedJudgment.status;
+    if (!pass && result.answerSource) return "completed";
+    return ["failed", "interrupted"].includes(result.status)
       ? result.status
-      : (judgmentsByResult.get(result.id)?.status ?? result.status);
+      : (selectedJudgment?.status ?? result.status);
+  };
   const visible = results.filter((result) =>
     matchesQuestionFilter(
       questionsById.get(result.questionId)?.text ?? "",
@@ -240,6 +245,21 @@ export function RunQuestions({
           >
             {tab === "answer" && (
               <>
+                {evidence?.fromRerun && summary && (
+                  <p className="answer-provenance">
+                    Rerun answer from{" "}
+                    <a href={`#/observe/${summary.runId}`}>the linked rerun</a>.
+                    Original attempts remain in Attempts.
+                  </p>
+                )}
+                {attemptId &&
+                  attemptId !== judgment?.attemptId &&
+                  judgment?.attemptId && (
+                    <p className="answer-provenance">
+                      Showing another recorded attempt. The selected score uses
+                      its saved answer.
+                    </p>
+                  )}
                 {detail.data?.attempt.output ? (
                   <Answer value={detail.data.attempt.output.answer} />
                 ) : (
@@ -293,8 +313,10 @@ export function RunQuestions({
                     {history.length ? (
                       history.map((item) => (
                         <option key={item.id} value={item.id}>
-                          Attempt {item.number} · {item.status} ·{" "}
-                          {date(item.startedAt)}
+                          {item.runId === run.id
+                            ? "Original attempt"
+                            : "Rerun attempt"}{" "}
+                          {item.number} · {item.status} · {date(item.startedAt)}
                         </option>
                       ))
                     ) : (
@@ -307,7 +329,12 @@ export function RunQuestions({
                 </p>
                 {history.map((item) => (
                   <div className="history-row" key={item.id}>
-                    <span>Attempt {item.number}</span>
+                    <span>
+                      {item.runId === run.id
+                        ? "Original attempt"
+                        : "Rerun attempt"}{" "}
+                      {item.number}
+                    </span>
                     <Status value={item.status} />
                     <span>{date(item.startedAt)}</span>
                     {item.failure && (

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { WorkspaceView } from "../contracts.js";
+import { evaluatorSettingsSchema, type WorkspaceView } from "../contracts.js";
 import { Banks } from "./banks.js";
 import { Results } from "./results.js";
 import { BankEditor } from "./bank-editor.js";
@@ -9,18 +9,24 @@ const { resource } = vi.hoisted(() => ({ resource: vi.fn() }));
 vi.mock("./api.js", () => ({ useResource: resource, command: vi.fn() }));
 
 describe("compact evaluation libraries", () => {
-  it("keeps authoring and import available with secondary metadata collapsed", () => {
+  it("focuses question authoring and keeps secondary metadata collapsed", () => {
     const html = renderToStaticMarkup(
-      <BankEditor source="new" onClose={() => {}} onSaved={() => {}} />,
+      <BankEditor
+        question={{ id: "q1", text: "Count?", expected: 1, tags: [] }}
+        settings={evaluatorSettingsSchema.parse({})}
+        onClose={() => {}}
+        onSaved={() => {}}
+      />,
     );
     expect(html).toContain(
       '<details class="disclosure"><summary>Question ID and tags</summary>',
     );
     for (const action of [
-      "Import JSON or CSV",
-      "Expected answer",
-      "Publish bank",
-      "Add question",
+      "Public context",
+      "Private reference answer",
+      "How this question is graded",
+      "Save draft",
+      "Try an answer",
     ])
       expect(html).toContain(action);
   });
@@ -46,6 +52,15 @@ describe("compact evaluation libraries", () => {
       totalRuns: 1,
       blueprints: [],
     } as unknown as WorkspaceView;
+    resource.mockImplementation((operation: string, input: unknown) => {
+      expect(operation).toBe("runs.list");
+      expect(input).toMatchObject({ limit: 100, offset: 0 });
+      return {
+        data: { runs: workspace.runs, total: 1, nextOffset: null },
+        error: null,
+        refresh: vi.fn(),
+      };
+    });
     const html = renderToStaticMarkup(
       <Results workspace={workspace} refresh={() => {}} />,
     );
@@ -69,29 +84,35 @@ describe("compact evaluation libraries", () => {
       latestRevisionId: "v1",
       questionCount: 1,
     };
-    resource.mockReturnValue({
-      data: {
-        bank,
-        revisions: [
-          {
-            id: "v1",
-            bankId: "b1",
-            number: 1,
-            createdAt: "2026-10-04T00:00:00Z",
-            questions: [
-              {
-                id: "q1",
-                text: "Which regions?",
-                expected: [{ region: "West" }],
-                tags: [],
-              },
-            ],
-          },
-        ],
-      },
+    resource.mockImplementation((operation: string) => ({
+      data:
+        operation === "banks.findings"
+          ? []
+          : {
+              bank,
+              evaluatorRevisions: [],
+              evaluatorDrafts: [],
+              jevProfiles: [],
+              revisions: [
+                {
+                  id: "v1",
+                  bankId: "b1",
+                  number: 1,
+                  createdAt: "2026-10-04T00:00:00Z",
+                  questions: [
+                    {
+                      id: "q1",
+                      text: "Which regions?",
+                      expected: [{ region: "West" }],
+                      tags: [],
+                    },
+                  ],
+                },
+              ],
+            },
       error: null,
       refresh: vi.fn(),
-    });
+    }));
     const html = renderToStaticMarkup(
       <Banks
         workspace={{ banks: [bank] } as unknown as WorkspaceView}
@@ -104,9 +125,11 @@ describe("compact evaluation libraries", () => {
     expect(html).toContain('aria-pressed="true"');
     for (const action of [
       "Export bank",
-      "Edit questions",
+      "Add question",
       "History",
-      "Jev criteria",
+      "Grading",
+      "Findings",
+      "Publish changes",
     ])
       expect(html).toContain(action);
   });

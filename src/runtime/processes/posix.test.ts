@@ -3,6 +3,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ProcessSupervisor } from "../process-supervisor.js";
@@ -30,6 +31,40 @@ async function setup() {
 describe.skipIf(process.platform === "win32")(
   "managed POSIX process scopes",
   () => {
+    it("repeatedly settles network-active descendants before admitting the next invocation", async () => {
+      const { directory, supervisor } = await setup();
+      const server = createServer((socket) =>
+        socket.on("data", () => socket.end("ready")),
+      );
+      await new Promise<void>((resolve) =>
+        server.listen(0, "127.0.0.1", resolve),
+      );
+      try {
+        const address = server.address();
+        if (!address || typeof address === "string")
+          throw new Error("Fixture not listening.");
+        const child = `const s=require('node:net').connect(${address.port},'127.0.0.1',()=>s.write('network'));s.on('data',()=>console.log(process.pid));s.on('end',()=>setTimeout(()=>process.exit(0),20));`;
+        for (let iteration = 0; iteration < 4; iteration++) {
+          const result = await supervisor.run({
+            executable: process.execPath,
+            args: [
+              "-e",
+              `const p=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(child)}],{stdio:['ignore','pipe','inherit']});p.stdout.pipe(process.stdout);p.on('exit',()=>process.exit(0));`,
+            ],
+            cwd: directory,
+            timeoutMs: 10000,
+          });
+          expect(result.exitCode, result.stderr).toBe(0);
+          expect(Number(result.stdout.trim())).toBeGreaterThan(1);
+          expect(supervisor.activeReservations).toBe(0);
+        }
+        expect(await readdir(path.join(directory, "process-scopes"))).toEqual(
+          [],
+        );
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    }, 20000);
     it("preserves stdin and arguments without leaking helper events into output", async () => {
       const { directory, supervisor } = await setup();
       const result = await supervisor.run({

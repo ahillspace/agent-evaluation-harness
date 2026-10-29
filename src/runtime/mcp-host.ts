@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { answerFormatSchema, jsonSchema } from "../contracts.js";
+import { inheritedEnvironment } from "./commands.js";
 import {
   answerFormatJsonSchema,
   validateSubmittedAnswer,
@@ -40,27 +41,7 @@ if (mode === "connection") {
     args: string[];
     env: Record<string, string>;
   };
-  const inherited = [
-    "PATH",
-    "PATHEXT",
-    "SystemRoot",
-    "WINDIR",
-    "COMSPEC",
-    "HOME",
-    "USERPROFILE",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "TEMP",
-    "TMP",
-  ];
-  const env = {
-    ...Object.fromEntries(
-      inherited.flatMap((name) =>
-        process.env[name] ? [[name, process.env[name]!]] : [],
-      ),
-    ),
-    ...binding.env,
-  };
+  const env = { ...inheritedEnvironment(), ...binding.env };
   const child = spawn(binding.command, binding.args, {
     env,
     windowsHide: true,

@@ -9,6 +9,7 @@ import type {
 export type JudgmentStatus =
   "correct" | "incorrect" | "unjudged" | "error" | "excluded";
 export interface PassJudgment {
+  source?: { runId: string; resultId: string };
   judgmentId?: string;
   resultId: string;
   attemptId?: string;
@@ -46,6 +47,7 @@ export interface AssessmentCoverage {
   overridden: number;
 }
 export interface AssessmentPass {
+  retryApplicationId?: string;
   id: string;
   runId: string;
   name: string;
@@ -109,6 +111,8 @@ export interface UsageTotals {
   reporting?: UsageReporting;
 }
 export interface RunPerformance {
+  recoveredResults?: number;
+  originalFailures?: number;
   durationMs: number | null;
   answerLatencyMs: {
     average: number | null;

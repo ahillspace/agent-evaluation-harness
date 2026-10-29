@@ -5,6 +5,7 @@ import type {
   BankSummary,
   BankDetail,
   EvaluatorRevision,
+  JevProfileRevision,
   RuntimeCatalog,
   WorkspaceView,
 } from "../contracts.js";
@@ -23,6 +24,7 @@ export function EvaluationSettings({
   connections,
   bankDetail,
   refreshBank,
+  onJevProfilePublished,
 }: SetupDraftProps & {
   catalog?: RuntimeCatalog;
   bankRecord?: BankSummary;
@@ -30,6 +32,7 @@ export function EvaluationSettings({
   connections: WorkspaceView["connections"];
   bankDetail?: BankDetail;
   refreshBank: () => void;
+  onJevProfilePublished: (profile: JevProfileRevision) => void;
 }) {
   return (
     <>
@@ -226,7 +229,10 @@ export function EvaluationSettings({
           onChange={(value) => set("jevSelection", value)}
           connections={connections}
           bank={bankDetail}
-          onPublished={refreshBank}
+          onPublished={(profile) => {
+            onJevProfilePublished(profile);
+            refreshBank();
+          }}
         />
       )}
     </>

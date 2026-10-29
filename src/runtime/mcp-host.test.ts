@@ -6,6 +6,60 @@ import { helperCommand } from "./harness.js";
 import { createProcessSupervisor } from "./platform.js";
 import type { AnswerFormat, Json } from "../contracts.js";
 
+it.skipIf(!["win32", "darwin"].includes(process.platform))(
+  "passes arbitrary MCP environment names and literal values to the real child process",
+  async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "aeh-mcp-env-"));
+    const supervisor = createProcessSupervisor({ stateDirectory: directory });
+    const environment = {
+      future_mcp_option: "mixed Case and spaces",
+      Future_JSON_Option: '{"enabled":true,"limit":42}',
+      Future_Literal_Option: "$HOME; $(echo untouched)\nsecond line",
+    };
+    const certificate = path.join(directory, "company certificates.pem");
+    await writeFile(certificate, "");
+    try {
+      await supervisor.recover();
+      const command = helperCommand("connection", "AEH_TEST_MCP_BINDING");
+      const childSource = `
+        const lines = require('node:readline').createInterface({ input: process.stdin });
+        lines.on('line', line => {
+          const request = JSON.parse(line);
+          const env = Object.fromEntries(${JSON.stringify([...Object.keys(environment), "NODE_EXTRA_CA_CERTS"])}.map(key => [key, process.env[key]]));
+          process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { env, inheritedSecret: process.env.AEH_UNRELATED_SECRET ?? null } }) + '\\n');
+        });
+      `;
+      const result = await supervisor.run({
+        executable: command.command,
+        args: command.args,
+        cwd: directory,
+        processLimit: 4,
+        timeoutMs: 15_000,
+        env: {
+          AEH_UNRELATED_SECRET: "unrelated-fixture-secret",
+          NODE_EXTRA_CA_CERTS: certificate,
+          AEH_TEST_MCP_BINDING: JSON.stringify({
+            command: process.execPath,
+            args: ["-e", childSource],
+            env: environment,
+          }),
+        },
+        input:
+          JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) +
+          "\n",
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).result).toEqual({
+        env: { ...environment, NODE_EXTRA_CA_CERTS: certificate },
+        inheritedSecret: null,
+      });
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
 it.skipIf(!["win32", "darwin"].includes(process.platform)).each([
   {
     name: "positive decimal exponent",

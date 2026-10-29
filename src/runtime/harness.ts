@@ -387,15 +387,18 @@ export function normalizeEvent(
     const error = record(raw.error) ? raw.error : (item ?? raw);
     const details = record(error.data) ? error.data : error;
     const message =
-      typeof details.message === "string"
-        ? details.message
-        : typeof raw.message === "string"
-          ? raw.message
-          : "The provider reported an error.";
+      (typeof details.message === "string" && details.message) ||
+      (typeof error.message === "string" && error.message) ||
+      (typeof raw.message === "string" && raw.message) ||
+      "The provider reported an error.";
     const trustedCodexError =
       harness === "codex" &&
       (raw.type === "error" || raw.type === "turn.failed");
-    const nativeCode = details.code ?? details.codex_error_info ?? error.code;
+    const nativeCode =
+      details.code ??
+      details.codex_error_info ??
+      error.code ??
+      (record(details.error) ? details.error.code : undefined);
     const capacity =
       trustedCodexError &&
       ([
@@ -407,14 +410,32 @@ export function normalizeEvent(
         message ===
           "Selected model is at capacity. Please try a different model.");
     const data = {
-      ...(typeof details.statusCode === "number"
-        ? { statusCode: details.statusCode }
+      ...(typeof (details.statusCode ?? details.status) === "number"
+        ? { statusCode: (details.statusCode ?? details.status) as number }
         : {}),
-      ...(capacity ? { providerCode: "model_capacity" } : {}),
+      ...(capacity
+        ? { providerCode: "model_capacity" }
+        : harness === "opencode" &&
+            typeof nativeCode === "string" &&
+            /^[A-Za-z][A-Za-z0-9_.-]{0,99}$/.test(nativeCode)
+          ? { providerCode: nativeCode }
+          : {}),
+      ...(harness === "opencode" &&
+      typeof error.name === "string" &&
+      /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(error.name)
+        ? { providerName: error.name }
+        : {}),
     };
+    const diagnosticMessage =
+      harness === "opencode" &&
+      typeof nativeCode === "string" &&
+      /^[A-Za-z][A-Za-z0-9_.-]{0,99}$/.test(nativeCode) &&
+      !message.includes(nativeCode)
+        ? `${message} (${nativeCode})`
+        : message;
     return {
       type: "error",
-      message,
+      message: diagnosticMessage,
       ...(Object.keys(data).length ? { data } : {}),
     };
   }

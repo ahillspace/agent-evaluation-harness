@@ -2,7 +2,7 @@ import { targetFixture } from "../../tests/fixtures/runtime-targets.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   AgentConfig,
   RuntimePort,
@@ -68,6 +68,117 @@ async function setup(port = runtime()) {
   return { app, bank, directory };
 }
 describe("shared application", () => {
+  it("lists compact live score metadata without reading full manifests, attempts, or judgments", async () => {
+    const { app, bank } = await setup(
+      runtime(async () => ({
+        answer: 42,
+        text: "PRIVATE_EVIDENCE".repeat(10000),
+      })),
+    );
+    const launched = await app.execute("runs.launch", {
+      bankRevisionId: bank.id,
+      agent: { ...agent, systemPrompt: "PRIVATE_CONFIGURATION".repeat(4000) },
+    });
+    await app.waitForIdle();
+    const full = Database.prototype.get,
+      list = Database.prototype.list;
+    const getSpy = vi
+      .spyOn(Database.prototype, "get")
+      .mockImplementation(function (this: Database, kind, recordId) {
+        if (
+          [
+            "run",
+            "attempt",
+            "assessment",
+            "scoreSet",
+            "assessmentPass",
+          ].includes(kind)
+        )
+          throw new Error(`Full ${kind} read during run listing`);
+        return full.call(this, kind, recordId);
+      });
+    const listSpy = vi
+      .spyOn(Database.prototype, "list")
+      .mockImplementation(function (this: Database, kind, query) {
+        if (
+          [
+            "run",
+            "attempt",
+            "assessment",
+            "scoreSet",
+            "assessmentPass",
+          ].includes(kind)
+        )
+          throw new Error(`Full ${kind} scan during run listing`);
+        return list.call(this, kind, query);
+      });
+    try {
+      const page = await app.execute("runs.list", { limit: 1 });
+      expect(page.runs[0]).toMatchObject({
+        id: launched.run.id,
+        completed: 1,
+        failed: 0,
+        graded: 1,
+        accuracy: 1,
+        targetKind: "managed",
+      });
+      expect(JSON.stringify(page)).not.toContain("PRIVATE_");
+      expect(JSON.stringify(page).length).toBeLessThan(5000);
+      expect(page.runs[0]).not.toHaveProperty("target");
+      expect(page.runs[0]).not.toHaveProperty("performance");
+    } finally {
+      getSpy.mockRestore();
+      listSpy.mockRestore();
+    }
+  });
+  it("filters all saved runs before pagination with matching Unicode search", async () => {
+    const { app, bank } = await setup();
+    const other = await app.execute("banks.create", {
+      name: "Other",
+      questions: [{ id: "q", text: "Question", expected: 42 }],
+    });
+    const ids: string[] = [];
+    for (const name of ["CAF\u00c9 first", "Cafe\u0301 second", "Unrelated"]) {
+      const launched = await app.execute("runs.launch", {
+        name,
+        bankRevisionId: bank.id,
+        agent,
+      });
+      ids.push(launched.run.id);
+      await app.waitForIdle();
+    }
+    await app.execute("runs.launch", {
+      name: "CAF\u00c9 other bank",
+      bankRevisionId: other.id,
+      agent,
+    });
+    await app.waitForIdle();
+    const first = await app.execute("runs.list", {
+      bankId: bank.bankId,
+      status: "completed",
+      search: "caf\u00e9",
+      limit: 1,
+    });
+    expect(first.total).toBe(2);
+    expect(first.runs.map((run) => run.id)).toEqual([ids[1]]);
+    expect(first.nextOffset).toBe(1);
+    const second = await app.execute("runs.list", {
+      bankId: bank.bankId,
+      status: "completed",
+      search: "cafe\u0301",
+      limit: 1,
+      offset: first.nextOffset!,
+    });
+    expect(second.runs.map((run) => run.id)).toEqual([ids[0]]);
+    expect(second.nextOffset).toBeNull();
+    expect(
+      (await app.execute("runs.list", { bankId: other.bankId })).runs,
+    ).toHaveLength(1);
+    expect((await app.execute("runs.list", { status: "failed" })).total).toBe(
+      0,
+    );
+  });
+
   it("calibrates positive and negative examples before evaluator publication", async () => {
     const { app, bank } = await setup();
     const draft = await app.execute("evaluators.draft", {
@@ -146,6 +257,11 @@ describe("shared application", () => {
     });
     await app.execute("banks.revise", {
       bankId: bank.bankId,
+      baseRevisionId: (await app.execute("banks.get", { bankId: bank.bankId }))
+        .bank.latestRevisionId,
+      baseEvaluatorRevisionId: (
+        await app.execute("banks.get", { bankId: bank.bankId })
+      ).bank.activeEvaluatorRevisionId,
       name: bank.name,
       questions: bank.questions.map((q) => ({ ...q, expected: 43 })),
     });
@@ -194,6 +310,11 @@ describe("shared application", () => {
     );
     await app.execute("banks.revise", {
       bankId: bank.bankId,
+      baseRevisionId: (await app.execute("banks.get", { bankId: bank.bankId }))
+        .bank.latestRevisionId,
+      baseEvaluatorRevisionId: (
+        await app.execute("banks.get", { bankId: bank.bankId })
+      ).bank.activeEvaluatorRevisionId,
       name: bank.name,
       questions: bank.questions,
     });
@@ -201,7 +322,7 @@ describe("shared application", () => {
     expect(
       (await app.execute("banks.get", { bankId: bank.bankId }))
         .evaluatorRevisions,
-    ).toHaveLength(1);
+    ).toHaveLength(2);
   });
   it("rejects malformed typed references before publication", async () => {
     const { app, bank } = await setup();
@@ -222,6 +343,12 @@ describe("shared application", () => {
     await expect(
       app.execute("banks.revise", {
         bankId: bank.bankId,
+        baseRevisionId: (
+          await app.execute("banks.get", { bankId: bank.bankId })
+        ).bank.latestRevisionId,
+        baseEvaluatorRevisionId: (
+          await app.execute("banks.get", { bankId: bank.bankId })
+        ).bank.activeEvaluatorRevisionId,
         name: bank.name,
         questions: invalid,
       }),
@@ -260,6 +387,11 @@ describe("shared application", () => {
     const before = await app.execute("runs.get", { runId: launched.run.id });
     const corrected = await app.execute("banks.revise", {
       bankId: bank.bankId,
+      baseRevisionId: (await app.execute("banks.get", { bankId: bank.bankId }))
+        .bank.latestRevisionId,
+      baseEvaluatorRevisionId: (
+        await app.execute("banks.get", { bankId: bank.bankId })
+      ).bank.activeEvaluatorRevisionId,
       name: bank.name,
       questions: bank.questions.map((q) => ({ ...q, expected: 43 })),
     });
@@ -323,6 +455,11 @@ describe("shared application", () => {
     ).rejects.toThrow(/different question bank/i);
     const changed = await app.execute("banks.revise", {
       bankId: bank.bankId,
+      baseRevisionId: (await app.execute("banks.get", { bankId: bank.bankId }))
+        .bank.latestRevisionId,
+      baseEvaluatorRevisionId: (
+        await app.execute("banks.get", { bankId: bank.bankId })
+      ).bank.activeEvaluatorRevisionId,
       name: bank.name,
       questions: corrected.questions.map((q) => ({
         ...q,
@@ -465,6 +602,11 @@ describe("shared application", () => {
     );
     const next = await app.execute("banks.revise", {
       bankId: bank.bankId,
+      baseRevisionId: (await app.execute("banks.get", { bankId: bank.bankId }))
+        .bank.latestRevisionId,
+      baseEvaluatorRevisionId: (
+        await app.execute("banks.get", { bankId: bank.bankId })
+      ).bank.activeEvaluatorRevisionId,
       name: "New question",
       questions: [{ id: "table", text: "Answer", expected: 42 }],
     });
@@ -503,6 +645,12 @@ describe("shared application", () => {
       });
       const next = await app.execute("banks.revise", {
         bankId: bank.bankId,
+        baseRevisionId: (
+          await app.execute("banks.get", { bankId: bank.bankId })
+        ).bank.latestRevisionId,
+        baseEvaluatorRevisionId: (
+          await app.execute("banks.get", { bankId: bank.bankId })
+        ).bank.activeEvaluatorRevisionId,
         name: "New derived revision",
         questions: [
           {
@@ -919,6 +1067,45 @@ describe("shared application", () => {
     await expect(
       app.execute("runs.launch", { ...input, repetitions: 3 }),
     ).rejects.toThrow(/idempotency/i);
+  });
+  it("exports credential placeholders without retained workspace references", async () => {
+    const { app, bank } = await setup();
+    const credentialBinding = {
+      version: 1 as const,
+      reference: "private-workspace-reference",
+      identity: "a".repeat(64),
+    };
+    const run = await app.execute("runs.launch", {
+      bankRevisionId: bank.id,
+      agent: {
+        ...agent,
+        connections: [
+          {
+            connectionId: "provider",
+            provider: "openai",
+            settings: {},
+            credentialFields: ["apiKey"],
+            credentialBinding,
+          },
+        ],
+      },
+    });
+    await app.waitForIdle();
+    const before = JSON.stringify(
+      (await app.execute("runs.get", { runId: run.run.id })).run.manifest,
+    );
+    const exported = await app.execute("runs.export-agent", {
+      runId: run.run.id,
+    });
+    expect(JSON.stringify(exported)).toContain("${OPENAI_APIKEY}");
+    expect(JSON.stringify(exported)).not.toContain("credentialBinding");
+    expect(JSON.stringify(exported)).not.toContain(credentialBinding.reference);
+    expect(
+      JSON.stringify(
+        (await app.execute("runs.get", { runId: run.run.id })).run.manifest,
+      ),
+    ).toBe(before);
+    expect(before).toContain(credentialBinding.reference);
   });
   it("rescores immutable saved evidence after preview and evaluator publication", async () => {
     const { app, bank } = await setup(

@@ -48,7 +48,12 @@ export async function migrateConnections(
     if (await secrets.owns(reference)) await secrets.delete(reference);
   pending = [];
   const records = legacySchema.parse(raw);
-  const file: ConnectionFile = { version: 2, records: [], pendingDeletes: [] };
+  const file: ConnectionFile = {
+    version: 3,
+    records: [],
+    pendingDeletes: [],
+    retainedReferences: [],
+  };
   for (const { encryptedCredentials, ...record } of records) {
     let secretReference: string | undefined;
     if (encryptedCredentials && decodeLegacy) {

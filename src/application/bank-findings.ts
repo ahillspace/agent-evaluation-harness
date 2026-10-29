@@ -7,7 +7,7 @@ import { Database } from "../storage/database.js";
 import { AssessmentPassService } from "./assessment-passes.js";
 import { CatalogService } from "./catalog.js";
 import { AppError } from "../domain/errors.js";
-import { id, now } from "../domain/identity.js";
+import { digest, id, now } from "../domain/identity.js";
 
 export class BankFindingService {
   constructor(
@@ -89,65 +89,84 @@ export class BankFindingService {
         "invalid_state",
         "This finding already has a recorded decision.",
       );
-    const bank = this.db.require("bank", finding.bankId);
-    const revision = this.db.require("bankRevision", bank.latestRevisionId);
-    let bankRevision: CommandResultMap["banks.resolve-finding"]["bankRevision"];
-    let evaluator: CommandResultMap["banks.resolve-finding"]["evaluator"];
-    if (input.status === "accepted" && input.expected !== undefined) {
-      const question = revision.questions.find(
-        (q) => q.id === finding.questionId,
+    const resolution = {
+      note: input.note ?? "",
+      reviewer: input.reviewer ?? "Local reviewer",
+      createdAt: now(),
+    };
+    if (
+      input.status === "accepted" &&
+      (input.expected !== undefined || input.exclude)
+    ) {
+      const bank = this.db.require("bank", finding.bankId);
+      const revision = this.db.require("bankRevision", bank.latestRevisionId);
+      const source = this.db.require("bankRevision", finding.bankRevisionId);
+      const sourceQuestion = source.questions.find(
+        (question) => question.id === finding.questionId,
       );
-      if (!question)
+      const question = revision.questions.find(
+        (question) => question.id === finding.questionId,
+      );
+      if (
+        !sourceQuestion ||
+        !question ||
+        digest({ ...sourceQuestion, tags: undefined }) !==
+          digest({ ...question, tags: undefined })
+      )
         throw new AppError(
-          "not_found",
-          "This question no longer exists in the latest bank revision.",
+          "incompatible_basis",
+          "This question or its reference changed after the finding was reported. Review the latest question and report a new finding before applying a correction or exclusion.",
         );
-      bankRevision = this.catalog.reviseBank({
-        bankId: bank.id,
-        name: revision.name,
-        questions: revision.questions.map((q) =>
-          q.id === question.id
-            ? { ...q, expected: input.expected!, answerFormat: undefined }
-            : q,
-        ),
-      });
-    }
-    if (input.status === "accepted" && input.exclude) {
       const current = this.db.require(
         "evaluator",
         bank.activeEvaluatorRevisionId,
       );
-      const draft = this.catalog.saveDraft({
-        bankId: bank.id,
-        name: `Reference review: ${finding.questionId}`,
-        settings: {
-          ...current.settings,
-          questionOverrides: {
-            ...current.settings.questionOverrides,
-            [finding.questionId]: {
-              ...current.settings.questionOverrides[finding.questionId],
-              referenceDisposition: "needs_review",
-              referenceNote: input.note || finding.title,
-            },
-          },
+      const publication = await this.catalog.publishBank(
+        {
+          bankId: bank.id,
+          baseRevisionId: revision.id,
+          baseEvaluatorRevisionId: current.id,
+          name: revision.name,
+          questions:
+            input.expected !== undefined
+              ? revision.questions.map((item) =>
+                  item.id === question.id
+                    ? {
+                        ...item,
+                        expected: input.expected!,
+                        answerFormat: undefined,
+                      }
+                    : item,
+                )
+              : revision.questions,
+          evaluatorName: current.name,
+          evaluatorSettings: input.exclude
+            ? {
+                ...current.settings,
+                questionOverrides: {
+                  ...current.settings.questionOverrides,
+                  [finding.questionId]: {
+                    ...current.settings.questionOverrides[finding.questionId],
+                    referenceDisposition: "needs_review",
+                    referenceNote: input.note || finding.title,
+                  },
+                },
+              }
+            : current.settings,
         },
-      });
-      evaluator = await this.catalog.publishDraft(draft.id, true);
+        { source: finding, resolution },
+      );
+      return {
+        finding: this.db.require("bankFinding", finding.id),
+        bankRevision: publication.revision,
+        evaluator: publication.evaluatorRevision,
+      };
     }
     const resolved = this.db.update("bankFinding", {
       ...finding,
       status: input.status,
-      resolution: {
-        note: input.note ?? "",
-        reviewer: input.reviewer ?? "Local reviewer",
-        createdAt: now(),
-        ...(bankRevision ? { bankRevisionId: bankRevision.id } : {}),
-      },
+      resolution,
     });
-    return {
-      finding: resolved,
-      ...(bankRevision ? { bankRevision } : {}),
-      ...(evaluator ? { evaluator } : {}),
-    };
+    return { finding: resolved };
   }
 }

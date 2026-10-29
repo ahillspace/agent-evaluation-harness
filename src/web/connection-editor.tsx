@@ -258,15 +258,34 @@ export function ConnectionEditor({
           />
         </Field>
         {provider === "tableau" && (
-          <details className="disclosure">
-            <summary>Advanced connection settings</summary>
-            <JsonEditor
-              label="Advanced connection settings"
-              value={advanced}
-              onChange={setAdvanced}
-              guide={tableauConnectionGuide}
-            />
-          </details>
+          <>
+            <p className="subtle">
+              When you check this connection or run with its tools, the harness
+              starts a local stdio Tableau MCP process. The default command is{" "}
+              <code>npx -y @tableau/mcp-server@4.13.3</code>. If uncached, npx
+              fetches the package into npm's cache and runs it without a
+              confirmation prompt. It is not a global install.
+            </p>
+            <p className="subtle">
+              The harness does not attach to an existing server or use MCP
+              settings from Codex, Claude Code, or OpenCode. The JSON below
+              controls the local command, arguments, additional environment
+              variables, and feature flags. The Tableau URL, site, and token
+              name use the fields above; the PAT value uses the separate
+              credential field. Environment variables can narrow MCP access, for
+              example with INCLUDE_DATASOURCE_IDS. The harness machine needs
+              Node.js/npm and npm access for an uncached package.
+            </p>
+            <details className="disclosure">
+              <summary>Tableau MCP settings (JSON)</summary>
+              <JsonEditor
+                label="Tableau MCP settings"
+                value={advanced}
+                onChange={setAdvanced}
+                guide={tableauConnectionGuide}
+              />
+            </details>
+          </>
         )}
         <footer className="modal-footer">
           {initial && (

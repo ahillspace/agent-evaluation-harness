@@ -32,11 +32,12 @@ async function finish(code: number) {
       await initialization;
       if (runner?.pid) {
         const pid = runner.pid;
-        const identity = await processIdentity(pid);
-        const started = lease.runnerStarted ?? identity?.started;
-        await drainGroup(pid, () =>
-          verifyOwner(pid, started, id, processEntry("posix-runner").source),
-        );
+        const started =
+          lease.runnerStarted ?? (await processIdentity(pid))?.started;
+        await drainGroup(pid, {
+          verify: () =>
+            verifyOwner(pid, started, id, processEntry("posix-runner").source),
+        });
       }
       if (lease) await persist({ ...lease, state: "cleaned" });
     } catch (error) {

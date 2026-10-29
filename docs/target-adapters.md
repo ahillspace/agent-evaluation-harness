@@ -20,7 +20,8 @@ AgentConfig continues to describe managed targets, researchers, and local judges
 
 ## Implement the adapter contract
 
-Implement TargetAdapter in `src/runtime/targets/contracts.ts`.
+Implement `TargetAdapter` in [adapter contracts](../src/runtime/targets/contracts.ts).
+The contract is private runtime infrastructure, while `RuntimePort` remains the application-facing boundary.
 Use a stable ID, an explicit configuration version, and truthful capabilities.
 Validate configuration without resolving secrets.
 Provide a credential binding that separates opaque secret references from public configuration.
@@ -57,7 +58,7 @@ Close must settle owned resources and pending work.
 4. Add local provider fixtures covering cancellation, timeout, uncertain completion, checkpoint recovery, cleanup failure, secret exclusion, and saved configuration reuse.
 5. Run the full validation suite and review dependency boundaries.
 
-The existing session fixture in registry.test.ts demonstrates invocation and recovery without introducing another Run workflow.
+The existing [session fixture](../src/runtime/targets/registry.test.ts) demonstrates invocation and recovery without introducing another Run workflow.
 A session-based integration must implement create, invoke, reconcile, and close within its adapter using this contract.
 Provider-specific authentication variants can extend the typed credential contract without changing evaluation or orchestration ownership.
 
@@ -65,6 +66,21 @@ Provider-specific authentication variants can extend the typed credential contra
 
 New Run manifests freeze target configuration and capabilities.
 Existing manifests use savedTarget to interpret legacy agent fields without rewriting data.
-New storage schema 3 freezes target configuration in blueprints and preserves version 2 record bytes.
+Storage migration 3 adds target immutability to blueprints and preserves earlier record bytes.
+The current database version and later migrations belong to [architecture](architecture.md#storage-and-schema-ownership).
 Private invocation journals are separate from immutable answer artifacts and are excluded from public observation queries.
 Retained credential versions support immutable snapshots; do not delete a version still owned by a Run, sample, or recovery record.
+The current external catalog retains these versions for the workspace lifetime, without automatic garbage collection.
+Managed bindings also retain identity-bound credential versions through ConnectionService.
+Ordinary discovery captures a transient settings/credential pair without creating a retained historical snapshot.
+
+## Existing composition and checks
+
+[LocalRuntime](../src/runtime/index.ts) registers only `ManagedTargetAdapter` and `HttpTargetAdapter`.
+[TargetRegistry](../src/runtime/targets/registry.ts) checks adapter version, capabilities, cleanup status, recovery deadlines, and admission safety.
+[TargetInvocations](../src/application/target-invocations.ts) journals private checkpoints before forwarding them to application persistence.
+[ExternalTargetCatalog](../src/runtime/targets/catalog.ts) owns credential identity and retained references.
+Follow [external target architecture](external-targets.md) for current operation traces and [runtime contracts](runtime.md) for process and provider boundaries.
+
+The registry fixture covers the extension seam without establishing compatibility with an unimplemented external provider.
+Native or live-provider checks need separate recorded evidence.

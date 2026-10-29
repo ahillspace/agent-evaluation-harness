@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Json, TargetOutput } from "../contracts.js";
 import { redact } from "./harness.js";
 import { withInvocationDeadline } from "./deadline.js";
+import { safeFetchFailureDetails } from "./safe-fetch-diagnostics.js";
 
 export const TYPESAFE_ENDPOINT = "https://api.typesafe.ai/v1";
 export interface HttpAttempt {
@@ -108,6 +109,7 @@ export async function jevHttp(input: {
   signal: AbortSignal;
   timeoutMs: number;
   maxResponseBytes?: number;
+  maxAttempts?: 1 | 3;
   secrets?: string[];
   onRequest?: (request: Json) => void;
 }) {
@@ -121,13 +123,14 @@ export async function jevHttp(input: {
   let requestId: string | undefined;
   let status: number | undefined;
   let unresolvedUsage = false;
+  const maxAttempts = input.maxAttempts ?? 3;
   try {
     return await withInvocationDeadline(
       input.timeoutMs,
       input.signal,
       async (signal) => {
         if (request !== undefined) input.onRequest?.(request);
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
           signal.throwIfAborted();
           unresolvedUsage = true;
           lastResponse = undefined;
@@ -147,10 +150,10 @@ export async function jevHttp(input: {
               signal,
               redirect: "manual",
             });
-          } catch {
+          } catch (error) {
             throw new JevFailure(
               "provider_failure",
-              "The TypeSafe request failed before a complete HTTP response. It was not retried because provider usage is unknown.",
+              `The TypeSafe request failed before a complete HTTP response${safeFetchFailureDetails(error)}. It was not retried because provider usage is unknown.`,
             );
           }
           status = response.status;
@@ -181,7 +184,7 @@ export async function jevHttp(input: {
             reportedUsage(lastResponse!) === undefined &&
             status !== 429 &&
             status !== 529;
-          if ((status === 429 || status === 529) && attempt < 2) {
+          if ((status === 429 || status === 529) && attempt + 1 < maxAttempts) {
             await delay(
               retryDelay(response.headers.get("retry-after"), attempt),
               undefined,

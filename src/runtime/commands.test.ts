@@ -31,6 +31,30 @@ it("does not inherit unrelated host credentials", () => {
   expect(inheritedEnvironment()).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
   expect(inheritedEnvironment()).not.toHaveProperty("OPENAI_API_KEY");
 });
+it("inherits only the explicit extra CA path and preserves spaces", () => {
+  const values = {
+    NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS,
+    NODE_TLS_REJECT_UNAUTHORIZED: process.env.NODE_TLS_REJECT_UNAUTHORIZED,
+    UNRELATED_SECRET: process.env.UNRELATED_SECRET,
+  };
+  try {
+    process.env.NODE_EXTRA_CA_CERTS = "C:\\company certs\\gateway.pem";
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+    process.env.UNRELATED_SECRET = "fixture-secret";
+    expect(inheritedEnvironment()).toMatchObject({
+      NODE_EXTRA_CA_CERTS: "C:\\company certs\\gateway.pem",
+    });
+    expect(inheritedEnvironment()).not.toHaveProperty(
+      "NODE_TLS_REJECT_UNAUTHORIZED",
+    );
+    expect(inheritedEnvironment()).not.toHaveProperty("UNRELATED_SECRET");
+  } finally {
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
 it.skipIf(process.platform === "win32")(
   "resolves executable symlinks and rejects directories and files without execute permission",
   async () => {

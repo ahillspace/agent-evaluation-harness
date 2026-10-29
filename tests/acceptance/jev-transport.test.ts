@@ -15,6 +15,7 @@ import {
 } from "../../src/contracts.js";
 import { createApplication } from "../../src/application/application.js";
 import { startServer } from "../../src/server.js";
+import { Database } from "../../src/storage/database.js";
 
 const executeFile = promisify(execFile);
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -46,7 +47,31 @@ async function fixture(eventCount = 1) {
     execute: async (input) => {
       calls.target++;
       expect(input.question).not.toHaveProperty("expected");
-      for (let index = 0; index < eventCount; index++) {
+      input.onEvent({
+        type: "tool.completed",
+        message: "Fixture event 0",
+        data: { index: 0, answer: 42 },
+      });
+      if (eventCount > 2) {
+        const history = new Database(join(dataDirectory, "workspace.sqlite"));
+        try {
+          // Keep real stored history while batching the bulk fixture writes.
+          history.transaction(() => {
+            for (let index = 1; index < eventCount - 1; index++)
+              history.append({
+                runId: input.runId,
+                attemptId: input.attemptId,
+                type: "tool.completed",
+                message: `Fixture event ${index}`,
+                data: { index, answer: 42 },
+              });
+          });
+        } finally {
+          history.close();
+        }
+      }
+      if (eventCount > 1) {
+        const index = eventCount - 1;
         input.onEvent({
           type: "tool.completed",
           message: `Fixture event ${index}`,

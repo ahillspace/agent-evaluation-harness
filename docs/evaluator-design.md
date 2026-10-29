@@ -7,6 +7,24 @@ Explicit policies describe acceptable equivalence; optional LLM and Jev judgment
 Reference defects receive review dispositions or corrected revisions, rather than automatic passing grades.
 The CLI and browser use the same engine contracts.
 
+## Implementation map
+
+This page describes the inspected working tree on 2026-10-22.
+The architecture audit records its revision and validation scope in the repository's audit ledger.
+
+| Concern                       | Source owner and entry points                                                                                                                                                               |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Comparison contract           | [`evaluatorSettingsSchema`](../src/contracts.ts) defines shared settings, question overrides, and calibration examples.                                                                     |
+| Public answer boundary        | [`prepareQuestions`](../src/application/catalog.ts) validates and derives formats; [`publicEvaluationGuidance`](../src/contracts/evaluation-guidance.ts) describes public acceptance rules. |
+| Pure grading                  | [`grade`](../src/evaluation/scoring.ts) selects the answer, validates the reference, applies representation rules, and returns a verdict.                                                   |
+| Typed tables and ranking      | [`gradeTypedAnswer` and `validateReference`](../src/evaluation/typed-answers.ts) own typed values, ordering, ranking pools, and policy applicability.                                       |
+| Publication and calibration   | [`CatalogService.publishBank` and `publishDraft`](../src/application/catalog.ts) call [`calibrateSettings`](../src/application/calibration.ts) before transactional publication.            |
+| Saved-answer grading          | [`EvaluationService.assess`, `rescore`, and `preview`](../src/application/evaluations.ts) verify sealed evidence and select compatible reference revisions.                                 |
+| Named assessments and retries | [`AssessmentPassService`](../src/application/assessment-passes.ts) freezes pass configuration; [`AnswerSources`](../src/application/answer-sources.ts) resolves physical evidence.          |
+
+Transport operations enter through [`createApplication`](../src/application/application.ts), which validates inputs and dispatches to these services.
+Change comparison behavior in the evaluation module and keep browser checks, calibration, previews, and saved-answer grading consistent.
+
 ## Evidence and failure families
 
 The six-run campaign contains 120 question slots, 115 completed answers, and five execution failures.
@@ -62,7 +80,13 @@ These sources support the design; they do not establish that automatic grading c
 ## Comparison rules
 
 Settings belong to a published evaluator revision, with optional question overrides.
-Unknown evaluator-setting fields and incompatible policies fail validation instead of silently changing meaning.
+Unknown evaluator-setting fields fail schema validation.
+Reference validation rejects invalid column rules, ranking pools, and several incompatible policies before publication.
+Typed table representation, explicit sorting, and distinct-row comparison run in Auto mode.
+Authoring validation rejects typed-table policies that the selected mode cannot apply, after question overrides resolve.
+Explicit sorting requires Auto comparison with a typed table.
+Ordering and collation must have an active consumer rather than being superseded by another policy.
+Historical grading and export preserve published settings; new publication applies current authoring rules.
 Historical reference envelopes can contain ignored `tolerance` or `allow_column_permutation` metadata.
 The editor warns about these fields; move their intended rules into evaluator settings explicitly.
 Existing reference metadata is not automatically translated into an active comparison policy.
@@ -79,11 +103,17 @@ Instant comparison requires a known timezone offset and preserves fractional-sec
 Neither policy infers locale-specific dates or repairs invalid calendar values.
 
 An answer path selects one explicit location in the submitted JSON value.
-Singleton unwrapping removes one array layer only when exactly one item exists.
-It does not search prose, discover wrapper names, or remove extra items.
+Explicit singleton unwrapping removes one array layer only when exactly one item exists.
+The default compatible representation policy also accepts a scalar carried by one row and one cell.
+It accepts supported JSON-encoded table representations without searching prose or removing extra rows or cells.
+The strict representation policy requires the declared public format after explicit extraction and singleton selection.
+[`selectAnswer` and `scalarRepresentation`](../src/evaluation/answer-policy.ts) own these transformations.
 
-Unordered comparison preserves duplicate counts.
+Unordered comparison preserves duplicate counts by default.
+An explicit `duplicateRows: "distinct"` table policy compares distinct normalized rows instead.
 Ordered tables permit permutations only inside equal reference ranking groups.
+Explicit `sortOrder` checks row membership independently of reference row order and then verifies the requested ascending or descending keys.
+The optional `collation` policy selects locale-aware text sorting, numeric sorting, punctuation handling, and sensitivity.
 Top-k comparison requires every higher-ranked row and accepts boundary members only from the complete pool.
 The pool declaration is an author assertion; the engine cannot infer completeness from the supplied rows.
 Missing hidden ranking keys require a richer reviewed reference or custom evaluator.
@@ -94,7 +124,8 @@ Targets receive public question text, context, and structural answer formats.
 Typed tables expose column names and types; typed scalars expose their value type.
 An empty-table reference exposes a generic list format, never a required empty result.
 Null references do not expose a forced-null format.
-Expected values, candidate-pool rows, result counts, and private evaluator rules remain unavailable to the target.
+Expected values, candidate-pool rows, result counts, and custom evaluator code remain private.
+Frozen public evaluation guidance describes acceptance rules, including text normalization, numeric tolerances, column rules, ordering, and duplicate handling.
 Public nullability does not turn null into an acceptable substitute for a known value.
 
 ## Configure policies
@@ -177,6 +208,28 @@ Omitting the bank revision preserves the run's frozen references.
 Corrected references must belong to the same bank and preserve the evaluated questions' identity.
 Rescoring creates another score set with reference provenance and leaves target evidence and original assessments unchanged.
 An original LLM judge remains labeled as original when displayed beside a later deterministic rescore.
+
+[`RunService.executeAttempt`](../src/application/runs.ts) seals the target response before deterministic or optional model judging.
+[`EvaluationService.recover`](../src/application/evaluations.ts) restores missing deterministic assessments from completed evidence without invoking a target or judge.
+An interrupted model assessment receives an explicit error or unavailable record instead of an automatic paid retry.
+Applying retry answers uses [`RetryApplicationService.apply`](../src/application/retry-applications.ts) to create derived passes with physical attempt identifiers and evidence hashes.
+The original result, attempt, manifest, and saved scores remain unchanged.
+
+## Execution and comparison bounds
+
+Typed tables support at most 100 columns and 10,000 rows, using the shared [`MAX_ANSWER_ITEMS`](../src/contracts/answer-limits.ts) limit.
+Exact unordered matches use complete normalized row multisets before tolerance-dependent assignment.
+[`rowsMatch`](../src/evaluation/row-matching.ts) retains duplicates and bounds assignment work to 1,000,000 search steps.
+Typed table comparisons also bound cell checks; tolerance-dependent unordered JSON comparisons support at most 500 items.
+Exceeding these bounds produces an evaluation error rather than an incorrect-answer verdict.
+
+[`gradeCustom`](../src/evaluation/custom.ts) runs evaluator code in a fresh QuickJS runtime without host filesystem or network bindings.
+It sets a 16 MiB memory limit, a 512 KiB stack limit, and a 100 ms interrupt deadline.
+It also checks serialized input and output string lengths before accepting a result.
+These string-length guards do not measure UTF-8 byte sizes, and the interrupt deadline does not establish whole-command latency.
+Custom code returns a boolean verdict with optional explanation and details; exceptions become evaluation errors.
+
+See [independent judges](judging.md) for provider requests, named passes, confidence, and recovery behavior.
 
 ## Interpret coverage and limitations
 

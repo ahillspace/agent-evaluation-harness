@@ -69,3 +69,13 @@ it("rejects unsupported authentication and credential-bearing URLs", () => {
     modelProviderSettings("anthropic", { authMode: "subscription" }),
   ).toThrow();
 });
+
+it("trims endpoint whitespace while preserving a configured Bedrock path", () => {
+  expect(
+    modelProviderSettings("amazon-bedrock", {
+      baseUrl: "  https://gateway.example/bedrock  ",
+      authMode: "bearer",
+      region: "us-east-1",
+    }),
+  ).toMatchObject({ baseUrl: "https://gateway.example/bedrock" });
+});

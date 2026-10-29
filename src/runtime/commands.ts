@@ -15,6 +15,7 @@ const INHERITED = [
   "TMPDIR",
   "LANG",
   "LC_ALL",
+  "NODE_EXTRA_CA_CERTS",
   "CODEX_HOME",
   "XDG_DATA_HOME",
   "XDG_CONFIG_HOME",

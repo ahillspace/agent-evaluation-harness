@@ -3,6 +3,31 @@
 An evaluation run records how one frozen agent configuration answers selected questions.
 Use the same bank across runs to compare configurations, and inspect evidence before changing the agent or scoring rules.
 
+## Local engine configuration
+
+The server owns one local workspace; the browser and CLI share that server's application operations.
+[`startServer`](../src/server.ts) resolves these settings in the following order:
+
+| Setting             | Resolution order                                                                                           |
+| ------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Workspace directory | `dataDirectory` option, then `AEH_DATA_DIRECTORY`, then `.aeh` relative to the server's working directory. |
+| Listening port      | `port` option, then `PORT`, then `4381`.                                                                   |
+| Listening host      | `host` option, then `127.0.0.1`; only loopback hosts are accepted.                                         |
+| CLI endpoint        | `--url`, then `AEH_URL`, then `http://127.0.0.1:4381`; see [CLI usage](cli.md).                            |
+
+The compiled web app uses relative `/api` requests against its serving origin.
+The [Vite configuration](../vite.config.ts) serves development at port `5181` and proxies `/api` to port `4381`.
+Changing `PORT` does not update that development proxy.
+No shared configuration file resolves these transport settings.
+
+The engine trusts local clients and has no user sign-in or per-command authorization layer.
+The server rejects non-loopback bind addresses and foreign `Host` headers.
+Browser origins must match the request host, except the accepted development origins at `localhost:5181` and `127.0.0.1:5181`.
+Requests without an `Origin` header can use the local API, as the CLI does.
+These checks do not isolate the engine from other local processes.
+Command bodies have an 8,000,000-byte limit, and static responses include a content security policy and path containment check.
+[`startServer`](../src/server.ts) owns these transport checks; the [runtime guide](runtime.md) owns provider, process, and credential boundaries.
+
 ## Set up accounts and connections
 
 Open **Settings** to inspect installed harnesses and manage reusable connections.
@@ -26,6 +51,8 @@ Choose the provider whose API protocol the gateway implements and enter its base
 For an Anthropic-compatible gateway, select Anthropic and its API-key or bearer authentication mode.
 For a Bedrock gateway, supply the region and bearer token, and set the optional gateway URL.
 Enter the gateway's model ID if it does not expose a model catalog.
+Set `NODE_EXTRA_CA_CERTS` to a trusted PEM bundle path before starting the Node engine when Bedrock or managed child harnesses need a company CA.
+Node reads this setting at process startup.
 
 The built-in Bedrock Converse harness uses non-streaming requests.
 OpenCode's Bedrock integration requires ConverseStream support.
@@ -35,11 +62,77 @@ Connection discovery does not prove that a gateway accepts every model or invoca
 
 Create a Tableau connection for the intended server and site, then test it from **Settings**.
 In **Run**, select the connection and allowed actions under **Tools**.
+Choose a datasource by its name and project from **Datasource**.
+Open **Find another datasource** to browse pages or search for an exact name.
+The list contains published datasources visible to the saved Tableau account.
+Tableau supports exact datasource-name filtering and rejects commas or ampersands in filters, including encoded values; browse for those names instead.
+See Tableau's [datasource API](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_data_sources.htm#query_data_sources) and [filter rules](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_concepts_filtering_and_sorting.htm).
+**Tool configuration details** shows the exact datasource ID and any configured MCP datasource restriction.
+Use its manual ID field when discovery is unavailable.
+The selected name and project accompany the exact ID in saved configurations, but selection provides prompt guidance without changing access permissions.
 The engine manages the Tableau MCP process; an empty tool selection exposes no Tableau tools.
+When you check a connection or run with Tableau tools, the harness starts a local stdio MCP process using the saved Tableau server, site, and token.
+By default, it runs `npx -y @tableau/mcp-server@4.13.3`.
+If the package is not installed or cached locally, `npx -y` fetches it into npm's cache and runs it without a confirmation prompt.
+This is an on-demand cache install, not a global install.
+The harness does not attach to an already-running MCP server or use servers configured in Codex, Claude Code, or OpenCode.
+To use another Tableau MCP version, change the package spec in `mcpArgs` under **Tableau MCP settings (JSON)**.
+To use another compatible local server, set `mcpCommand` and `mcpArgs`.
+The machine running the harness needs Node.js/npm and npm access for an uncached package.
+The web editor's **Tableau MCP settings (JSON)** accepts `mcpCommand`, `mcpArgs`, `mcpEnv`, and `mcpFeatures`.
+This object configures the local process; it is not a JSON request sent to the MCP server.
+The runtime communicates over stdio and supplies Tableau authentication through its launch environment.
+A compatible custom server must implement stdio MCP and accept these harness-managed environment variables:
+
+| Variable                    | Value                                                           |
+| --------------------------- | --------------------------------------------------------------- |
+| `TRANSPORT`                 | `stdio`                                                         |
+| `AUTH`                      | `pat`                                                           |
+| `SERVER`                    | The saved Tableau server URL.                                   |
+| `SITE_NAME`                 | The saved site content URL.                                     |
+| `PAT_NAME`                  | The saved personal access token name.                           |
+| `PAT_VALUE`                 | The secret personal access token value.                         |
+| `INCLUDE_TOOLS`             | Selected tool names as a comma-separated list, when restricted. |
+| `ENABLE_MCP_SITE_SETTINGS`  | `false`                                                         |
+| `PRODUCT_TELEMETRY_ENABLED` | `false`                                                         |
+| `DISABLE_LOG_MASKING`       | `false`                                                         |
+
+Use `mcpEnv` for additional MCP server environment variables as string values.
+This lets a connection use server options added in another Tableau MCP version without a harness update.
+Variable names retain their exact spelling and case, and values pass through literally without shell expansion.
+Use the spelling expected by the MCP server, and do not supply two names that differ only by case.
+Use strings for all values, including numbers, booleans, and serialized JSON.
+The harness reserves authentication, transport, telemetry, tool selection, and its internal feature override variable.
+These are public settings saved with connection and run configurations.
+Do not put credentials in `mcpEnv`; use the protected credential field.
+
+For example, set `mcpEnv` to `{"INCLUDE_DATASOURCE_IDS":"id-1,id-2"}` to bound Tableau MCP tool requests and results to those datasource IDs.
+The PAT authenticates to Tableau, and the MCP datasource filter bounds the resources available through this connection.
+Tableau documents datasource scoping in its [self-hosted deployment guide](https://tableau.github.io/tableau-mcp/docs/enterprise/tableau-server).
+`INCLUDE_TOOLS` is controlled by the tool allowlist in **Run**.
+
+Use `mcpFeatures` for feature flags as a map of feature names to booleans.
+The harness overlays these values on the defaults shipped by the selected Tableau MCP package through Tableau MCP's custom feature gate provider interface.
+The defaults load beside the server's real entry point, including when its executable is a symlink.
+If the package does not provide readable Boolean defaults in `features.json`, the feature override configuration fails instead of disabling unrelated defaults.
+Feature names stay user-configurable so new Tableau flags do not require a harness release.
+See Tableau's [feature flag documentation](https://tableau.github.io/tableau-mcp/docs/developers/feature-flags) for the current provider behavior.
+
+For example, set `mcpFeatures` to `{"knowledge-tools":true}` to enable Tableau Knowledge tools in packages that support that flag.
+The site must have Tableau Knowledge enabled, and the feature is available on Tableau+ sites.
+Query and inspect require Viewer or higher; manage requires Creator or higher and can change shared Knowledge context.
+Select only the Knowledge tools the agent should use in **Run**.
+See Tableau's [Knowledge query](https://tableau.github.io/tableau-mcp/docs/tools/knowledge/query-knowledge-context), [inspect](https://tableau.github.io/tableau-mcp/docs/tools/knowledge/inspect-knowledge-context), and [manage](https://tableau.github.io/tableau-mcp/docs/tools/knowledge/manage-knowledge-context) documentation.
 
 Keep datasource references consistent across the question context, system prompt, and datasource setting.
-A datasource ID provides prompt guidance; it does not restrict the account's underlying access.
+A datasource ID in the Run setup provides prompt guidance.
+Use `mcpEnv.INCLUDE_DATASOURCE_IDS` when the MCP connection must enforce a datasource boundary.
 Requests sharing a Tableau session credential can wait for that connection even when the run permits additional concurrency.
+Connection checks and managed MCP execution inherit the same restricted environment, including `NODE_EXTRA_CA_CERTS` when the engine has an explicit corporate certificate bundle.
+The certificate path retains spaces and does not require duplication in `mcpEnv`.
+Unrelated provider credentials and `NODE_TLS_REJECT_UNAUTHORIZED` do not pass through the inherited environment.
+The parent runtime owns generated feature-provider modules under its state directory and removes them after process cleanup settles.
+Startup removes abandoned modules only after confirming cleanup of persisted process scopes.
 
 ## Create a question bank
 
@@ -52,8 +145,35 @@ Typed declarations derive public answer formats without disclosing expected valu
 Imports can supply an explicit `answerFormat`.
 Published evaluation requirements describe applicable representation, duplicate, and ordering rules.
 
-Publishing edits creates another bank revision.
+Use **Questions** to search the bank and edit one question at a time.
+The question editor shows the reference answer beside its effective grading rules.
+An override applies only to that question; reset it to use the bank's shared rules again.
+Use **Check answer** to try an answer against the current draft without calling a model.
+
+Use **Grading** to change shared answer rules, check calibration examples, or preview the draft against saved answers.
+Calibration examples are sample answers with a known correct or incorrect outcome; they help catch unintended rule changes before publication.
+Advanced rules and custom JavaScript evaluators are available in focused disclosures.
+Optional Jev profiles are published separately; other model judges are configured when setting up a run.
+Judge scores remain separate from deterministic answer matching.
+
+Question and grading edits stay in a draft until you select **Publish changes**.
+Drafts survive navigation and refresh in the same browser tab and workspace.
+Browser drafts use `sessionStorage`, keyed by the durable workspace identity; they are not published engine records.
+[`bankDraftKey`](../src/web/bank-draft.ts) scopes bank drafts, and [`setupDraftKey`](../src/web/setup-draft.ts) scopes launch drafts.
+Publication saves questions and deterministic rules together after checking calibration examples.
+If another edit has changed the published bank or rules, reload the current version before publishing your draft.
 Existing runs retain their original questions, references, and grading settings.
+Use **History** to inspect published versions and **Export bank** to download questions and rules together.
+Import reviews show which settings are included before you create a bank.
+CSV imports support question text, expected answers, IDs, and tags.
+Use a versioned JSON bank package to retain public context, answer instructions, evaluator settings, and optional Jev profile settings.
+[`parseBankImport`](../src/web/bank-import.ts) rejects unsupported CSV columns instead of silently dropping them.
+An imported Jev profile remains a draft until you publish and activate it separately, after publishing the bank.
+The bank and evaluator publish together through [`CatalogService.publishBank`](../src/application/catalog.ts); Jev profile publication is a separate operation.
+
+Use **Findings** to review reported concerns and open their source answers.
+Findings are suggestions, not confirmed errors.
+Accepting a correction or exclusion publishes an explicit change while preserving previous run evidence.
 
 Expected-answer size indicators estimate tokens from serialized content.
 Yellow starts at approximately 2,000 tokens; red starts at approximately 32,000 tokens for the relevant Jev context estimate.
@@ -80,8 +200,19 @@ Advanced JSON editors describe supported settings and validate input.
 Put credentials in **Connections**, not advanced JSON or prompts.
 
 Setup drafts survive navigation and refresh within the same tab and workspace.
-**Reset** discards the draft, and a successful launch clears it.
+The browser saves the complete launch request before sending it.
+If the launch response is lost, **Retry launch** recovers the same Run or research session, including after navigation or refresh.
+The form stays fixed while that request is unresolved.
+An acknowledged launch clears the saved request.
+If browser storage cannot save the complete pending request, the browser does not send the launch.
+**Reset setup** discards the draft and starts a separate request; an earlier accepted launch remains saved in Results.
 Unavailable saved dependencies stay visible so you can replace them deliberately.
+
+The form's authentication selection overrides `authSource` in advanced model settings.
+[`roleSettings`](../src/web/drafts.ts) sets `connection` when you select a saved provider connection, and `local` otherwise.
+Reuse restores frozen settings into a new draft through [`hydrateSetupSource`](../src/web/setup-source.ts).
+Launch resolves the target and selected judge connections before saving the new immutable manifest through [`RunService.launch`](../src/application/runs.ts).
+Reusing a configuration does not modify the earlier Run.
 
 For external agents, configure request and response mapping in **Settings**.
 Request preview does not call the endpoint; an explicit sample request does.
@@ -93,6 +224,14 @@ See [external HTTP agents](http-targets.md) for configuration and evidence limit
 Select a question to inspect its submitted answer, reference, attempts, recorded activity, and judgments.
 Use **Summary** for run-level outcomes and performance.
 Execution failures and judge errors remain distinct from incorrect answers.
+
+Observation uses HTTP polling, not a persistent push connection.
+[`useObservation`](../src/web/observation-stream.ts) first requests `runs.get`, then requests `runs.observe` without resending the frozen manifest.
+It merges events by durable sequence, drains 200-event pages, and retries after request failures.
+Selected attempt evidence and assessment details load through separate queries.
+[`Observe`](../src/web/observe.tsx) uses engine-provided allowed actions and refreshes observation after a control request succeeds.
+Pause, Halt, Resume, and Cancel affect engine work; leaving the page does not send one of these controls.
+See [launch and control](architecture.md#launch-observe-and-control) for admission, interruption, and startup recovery behavior.
 
 Choose a named saved score to inspect its judgments and coverage.
 Accuracy is `correct / judged`, where judged means a completed correct-or-incorrect decision.
@@ -178,6 +317,16 @@ After active work settles, **Rerun failed questions** creates a linked run conta
 It uses the original frozen configuration and retains the original attempts and scores.
 When prior actions could repeat, the app requires acknowledgment.
 Incorrect answers do not trigger automatic execution retries.
+
+After a linked rerun finishes, choose **Apply rerun results** to include its completed answers in the original Run.
+The original Run also lists linked reruns that have answers ready to apply.
+The app creates updated scores and keeps the original failures, answers, and scores available.
+Each applied answer identifies its source rerun.
+Applying results does not call the target agent or judges again.
+Compatible saved judge decisions carry forward; missing compatible decisions remain unjudged.
+Existing human review decisions on other questions stay in the updated human score.
+Only completed answers from a linked rerun with the same frozen configuration qualify.
+Replacing an answer already applied from another rerun requires an explicit replacement choice.
 
 ## Run bounded research
 

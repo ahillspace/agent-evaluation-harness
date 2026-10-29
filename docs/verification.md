@@ -1,7 +1,8 @@
 # Build verification
 
 This historical record covers earlier build checkpoints.
-See [observation redesign validation](observation-redesign-validation.md) for the latest recorded delivery checks.
+See [observation redesign validation](observation-redesign-validation.md) for subsequent delivery checkpoints.
+See the [architecture audit](architecture-audit.md) for the current source baseline and review findings.
 
 Verification took place on Windows on October 3, 2026, using Node.js 25.6.1 and the minimum supported Node.js 22.13.0.
 The checks below distinguish live provider behavior from isolated regression tests.

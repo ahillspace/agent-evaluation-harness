@@ -112,20 +112,45 @@ export const researchGuide: JsonGuide = {
 
 export const tableauConnectionGuide: JsonGuide = {
   description:
-    "Optional Tableau MCP process settings. Leave {} to use the bundled integration. Never enter credentials here.",
-  example: {},
+    "This object configures the local stdio MCP process launched by the harness; it is not a JSON request sent to the server. The Tableau URL, site, and PAT name use fields above. The PAT value uses the separate credential field. Use mcpCommand and mcpArgs to select another local server or package version. mcpEnv accepts additional server environment variables as string values. mcpFeatures accepts feature flag names as booleans and overlays them on the launched Tableau MCP package defaults. The harness reserves its authentication, transport, tool selection, and internal feature override variables. Never enter credentials here.",
+  example: {
+    mcpCommand: "npx",
+    mcpArgs: ["-y", "@tableau/mcp-server@4.13.3"],
+    mcpEnv: {
+      INCLUDE_DATASOURCE_IDS: "your-datasource-id",
+    },
+    mcpFeatures: {
+      "knowledge-tools": true,
+    },
+  },
   fields: [
     {
       key: "mcpCommand",
-      description: "Executable for a compatible Tableau MCP server.",
+      description:
+        "Local executable launched by the runtime for a compatible stdio Tableau MCP server.",
       values: "executable name or absolute path",
-      default: "bundled Tableau MCP command",
+      default: "npx",
     },
     {
       key: "mcpArgs",
-      description: "Arguments passed directly to that executable.",
+      description:
+        "Array of arguments passed directly to the executable without shell parsing. Change the package version here when using npx.",
       values: "array of strings",
-      default: "bundled arguments",
+      default: '["-y", "@tableau/mcp-server@4.13.3"]',
+    },
+    {
+      key: "mcpEnv",
+      description:
+        "Any additional MCP environment variable, including options added in future server versions. Names retain their exact case and string values pass through literally. Use the spelling expected by the server. These public values are saved with your configuration; do not include credentials or variables managed by the harness.",
+      values: "object mapping environment variable names to strings",
+      default: "{}",
+    },
+    {
+      key: "mcpFeatures",
+      description:
+        "Feature flag overrides merged with the defaults shipped by the selected Tableau MCP package. The harness uses Tableau MCP's custom feature gate provider interface.",
+      values: "object mapping feature names to booleans",
+      default: "{}",
     },
   ],
 };

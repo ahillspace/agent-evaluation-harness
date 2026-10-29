@@ -1,5 +1,9 @@
 # Observation redesign validation
 
+This is a historical delivery record with checks from several implementation checkpoints.
+Its test totals do not certify later working-tree changes.
+See the [architecture audit](architecture-audit.md) for the current source baseline and review findings.
+
 ## Delivered behavior
 
 Runs support named deterministic, LLM, Jev, and human assessment passes over saved answers.

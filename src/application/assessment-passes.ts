@@ -1,8 +1,6 @@
 import { join } from "node:path";
-import { mkdir } from "node:fs/promises";
 import {
   jsonSchema,
-  judgeVerdictSchema,
   judgeSchema,
   jevJudgeSelectionSchema,
   type AssessmentPass,
@@ -13,13 +11,16 @@ import {
   type RunRecord,
   type RunView,
   type RunObservation,
+  type JevAssessmentRecord,
 } from "../contracts.js";
 import { Database } from "../storage/database.js";
 import { AppError, errorMessage } from "../domain/errors.js";
 import { digest, id, now } from "../domain/identity.js";
 import { EvaluationService } from "./evaluations.js";
-import { evidenceSupports } from "../domain/evidence-requirements.js";
+import { LlmJudgeService } from "./llm-judge.js";
 import { JevService } from "./jev.js";
+import { AnswerSources } from "./answer-sources.js";
+import { restoreLegacyReviews } from "./legacy-reviews.js";
 
 function passRates(coverage: AssessmentPass["coverage"]) {
   const accuracy = coverage.judged ? coverage.correct / coverage.judged : null;
@@ -45,7 +46,59 @@ export function summarizePass(pass: AssessmentPass): AssessmentPassSummary {
   } = basis;
   return { ...summary, ...passRates(pass.coverage), basis: referenceBasis };
 }
+type JudgmentMeasurement = Pick<
+  PassJudgment,
+  | "resultId"
+  | "attemptId"
+  | "status"
+  | "response"
+  | "jevAssessmentId"
+  | "review"
+>;
+function computedJudgmentStatus(
+  source: "deterministic" | "llm",
+  assessment: {
+    deterministic: string;
+    judgeVerdict?: boolean | null;
+    judgeError?: unknown;
+  },
+): PassJudgment["status"] {
+  if (source === "llm")
+    return assessment.judgeError
+      ? "error"
+      : assessment.judgeVerdict === true
+        ? "correct"
+        : assessment.judgeVerdict === false
+          ? "incorrect"
+          : "unjudged";
+  return assessment.deterministic === "unavailable"
+    ? "unjudged"
+    : assessment.deterministic === "unscorable"
+      ? "excluded"
+      : (assessment.deterministic as PassJudgment["status"]);
+}
+function jevJudgmentStatus(
+  status: string,
+  answer: { choice: string; confidence: number } | undefined,
+  threshold: number,
+): PassJudgment["status"] {
+  if (status === "error") return "error";
+  if (status !== "completed" || !answer || answer.confidence < threshold)
+    return "unjudged";
+  return answer.choice === "acceptable"
+    ? "correct"
+    : answer.choice === "incorrect"
+      ? "incorrect"
+      : "unjudged";
+}
 export function measurePass(pass: AssessmentPass): AssessmentPass {
+  return { ...pass, ...measureJudgments(pass) };
+}
+function measureJudgments(
+  pass: Pick<AssessmentPass, "source" | "status" | "basis"> & {
+    judgments: JudgmentMeasurement[];
+  },
+) {
   const eligible = new Set(pass.basis.eligibleResultIds);
   const judgments = pass.judgments.filter((j) => eligible.has(j.resultId));
   const correct = judgments.filter((j) => j.status === "correct").length;
@@ -68,7 +121,6 @@ export function measurePass(pass: AssessmentPass): AssessmentPass {
         ? "Retry the computed parent assessment before deriving another human review."
         : "No failed judgments to retry. Failed executions require an execution retry; completed abstentions remain recorded.";
   return {
-    ...pass,
     retryableJudgments,
     retryUnavailableReason,
     coverage: {
@@ -121,6 +173,7 @@ export class AssessmentPassService {
           ),
         }),
       );
+    restoreLegacyReviews(this.db, this);
   }
   private skeleton(
     run: RunRecord,
@@ -128,11 +181,14 @@ export class AssessmentPassService {
     name: string,
     configuration: AssessmentPass["configuration"],
     passId = id("pass"),
+    useAppliedAnswers = true,
   ): AssessmentPass {
     const evaluator = configuration.evaluator ?? run.manifest.evaluator;
     const questions =
       configuration.referenceBank?.questions ?? run.manifest.questions;
-    const results = this.db.list("result", { runId: run.id });
+    const results = useAppliedAnswers
+      ? new AnswerSources(this.db).results(run.id)
+      : this.db.list("result", { runId: run.id });
     const excluded = results
       .filter((result) => {
         const settings = {
@@ -167,22 +223,35 @@ export class AssessmentPassService {
             .sort((a, b) => a.id.localeCompare(b.id)),
         ),
       },
-      judgments: results.map((r) => ({
-        resultId: r.id,
-        ...(r.completedAttemptId
-          ? {
-              attemptId: r.completedAttemptId,
-              evidenceHash: this.db.require("attempt", r.completedAttemptId)
-                .evidenceHash,
-            }
-          : {}),
-        status: excluded.includes(r.id) ? "excluded" : "unjudged",
-        explanation: excluded.includes(r.id)
-          ? "Excluded by the selected reference policy."
-          : r.completedAttemptId
-            ? "Assessment pending."
-            : `Execution ${r.status}; no sealed answer.`,
-      })),
+      judgments: results.map((r) => {
+        const source = useAppliedAnswers ? r.answerSource : undefined;
+        const attemptId = source?.attemptId ?? r.completedAttemptId;
+        return {
+          resultId: r.id,
+          ...(attemptId
+            ? {
+                attemptId,
+                ...(source && source.runId !== run.id
+                  ? {
+                      source: {
+                        runId: source.runId,
+                        resultId: source.resultId,
+                      },
+                    }
+                  : {}),
+                evidenceHash:
+                  source?.evidenceHash ??
+                  this.db.answerSource(attemptId).evidenceHash,
+              }
+            : {}),
+          status: excluded.includes(r.id) ? "excluded" : "unjudged",
+          explanation: excluded.includes(r.id)
+            ? "Excluded by the selected reference policy."
+            : attemptId
+              ? "Assessment pending."
+              : `Execution ${r.status}; no sealed answer.`,
+        };
+      }),
       coverage: {
         eligible: 0,
         answered: 0,
@@ -198,6 +267,145 @@ export class AssessmentPassService {
       accuracy: null,
       judgedAccuracy: null,
     });
+  }
+  /** List cards use compact metadata; full immutable passes remain a deliberate detail read. */
+  summaries(runId: string): AssessmentPassSummary[] {
+    const saved = this.db.assessmentPassSummaries(runId);
+    const run = this.db.runAssessmentState(runId);
+    const sources: AssessmentPass["source"][] = [
+      "deterministic",
+      ...(run.judgeEnabled ? ["llm" as const] : []),
+      ...(run.jevEnabled ? ["jev" as const] : []),
+    ];
+    const missing = sources.filter(
+      (source) =>
+        !saved.some((pass) => pass.id === `original_${source}_${runId}`),
+    );
+    const legacy = this.db.legacyScoreSummaryInputs(runId);
+    if (!missing.length && !legacy.length)
+      return saved.map((pass) => ({ ...pass, ...passRates(pass.coverage) }));
+    const originalBasis = missing.length
+      ? this.db.runAssessmentBasis(runId).basis
+      : undefined;
+    const results = this.db.resultAssessmentMetadata(runId);
+    const original = new Map(
+      this.db
+        .originalAssessmentMetadata(runId)
+        .map((assessment) => [assessment.resultId, assessment]),
+    );
+    const jev = new Map<
+      string,
+      ReturnType<Database["originalJevMetadata"]>[number]
+    >();
+    if (missing.includes("jev"))
+      for (const record of this.db.originalJevMetadata(runId)) {
+        const key = JSON.stringify([record.resultId, record.attemptId]);
+        if (!jev.has(key)) jev.set(key, record);
+      }
+    const make = (
+      source: AssessmentPass["source"],
+      seed?: ReturnType<Database["legacyScoreSummaryInputs"]>[number],
+    ): AssessmentPassSummary => {
+      const basis = seed?.basis ?? originalBasis!;
+      const assessments = seed
+        ? new Map(
+            seed.assessments.map((assessment) => [
+              assessment.resultId,
+              assessment,
+            ]),
+          )
+        : original;
+      const excluded = new Set(
+        results
+          .filter(
+            (result) =>
+              (basis.dispositions[result.questionId] ??
+                basis.defaultDisposition) === "needs_review",
+          )
+          .map((result) => result.id),
+      );
+      const judgments: JudgmentMeasurement[] = results.map((result) => {
+        const judgment: JudgmentMeasurement = {
+          resultId: result.id,
+          ...(result.completedAttemptId
+            ? { attemptId: result.completedAttemptId }
+            : {}),
+          status: excluded.has(result.id) ? "excluded" : "unjudged",
+        };
+        if (excluded.has(result.id) || (!seed && !result.completedAttemptId))
+          return judgment;
+        if (source === "jev") {
+          const record = jev.get(
+            JSON.stringify([result.id, result.completedAttemptId]),
+          );
+          if (!record) return judgment;
+          judgment.jevAssessmentId = record.id;
+          judgment.status = jevJudgmentStatus(
+            record.status,
+            record.choice !== null && record.confidence !== null
+              ? { choice: record.choice, confidence: record.confidence }
+              : undefined,
+            record.threshold,
+          );
+          return judgment;
+        }
+        const assessment = assessments.get(result.id);
+        if (!assessment) return judgment;
+        if (seed) judgment.attemptId = assessment.attemptId;
+        judgment.status = computedJudgmentStatus(
+          source === "llm" ? "llm" : "deterministic",
+          assessment,
+        );
+        if (source === "llm" && assessment.judgeResponded)
+          judgment.response = true;
+        return judgment;
+      });
+      const terminal =
+        !!seed || ["completed", "failed", "cancelled"].includes(run.status);
+      const status = terminal
+        ? "completed"
+        : ["paused", "halted", "interrupted"].includes(run.status)
+          ? "interrupted"
+          : "running";
+      const referenceBasis = {
+        bankRevisionId: basis.bankRevisionId,
+        evaluatorRevisionId: basis.evaluatorRevisionId,
+        referenceHash: basis.referenceHash,
+      };
+      return {
+        id: seed?.id ?? `original_${source}_${runId}`,
+        runId,
+        source,
+        name:
+          seed?.name ??
+          (source === "deterministic"
+            ? "Original deterministic"
+            : source === "llm"
+              ? "Original LLM judge"
+              : "Original Jev"),
+        createdAt: seed?.createdAt ?? run.createdAt,
+        ...(terminal ? { finishedAt: seed?.createdAt ?? run.updatedAt } : {}),
+        status,
+        basis: referenceBasis,
+        ...measureJudgments({
+          source,
+          status,
+          judgments,
+          basis: {
+            ...referenceBasis,
+            eligibleResultIds: results
+              .filter((result) => !excluded.has(result.id))
+              .map((result) => result.id),
+            excludedResultIds: [...excluded],
+          },
+        }),
+      };
+    };
+    return [
+      ...missing.map((source) => make(source)),
+      ...legacy.map((seed) => make("deterministic", seed)),
+      ...saved.map((pass) => ({ ...pass, ...passRates(pass.coverage) })),
+    ];
   }
   list(runId: string, details = false): AssessmentPass[] {
     const run = this.db.require("run", runId);
@@ -227,6 +435,7 @@ export class AssessmentPassService {
             : "Original Jev",
         configuration,
         passId,
+        false,
       );
       pass.createdAt = run.createdAt;
       pass.judgments = pass.judgments.map((j) => {
@@ -244,12 +453,9 @@ export class AssessmentPassService {
         if (source === "deterministic")
           return {
             ...j,
-            status:
-              assessment.deterministic.status === "unavailable"
-                ? "unjudged"
-                : assessment.deterministic.status === "unscorable"
-                  ? "excluded"
-                  : assessment.deterministic.status,
+            status: computedJudgmentStatus("deterministic", {
+              deterministic: assessment.deterministic.status,
+            }),
             explanation: assessment.deterministic.explanation,
             ...(assessment.deterministic.details
               ? { details: assessment.deterministic.details }
@@ -257,13 +463,11 @@ export class AssessmentPassService {
           };
         return {
           ...j,
-          status: assessment.judgeError
-            ? "error"
-            : assessment.judge?.verdict === true
-              ? "correct"
-              : assessment.judge?.verdict === false
-                ? "incorrect"
-                : "unjudged",
+          status: computedJudgmentStatus("llm", {
+            deterministic: assessment.deterministic.status,
+            judgeError: assessment.judgeError,
+            judgeVerdict: assessment.judge?.verdict,
+          }),
           explanation:
             assessment.judgeError ??
             assessment.judge?.explanation ??
@@ -271,14 +475,16 @@ export class AssessmentPassService {
           ...(assessment.judgeRequest
             ? { request: assessment.judgeRequest }
             : {}),
-          ...(assessment.judge
+          ...(assessment.judgeResponse || assessment.judge
             ? {
                 response:
                   assessment.judgeResponse ??
                   jsonSchema.parse(assessment.judge),
               }
             : {}),
-          ...(assessment.judge?.usage ? { usage: assessment.judge.usage } : {}),
+          ...((assessment.judgeUsage ?? assessment.judge?.usage)
+            ? { usage: assessment.judgeUsage ?? assessment.judge?.usage }
+            : {}),
         };
       });
       const terminal = ["completed", "failed", "cancelled"].includes(
@@ -299,44 +505,8 @@ export class AssessmentPassService {
     for (const scores of this.db
       .list("scoreSet", { runId })
       .filter((s) => s.kind !== "original" && s.published)) {
-      const passId = `scores_${scores.id}`;
-      if (saved.some((p) => p.id === passId)) continue;
-      let pass = this.skeleton(
-        run,
-        "deterministic",
-        `${scores.evaluator.name} (revision ${scores.evaluator.number})`,
-        { evaluator: scores.evaluator, referenceBank: scores.referenceBank },
-        passId,
-      );
-      pass = {
-        ...pass,
-        createdAt: scores.createdAt,
-        finishedAt: scores.createdAt,
-        status: "completed",
-        judgments: pass.judgments.map((j) => {
-          const assessment = scores.assessments.find(
-            (a) => a.resultId === j.resultId,
-          );
-          if (!assessment || j.status === "excluded") return j;
-          const status = assessment.deterministic.status;
-          return {
-            ...j,
-            status:
-              status === "unavailable"
-                ? "unjudged"
-                : status === "unscorable"
-                  ? "excluded"
-                  : status,
-            explanation: assessment.deterministic.explanation,
-            ...(assessment.deterministic.details
-              ? { details: assessment.deterministic.details }
-              : {}),
-          };
-        }),
-      };
-      pass = measurePass(pass);
-      this.db.insert("assessmentPass", pass);
-      originals.push(pass);
+      if (saved.some((pass) => pass.id === `scores_${scores.id}`)) continue;
+      originals.push(this.snapshotScores(runId, scores.id));
     }
     return [...originals, ...saved]
       .map((pass) => ({ ...pass, ...passRates(pass.coverage) }))
@@ -357,32 +527,88 @@ export class AssessmentPassService {
             },
       );
   }
+  snapshotScores(runId: string, scoreSetId: string): AssessmentPass {
+    const run = this.db.require("run", runId);
+    const original = this.evaluations.original(runId);
+    const scores =
+      scoreSetId === original.id
+        ? original
+        : this.db.require("scoreSet", scoreSetId);
+    if (scores.runId !== runId)
+      throw new AppError(
+        "incompatible_basis",
+        "The score set belongs to a different run.",
+      );
+    const terminal = ["completed", "failed", "cancelled"].includes(run.status);
+    const passId =
+      scores.kind === "original" && terminal
+        ? `original_deterministic_${runId}`
+        : `scores_${scores.id}`;
+    const saved = this.db.get("assessmentPass", passId);
+    if (saved) return saved;
+    let pass = this.skeleton(
+      run,
+      "deterministic",
+      `${scores.evaluator.name} (revision ${scores.evaluator.number})`,
+      { evaluator: scores.evaluator, referenceBank: scores.referenceBank },
+      passId,
+      false,
+    );
+    pass = {
+      ...pass,
+      createdAt: scores.createdAt,
+      finishedAt: scores.createdAt,
+      status: "completed",
+      judgments: pass.judgments.map((j) => {
+        const assessment = scores.assessments.find(
+          (a) => a.resultId === j.resultId,
+        );
+        if (!assessment || j.status === "excluded") return j;
+        const status = assessment.deterministic.status;
+        return {
+          ...j,
+          attemptId: assessment.attemptId,
+          evidenceHash: this.db.require("attempt", assessment.attemptId)
+            .evidenceHash,
+          ...(this.db.require("attempt", assessment.attemptId).runId !== runId
+            ? {
+                source: {
+                  runId: this.db.require("attempt", assessment.attemptId).runId,
+                  resultId: this.db.require("attempt", assessment.attemptId)
+                    .resultId,
+                },
+              }
+            : {}),
+          status: computedJudgmentStatus("deterministic", {
+            deterministic: status,
+          }),
+          explanation: assessment.deterministic.explanation,
+          ...(assessment.deterministic.details
+            ? { details: assessment.deterministic.details }
+            : {}),
+        };
+      }),
+    };
+    pass = measurePass(pass);
+    this.db.insert("assessmentPass", pass);
+    return pass;
+  }
   private jevJudgment(
     j: PassJudgment,
-    record: Pick<
-      ReturnType<Database["jevSummaries"]>[number],
-      "id" | "status" | "checks" | "error" | "usage" | "reviewRequired"
-    >,
+    record: JevAssessmentRecord,
   ): PassJudgment {
     return {
       ...j,
       jevAssessmentId: record.id,
-      status:
-        record.status === "error"
-          ? "error"
-          : record.status === "pending"
-            ? "unjudged"
-            : record.reviewRequired
-              ? "unjudged"
-              : record.checks?.answer.choice === "acceptable"
-                ? "correct"
-                : record.checks?.answer.choice === "incorrect"
-                  ? "incorrect"
-                  : "unjudged",
+      status: jevJudgmentStatus(
+        record.status,
+        record.checks?.answer,
+        record.criteria.confidenceThreshold,
+      ),
       explanation:
         record.error?.message ??
         (record.checks
-          ? `Answer: ${record.checks.answer.choice}; evidence: ${record.checks.evidence.choice}; reference: ${record.checks.reference.choice}.`
+          ? `Answer: ${record.checks.answer.choice}; evidence: ${record.checks.evidence?.choice ?? "not assessed"}; reference: ${record.checks.reference?.choice ?? "not assessed"}.`
           : "No classification returned."),
       ...(record.usage ? { usage: record.usage } : {}),
     };
@@ -593,6 +819,7 @@ export class AssessmentPassService {
       judgment = {
         resultId: judgment.resultId,
         attemptId,
+        ...(judgment.source ? { source: judgment.source } : {}),
         ...(judgment.evidenceHash
           ? { evidenceHash: judgment.evidenceHash }
           : {}),
@@ -658,7 +885,7 @@ export class AssessmentPassService {
             },
           );
           next = this.jevJudgment(judgment, record);
-          if (record.checks?.reference.choice === "suspected_issue") {
+          if (record.checks?.reference?.choice === "suspected_issue") {
             const findingId = `finding_${digest({ runId: run.id, questionId: result.questionId, kind: "reference" }).slice(0, 24)}`;
             if (!this.db.get("bankFinding", findingId))
               this.db.insert("bankFinding", {
@@ -677,69 +904,50 @@ export class AssessmentPassService {
               });
           }
         } else {
-          if (
-            !evidenceSupports(
-              attempt.output.evidenceScope ?? "internal-activity",
-              pass.configuration.judge?.evidenceRequirement ?? "unspecified",
-            )
-          )
-            throw new AppError(
-              "unsupported_evidence",
-              "The selected judge requires evidence unavailable in this run.",
-            );
-          const question = (
-            pass.configuration.referenceBank?.questions ??
-            run.manifest.questions
-          ).find((q) => q.id === result.questionId)!;
-          const { expected, ...publicQuestion } = question;
-          const request = jsonSchema.parse({
-            configuration: pass.configuration.judge,
-            question: publicQuestion,
-            expected,
-            answer: attempt.output.answer,
-          });
-          pass = {
-            ...pass,
-            judgments: pass.judgments.map((j, i) =>
-              i === index ? { ...j, request, judgmentId } : j,
+          const assessed = await new LlmJudgeService(
+            this.db,
+            this.runtime,
+          ).evaluate({
+            runId: run.id,
+            attemptId: attempt.id,
+            configuration: pass.configuration.judge!,
+            artifactDirectory: join(
+              this.directory,
+              "runs",
+              run.id,
+              "assessments",
+              pass.id,
+              attempt.id,
             ),
-          };
-          this.db.update("assessmentPass", pass);
-          const artifactDirectory = join(
-            this.directory,
-            "runs",
-            run.id,
-            "assessments",
-            pass.id,
-            attempt.id,
-          );
-          await mkdir(artifactDirectory, { recursive: true });
-          const verdict = judgeVerdictSchema.parse(
-            await this.runtime.judge({
-              observationLevel: attempt.output.evidenceScope,
-              configuration: pass.configuration.judge!,
-              question: publicQuestion,
-              expected,
-              answer: attempt.output.answer,
-              artifactDirectory,
-              timeoutMs: run.manifest.limits.timeoutMs,
-              signal,
-            }),
-          );
+            signal,
+            pass: { id: pass.id, index, judgmentId },
+            basis: {
+              evaluator: pass.configuration.evaluator ?? run.manifest.evaluator,
+              referenceBank: pass.configuration.referenceBank,
+            },
+          });
+          const verdict = assessed.judge;
           next = {
             ...judgment,
-            judgmentId,
-            request,
-            response: jsonSchema.parse(verdict),
-            status:
-              verdict.verdict === true
+            ...(assessed.judgeAdmitted ? { judgmentId } : {}),
+            ...(assessed.judgeRequest
+              ? { request: assessed.judgeRequest }
+              : {}),
+            ...(assessed.judgeResponse
+              ? { response: assessed.judgeResponse }
+              : {}),
+            status: assessed.judgeError
+              ? "error"
+              : verdict?.verdict === true
                 ? "correct"
-                : verdict.verdict === false
+                : verdict?.verdict === false
                   ? "incorrect"
                   : "unjudged",
             explanation:
-              verdict.explanation ?? "The judge returned no explanation.",
-            ...(verdict.usage ? { usage: verdict.usage } : {}),
+              assessed.judgeError ??
+              verdict?.explanation ??
+              "The judge returned no explanation.",
+            ...(assessed.judgeUsage ? { usage: assessed.judgeUsage } : {}),
           };
         }
       } catch (error) {
@@ -770,7 +978,10 @@ export class AssessmentPassService {
     this.select(run.id, pass.id);
     return pass;
   }
-  review(input: CommandInput<"runs.review-assessment">): AssessmentPass {
+  review(
+    input: CommandInput<"runs.review-assessment">,
+    creation = { id: id("pass"), createdAt: now(), select: true },
+  ): AssessmentPass {
     let parent = this.get(input.runId, input.parentPassId);
     if (parent.status === "running")
       throw new AppError(
@@ -808,7 +1019,7 @@ export class AssessmentPassService {
         reviewer: input.reviewer ?? "Local reviewer",
         note: override.note ?? "",
         previousStatus,
-        createdAt: now(),
+        createdAt: creation.createdAt,
       };
       if (override.note) judgment.explanation = override.note;
     }
@@ -818,13 +1029,13 @@ export class AssessmentPassService {
       .map((j) => j.resultId);
     const pass = measurePass({
       ...parent,
-      id: id("pass"),
+      id: creation.id,
       name: input.name,
       source: "human",
       parentPassId: parent.id,
       status: "completed",
-      createdAt: now(),
-      finishedAt: now(),
+      createdAt: creation.createdAt,
+      finishedAt: creation.createdAt,
       judgments,
       basis: {
         ...parent.basis,
@@ -835,7 +1046,7 @@ export class AssessmentPassService {
       },
     });
     this.db.insert("assessmentPass", pass);
-    this.select(input.runId, pass.id);
+    if (creation.select) this.select(input.runId, pass.id);
     return pass;
   }
 }

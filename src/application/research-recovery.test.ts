@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import type { AgentConfig, RuntimePort, Json } from "../contracts.js";
 import { createApplication } from "./application.js";
+import { researchJevChoice } from "./research.js";
 
 const agent: AgentConfig = {
   harness: "codex",
@@ -17,6 +18,28 @@ const agent: AgentConfig = {
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
+it("keeps Jev research promotion gated on the overall review flag", () => {
+  expect(
+    researchJevChoice({
+      status: "completed",
+      reviewRequired: true,
+      checks: { answer: { choice: "acceptable" } },
+    }),
+  ).toBeUndefined();
+  expect(
+    researchJevChoice({
+      status: "completed",
+      reviewRequired: false,
+      checks: { answer: { choice: "incorrect" } },
+    }),
+  ).toBe("incorrect");
+  expect(
+    researchJevChoice({
+      status: "completed",
+      checks: { answer: { choice: "insufficient_evidence" } },
+    }),
+  ).toBeUndefined();
 });
 async function setup(
   execute: RuntimePort["execute"],

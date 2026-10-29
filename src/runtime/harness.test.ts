@@ -159,3 +159,25 @@ it("classifies Codex capacity only from trusted provider error envelopes", () =>
     })?.data,
   ).toBeUndefined();
 });
+
+it("retains OpenCode gateway error codes and status without exposing nested payloads", () => {
+  const event = normalizeEvent("opencode", {
+    type: "error",
+    sessionID: "session",
+    error: {
+      name: "AI_APICallError",
+      message: "Unexpected server error",
+      data: {
+        code: "model_not_found",
+        statusCode: 404,
+        responseBody: "private provider payload",
+      },
+    },
+  });
+  expect(event).toMatchObject({
+    type: "error",
+    message: "Unexpected server error (model_not_found)",
+    data: { providerCode: "model_not_found", statusCode: 404 },
+  });
+  expect(JSON.stringify(event)).not.toContain("private provider payload");
+});

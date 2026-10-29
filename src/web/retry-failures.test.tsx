@@ -8,7 +8,7 @@ function view(status: string, available: boolean) {
     results: [{ id: "r", status }],
     retryEligibility: {
       available,
-      resultIds: ["r"],
+      resultIds: status === "failed" ? ["r"] : [],
       requiresAcknowledgment: false,
       reason: "Stop active work first.",
     },
@@ -29,4 +29,9 @@ it("uses application retry eligibility rather than inferring safety from the UI"
   expect(
     renderToStaticMarkup(<RetryFailures view={view("failed", true)} />),
   ).not.toContain("disabled");
+});
+it("does not offer another execution for a failure already recovered by an applied answer", () => {
+  const recovered = view("failed", true);
+  recovered.retryEligibility!.resultIds = [];
+  expect(renderToStaticMarkup(<RetryFailures view={recovered} />)).toBe("");
 });

@@ -6,9 +6,15 @@ import type { AgentConfig, Json, RuntimeEvent } from "../contracts.js";
 import { jsonSchema } from "../contracts.js";
 import { validateModelSettings } from "../contracts/model-settings.js";
 import { createHarnessBridges, record } from "./harness.js";
+import { safeFetchDiagnostics } from "./safe-fetch-diagnostics.js";
 import type { McpBinding } from "./connections.js";
 import { McpSession } from "./mcp-session.js";
-import type { ProcessSupervisor } from "./process-supervisor.js";
+import { providerExecutionFailure } from "./execution-failure.js";
+import {
+  cleanupFailure,
+  type ProcessInvocation,
+  type ProcessSupervisor,
+} from "./process-supervisor.js";
 
 const messageSchema = z.object({
   role: z.enum(["user", "assistant"]),
@@ -32,12 +38,15 @@ const responseSchema = z.object({
 export class BedrockFailure extends Error {
   usage?: { inputTokens: number; outputTokens: number };
   toolActivity = false;
+  providerDiagnostics?: { name?: string; code?: string };
   constructor(
     message: string,
     readonly code: string,
     readonly status?: number,
+    providerDiagnostics?: { name?: string; code?: string },
   ) {
     super(message);
+    this.providerDiagnostics = providerDiagnostics;
   }
 }
 
@@ -156,23 +165,34 @@ export async function invokeBedrock(input: {
     env,
   );
   const clients: McpSession[] = [];
+  let invocation: ProcessInvocation | undefined;
   const tools = new Map<
     string,
     { client: McpSession; name: string; spec: Json }
   >();
   const execute = async () => {
     try {
-      for (const bridge of bridges) {
-        const client = new McpSession(input.supervisor, {
-          executable: bridge.command,
-          args: bridge.args,
-          env,
-          cwd: input.directory,
-          timeoutMs: input.timeoutMs,
-          signal: input.signal,
-          processLimit: 5,
-          maxOutputBytes: input.maxOutputBytes ?? 4_000_000,
-        });
+      if (bridges.length) {
+        invocation = await input.supervisor.acquireInvocation(
+          bridges.map((bridge) => ({
+            executable: bridge.command,
+            args: bridge.args,
+            env,
+            cwd: input.directory,
+            timeoutMs: input.timeoutMs,
+            signal: input.signal,
+            processLimit: 5,
+            maxOutputBytes: input.maxOutputBytes ?? 4_000_000,
+          })),
+          input.signal,
+        );
+        input = { ...input, signal: invocation.signal };
+      }
+      for (const [index, bridge] of bridges.entries()) {
+        const client = new McpSession(
+          (interaction) => invocation!.run(index, interaction),
+          input.signal,
+        );
         clients.push(client);
         let cursor: string | undefined;
         const seen = new Set<string>();
@@ -391,17 +411,33 @@ export async function invokeBedrock(input: {
         "target_failure",
       );
     } catch (error) {
-      const failure =
-        error instanceof BedrockFailure
-          ? error
-          : new BedrockFailure(
-              error instanceof z.ZodError
-                ? "The provider or tool response failed validation."
-                : "The Bedrock transport or tool invocation did not complete.",
-              error instanceof z.ZodError
-                ? "evidence_failure"
-                : "infrastructure_failure",
-            );
+      let failure: BedrockFailure;
+      if (error instanceof BedrockFailure) failure = error;
+      else {
+        const diagnostic = safeFetchDiagnostics(error);
+        const providerCode = diagnostic.codes[0];
+        const providerName = diagnostic.names[0];
+        const suffix = providerCode
+          ? ` (${providerCode})`
+          : providerName
+            ? ` (${providerName})`
+            : "";
+        failure = new BedrockFailure(
+          error instanceof z.ZodError
+            ? "The provider or tool response failed validation."
+            : `The Bedrock transport or tool invocation did not complete${suffix}.`,
+          error instanceof z.ZodError
+            ? "evidence_failure"
+            : "infrastructure_failure",
+          undefined,
+          providerCode || providerName
+            ? {
+                ...(providerName ? { name: providerName } : {}),
+                ...(providerCode ? { code: providerCode } : {}),
+              }
+            : undefined,
+        );
+      }
       failure.usage = { inputTokens, outputTokens };
       failure.toolActivity = toolActivity;
       throw failure;
@@ -418,17 +454,34 @@ export async function invokeBedrock(input: {
   const settled = await Promise.allSettled(
     clients.map((client) => client.close()),
   );
-  const failed = settled.find((result) => result.status === "rejected");
-  if (failed?.status === "rejected") {
+  const cleanup = await invocation?.close();
+  if (
+    cleanup === "unavailable" ||
+    settled.some((result) => result.status === "rejected")
+  ) {
     if (completed) completed.cleanup = "unavailable";
     else {
-      const cleanupFailure = new BedrockFailure(
-        "MCP cleanup could not be confirmed.",
-        "cleanup_failed",
+      throw cleanupFailure(
+        failure instanceof BedrockFailure
+          ? {
+              message: input.sanitize(failure.message),
+              code: failure.code,
+              ...(failure.status === undefined
+                ? {}
+                : { statusCode: failure.status }),
+              ...(failure.providerDiagnostics
+                ? { providerDiagnostics: failure.providerDiagnostics }
+                : {}),
+            }
+          : undefined,
+        providerExecutionFailure({
+          status:
+            failure instanceof BedrockFailure ? failure.status : undefined,
+          toolFree: input.role === "target" && input.agent.tools.length === 0,
+          toolActivity,
+          usage: { inputTokens, outputTokens },
+        }),
       );
-      cleanupFailure.usage = { inputTokens, outputTokens };
-      cleanupFailure.toolActivity = toolActivity;
-      throw cleanupFailure;
     }
   }
   if (failedExecution) throw failure;

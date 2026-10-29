@@ -28,6 +28,10 @@ export function JevAssessment({
 }) {
   const [detail, setDetail] = useState<JevAssessmentRecord | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const fallbackApplied =
+    "configuration" in assessment
+      ? Boolean(assessment.fallback)
+      : Boolean(assessment.fallbackApplied);
   return (
     <article className="jev-assessment stack">
       <div className="assessment-row">
@@ -57,6 +61,15 @@ export function JevAssessment({
           ? `${assessment.configuration.profile.name} · revision ${assessment.configuration.profile.number}`
           : `${assessment.profileName} · revision ${assessment.profileRevisionNumber}`}
       </p>
+      {fallbackApplied && (
+        <div className="notice">
+          <strong>Answer-only fallback</strong>
+          <p>
+            The trace request exceeded Jev's limit. The fallback judges the
+            complete answer and expected answer without agent activity.
+          </p>
+        </div>
+      )}
       {assessment.error && (
         <div role="alert" className="notice error">
           <strong>{assessment.error.code}</strong>
@@ -66,6 +79,13 @@ export function JevAssessment({
       {assessment.checks &&
         (Object.keys(labels) as Array<keyof typeof labels>).map((key) => {
           const result = assessment.checks![key];
+          if (!result)
+            return (
+              <section className="jev-check" key={key}>
+                <h4>{labels[key]}</h4>
+                <p className="subtle">Not assessed</p>
+              </section>
+            );
           return (
             <section className="jev-check" key={key}>
               <h4>{labels[key]}</h4>
@@ -127,6 +147,12 @@ export function JevAssessment({
               value={{ evidence: detail.evidence, criteria: detail.criteria }}
             />
           </details>
+          {detail.fallback && (
+            <details className="disclosure">
+              <summary>Original size error and fallback criteria</summary>
+              <JsonView value={detail.fallback} />
+            </details>
+          )}
         </Modal>
       )}
     </article>

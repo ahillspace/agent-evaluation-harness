@@ -24,7 +24,13 @@ The initial integration uses `jev-1.13.0`.
 
 ## Understand the evidence
 
-Jev receives the original question, reference answer, acceptance criteria, submitted answer, relevant agent configuration, and the complete recorded trace for that attempt.
+Jev receives the original question, reference answer, acceptance criteria, submitted answer, and relevant agent configuration.
+The frozen profile's evidence requirement determines whether the request also includes the attempt trace.
+An answer-only profile omits the internal-activity trace from the request, even when the sealed attempt contains it.
+The full sealed evidence and its hashes remain available in the saved assessment.
+The request preserves every profile instruction and criterion.
+Its instructions tell Jev to return insufficient evidence when a criterion requires activity absent from the request.
+An internal-activity profile receives the complete recorded trace.
 The evidence builder reads canonical stored records rather than abbreviated observation previews.
 Prior judge verdicts and deterministic pass or fail labels are excluded from the decision input.
 Credentials are excluded from the payload and its saved provenance.
@@ -39,6 +45,26 @@ Selecting another judge preserves the original evidence.
 The adapter also applies a separate 2 MiB request limit to bound local memory use.
 This byte limit does not estimate the provider's token count.
 
+### Recover from oversized traces
+
+In **Question banks > Jev criteria > Oversized trace fallback**, enable **Allow answer-only fallback** before publishing a profile.
+The option is off by default.
+When a trace request exceeds a size limit, Jev receives one additional request with the complete question, expected answer, and submitted answer.
+The additional request omits agent activity and uses the profile's separate fallback instructions and answer criteria.
+Question-specific overrides apply to the primary request, not these fallback criteria.
+Review the fallback criteria before enabling the option, especially when your primary checks require specific tool actions.
+
+The result displays **Answer-only fallback**.
+Evidence support and reference consistency display **Not assessed**, without invented probabilities.
+A confident answer verdict contributes to the saved score, but the assessment still needs review and cannot automatically promote a research candidate.
+The original size error, original request, fallback criteria, and complete sealed evidence remain available through **Inspect recorded request and provenance**.
+Usage includes both requests when reported; missing usage remains unknown.
+
+Fallback does not run for authentication failures, network errors, cancellation, or requests that already omit traces.
+It uses the remaining time from the original assessment deadline.
+If the complete answer and reference still exceed the limit, the assessment remains an error.
+No answer or trace is silently truncated.
+
 ## Interpret results
 
 Jev returns predefined labels, probabilities, and confidence.
@@ -46,6 +72,10 @@ It does not generate a written explanation.
 The interface displays the classifications and the instructions that produced them without inventing explanatory prose.
 A configured confidence threshold can mark a result as needing review.
 Confidence is a summary of the probability distribution, not a guarantee of correctness.
+An assessment pass records a correct or incorrect answer verdict when the answer choice is decisive and meets the frozen answer confidence threshold.
+Low-confidence and insufficient-evidence answer decisions remain unjudged.
+The overall review flag remains linked to the Jev record and does not erase a confident answer verdict when another check needs review.
+Research candidate promotion applies the stricter rule that Jev assessments with any review flag are ineligible.
 
 A suspected reference issue flags the question for review.
 It does not automatically pass the target or edit the answer bank.
@@ -99,6 +129,35 @@ The runtime classifier port resolves credentials and performs the bounded HTTP r
 The TypeSafe adapter translates the shared judging input into the provider's request format and validates its response.
 The browser and CLI use the same application operations.
 The target harness has no access to the judge's reference answer or credentials.
+
+This page describes the inspected working tree on 2026-10-22.
+The architecture audit records its revision and validation scope in the repository's audit ledger.
+
+| Concern                               | Source owner                                                                                                                                   |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shared dispatch                       | [`createApplication`](../src/application/application.ts) validates the CLI and HTTP operation payloads.                                        |
+| Sealed evidence                       | [`buildJudgeEvidence`](../src/application/judge-evidence.ts) verifies hashes, resolves adopted retry answers, and assembles the frozen basis.  |
+| Original and saved LLM judging        | [`LlmJudgeService.evaluate`](../src/application/llm-judge.ts) owns evidence projection, admission, request checkpoints, and recorded outcomes. |
+| Jev profiles, inference, and recovery | [`JevService`](../src/application/jev.ts) owns profile resolution, frozen criteria, fallback, publication, and interrupted requests.           |
+| Named and human assessments           | [`AssessmentPassService`](../src/application/assessment-passes.ts) owns creation, retry, coverage, selection, and attributed review.           |
+| Retry evidence adoption               | [`RetryApplicationService.apply`](../src/application/retry-applications.ts) derives compatible passes without target or judge calls.           |
+| Usage projection                      | [`runPerformance`](../src/application/performance.ts) combines physical target attempts and separately recorded researcher and judge usage.    |
+
+`buildJudgeEvidence` prefers a nonempty provider transcript; otherwise, it drains every page of the attempt-scoped event log.
+It excludes evaluation, judge, Jev, review, research, and assessment events from that reconstructed trace.
+Logical answers adopted from a linked retry retain the physical source Run, result, attempt, and evidence hash.
+[`AnswerSources.authorize` and `verify`](../src/application/answer-sources.ts) reject unrelated or unsealed evidence.
+
+Original LLM judging checks research spending and duration immediately before its durable admission checkpoint.
+A saved LLM pass checkpoints its semantic request and judgment identifier before calling the runtime.
+Jev checkpoints its assessment and provider request separately, preserving a primary size error before an enabled fallback request.
+Startup converts pending Jev requests to explicit errors and running named passes to interrupted passes.
+It restores missing original deterministic assessments and records unavailable original model judgments without another provider call.
+[`EvaluationService.recover`](../src/application/evaluations.ts), `JevService.recover`, and `AssessmentPassService.recover` own those distinct recovery paths.
+
+[`Database`](../src/storage/database.ts) seals completed attempts and completed assessment passes.
+It also restricts completed Jev records to monotonic publication changes.
+Explicit retries create new records and preserve prior abstentions, requests, responses, and reviews.
 
 ## Verification priorities
 

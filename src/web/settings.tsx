@@ -6,7 +6,7 @@ import type {
   RuntimeCatalog,
   WorkspaceView,
 } from "../contracts.js";
-import { command } from "./api.js";
+import { command, navigate, useRoute } from "./api.js";
 import { ConnectionEditor } from "./connection-editor.js";
 import {
   Empty,
@@ -26,15 +26,10 @@ export function Settings({
   workspace: WorkspaceView;
   refresh: () => void;
 }) {
-  const [section, setSection] = useState<
-    "external" | "connections" | "harnesses"
-  >(() => {
-    const tab =
-      typeof window === "undefined"
-        ? "connections"
-        : window.location.hash.split("/")[2];
-    return tab === "external" || tab === "harnesses" ? tab : "connections";
-  });
+  const route = useRoute();
+  const tab = route.split("?")[0]?.split("/")[2];
+  const section =
+    tab === "external" || tab === "harnesses" ? tab : "connections";
   const [runtime, setRuntime] = useState<RuntimeCatalog | undefined>(
     workspace.runtime,
   );
@@ -104,10 +99,7 @@ export function Settings({
       <Tabs
         label="Settings sections"
         value={section}
-        onChange={(value) => {
-          setSection(value);
-          window.location.hash = `/settings/${value}`;
-        }}
+        onChange={(value) => navigate(`/settings/${value}`)}
         items={[
           { value: "connections", label: "Connections" },
           { value: "harnesses", label: "Subscriptions & harnesses" },

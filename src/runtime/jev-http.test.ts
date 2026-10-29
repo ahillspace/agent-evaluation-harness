@@ -1,9 +1,10 @@
 import { createServer, type ServerResponse } from "node:http";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { jevHttp } from "./jev-http.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
+  vi.unstubAllGlobals();
   for (const close of cleanup.splice(0)) await close();
 });
 async function fixture(
@@ -51,6 +52,82 @@ const invoke = (endpoint: string, extra = {}) =>
     ...extra,
   });
 
+it.each([
+  { code: "ECONNRESET", name: "SocketError" },
+  { code: "ETIMEDOUT", name: "ConnectTimeoutError" },
+])(
+  "records safe $code fetch diagnostics without leaking raw errors",
+  async ({ code, name }) => {
+    const secretMessage =
+      "socket failed for https://private.example/?key=fixture-secret with private details";
+    const cause = Object.assign(new Error(secretMessage), { code, name });
+    const fetchError = Object.assign(
+      new TypeError(`fetch failed: ${secretMessage}`, { cause }),
+      { code: "FETCH_FAILED" },
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw fetchError;
+      }),
+    );
+
+    let caught: unknown;
+    try {
+      await invoke("https://api.typesafe.ai/v1/systemone");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const error = caught as Error & {
+      code?: string;
+      usage?: unknown;
+      attempts?: unknown[];
+      request?: unknown;
+    };
+
+    expect(error).toMatchObject({
+      code: "provider_failure",
+      message: expect.stringContaining(code),
+      usage: undefined,
+      attempts: [],
+      request: {
+        model: "jev-1.13.0",
+      },
+    });
+    expect(error.message).toContain("TypeError");
+    expect(error.message).toContain(name);
+    expect(error.message).not.toContain(secretMessage);
+    expect(error.message).not.toContain("fixture-secret");
+    expect(error.message).not.toContain("private.example");
+  },
+);
+
+it("omits unrecognized fetch error names and codes", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      throw Object.assign(new Error("private diagnostic fixture-secret"), {
+        code: "PRIVATE_CODE",
+        name: "PrivateError",
+      });
+    }),
+  );
+  let caught: unknown;
+  try {
+    await invoke("https://api.typesafe.ai/v1/systemone");
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(Error);
+  const error = caught as Error;
+
+  expect(error.message).toContain("failed before a complete HTTP response");
+  expect(error.message).not.toContain("PRIVATE_CODE");
+  expect(error.message).not.toContain("PrivateError");
+  expect(error.message).not.toContain("fixture-secret");
+});
+
 it("sends bearer JSON and preserves redacted raw response and request ID", async () => {
   const server = await fixture((response) =>
     response.writeHead(200, { "x-request-id": "request-1" }).end(
@@ -93,6 +170,23 @@ it("retries only explicit rejected overloads and retains every response", async 
   });
   expect(ambiguous.requests).toHaveLength(1);
 });
+it.each([429, 529])(
+  "honors a one-attempt budget for HTTP %i without retrying",
+  async (status) => {
+    const server = await fixture((response) =>
+      response.writeHead(status, { "retry-after": "0" }).end("{}"),
+    );
+    await expect(
+      invoke(server.endpoint, { maxAttempts: 1 }),
+    ).rejects.toMatchObject({
+      code: "provider_unavailable",
+      httpStatus: status,
+      attempts: [{ status, response: {} }],
+      usage: undefined,
+    });
+    expect(server.requests).toHaveLength(1);
+  },
+);
 it("keeps 422 capacity errors and invalid JSON provenance without retrying", async () => {
   const capacity = await fixture((response) =>
     response.writeHead(422).end('{"detail":"context exceeds capacity"}'),

@@ -14,6 +14,7 @@ import {
   type BankRevision,
   type EvaluatorRevision,
   type RunRecord,
+  type JevAssessmentRecord,
 } from "../contracts.js";
 import { Database } from "./database.js";
 
@@ -69,6 +70,89 @@ function run(id: string): RunRecord {
 }
 
 describe("typed durable records", () => {
+  it("keeps fallback payloads out of observation while retaining per-call usage", async () => {
+    const db = await setup();
+    const criteria = jevProfileSettingsSchema.parse({ answerOnlyFallback: {} });
+    const record: JevAssessmentRecord = {
+      id: "ja",
+      runId: "r",
+      resultId: "q",
+      attemptId: "a",
+      createdAt: bank.createdAt,
+      status: "completed",
+      kind: "original",
+      published: true,
+      configuration: {
+        model: "jev-1.13.0",
+        connection: {
+          connectionId: "c",
+          provider: "typesafe",
+          settings: {},
+          credentialFields: [],
+        },
+        profile: {
+          id: "p",
+          bankId: "bank1",
+          number: 1,
+          name: "Trace checks",
+          createdAt: bank.createdAt,
+          digest: "p",
+          settings: criteria,
+        },
+      },
+      configurationHash: "config",
+      evidenceHash: "evidence",
+      attemptEvidenceHash: "attempt",
+      bankRevisionId: bank.id,
+      evaluatorRevisionId: evaluator.id,
+      evidence: {
+        schemaVersion: 1,
+        runId: "r",
+        resultId: "q",
+        attemptId: "a",
+        repetition: 1,
+        referenceCriteria: {},
+        finalText: "42",
+        question: bank.questions[0]!,
+        expected: 42,
+        finalAnswer: 42,
+        publicAgent: agentSchema.parse({ harness: "codex", model: "fixture" }),
+        startedAt: bank.createdAt,
+        finishedAt: bank.createdAt,
+        trace: { format: "unavailable", entries: null },
+      },
+      criteria,
+      fallback: {
+        trigger: {
+          error: { code: "token_limit_exceeded", message: "Too large" },
+          request: { large: "PRIVATE_TRACE" },
+          response: { detail: "PRIVATE_RESPONSE" },
+          usage: { inputTokens: 10 },
+        },
+        criteria: criteria.answerOnlyFallback!,
+        resultUsage: { inputTokens: 20 },
+      },
+      usage: { inputTokens: 30 },
+    };
+    db.insert("jevAssessment", record);
+    const [summary] = db.jevSummaries("r");
+    expect(summary).toMatchObject({
+      fallbackApplied: true,
+      fallbackUsage: { inputTokens: 10 },
+      fallbackResultUsage: { inputTokens: 20 },
+      usage: { inputTokens: 30 },
+    });
+    expect(summary).not.toHaveProperty("fallback");
+    expect(JSON.stringify(summary)).not.toContain("PRIVATE_");
+    expect(db.require("jevAssessment", "ja").fallback).toEqual(record.fallback);
+    db.insert("jevAssessment", { ...record, id: "plain", fallback: undefined });
+    const withoutFallback = db
+      .jevSummaries("r")
+      .find((item) => item.id === "plain");
+    expect(withoutFallback?.fallbackApplied).toBe(false);
+    expect(withoutFallback).not.toHaveProperty("fallbackUsage");
+    expect(withoutFallback).not.toHaveProperty("fallbackResultUsage");
+  });
   it("freezes canonical target configuration in blueprints", async () => {
     const db = await setup();
     const blueprint = db.insert("blueprint", {
@@ -137,7 +221,7 @@ describe("typed durable records", () => {
       raw.prepare("SELECT value FROM records WHERE id='old'").get()?.value,
     ).toBe(original);
     expect(raw.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
-    expect(raw.prepare("PRAGMA user_version").get()?.user_version).toBe(5);
+    expect(raw.prepare("PRAGMA user_version").get()?.user_version).toBe(7);
     raw.close();
   });
   it("preserves version 2 record bytes while installing target immutability", async () => {
@@ -160,7 +244,7 @@ describe("typed durable records", () => {
     expect(
       after.prepare("SELECT value FROM records WHERE id='legacy'").get()?.value,
     ).toBe(before);
-    expect(after.prepare("PRAGMA user_version").get()?.user_version).toBe(5);
+    expect(after.prepare("PRAGMA user_version").get()?.user_version).toBe(7);
     after.close();
   });
   it("projects score and researcher summaries without returning raw evidence", async () => {
@@ -295,8 +379,8 @@ describe("typed durable records", () => {
     new Database(path).close();
     const raw = new DatabaseSync(path);
     try {
-      expect(raw.prepare("PRAGMA user_version").get()?.user_version).toBe(5);
-      raw.exec("PRAGMA user_version=6");
+      expect(raw.prepare("PRAGMA user_version").get()?.user_version).toBe(7);
+      raw.exec("PRAGMA user_version=8");
     } finally {
       raw.close();
     }
@@ -620,4 +704,69 @@ it("bounds historical usage event projection and excludes unrelated large events
     data: { text: "x".repeat(1048576) },
   });
   expect(db.attemptUsageEvents("attempt")).toBeUndefined();
+});
+
+it("migrates version 6 retry and bank indexes without rewriting record bytes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aeh-index-migration-"));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  const filename = join(directory, "catalog.sqlite");
+  const bytes = JSON.stringify(
+    { ...run("retry"), retryOf: { runId: "parent", resultIds: ["r"] } },
+    null,
+    2,
+  );
+  const raw = new DatabaseSync(filename);
+  try {
+    raw.exec(
+      "PRAGMA foreign_keys=OFF; CREATE TABLE records(kind TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,immutable INTEGER NOT NULL DEFAULT 0,ordinal INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT GENERATED ALWAYS AS (json_extract(value,'$.runId')) VIRTUAL,result_id TEXT GENERATED ALWAYS AS (json_extract(value,'$.resultId')) VIRTUAL,bank_id TEXT GENERATED ALWAYS AS (json_extract(value,'$.bankId')) VIRTUAL,session_id TEXT GENERATED ALWAYS AS (json_extract(value,'$.researchSessionId')) VIRTUAL,status TEXT GENERATED ALWAYS AS (json_extract(value,'$.status')) VIRTUAL,UNIQUE(kind,id)); PRAGMA user_version=6;",
+    );
+    raw.exec(
+      "CREATE TABLE idempotency(key TEXT PRIMARY KEY,hash TEXT NOT NULL,kind TEXT NOT NULL,record_id TEXT NOT NULL,response TEXT,FOREIGN KEY(kind,record_id) REFERENCES records(kind,id)); INSERT INTO idempotency VALUES('orphan','hash','run','missing',NULL);",
+    );
+    raw
+      .prepare("INSERT INTO records(kind,id,value) VALUES('run','retry',?)")
+      .run(bytes);
+  } finally {
+    raw.close();
+  }
+  expect(() => new Database(filename)).toThrow("migration validation");
+  const recovery = new DatabaseSync(filename);
+  try {
+    expect(recovery.prepare("PRAGMA user_version").get()?.user_version).toBe(6);
+    expect(
+      recovery
+        .prepare("PRAGMA table_xinfo(records)")
+        .all()
+        .some((column) => column.name === "parent_run_id"),
+    ).toBe(false);
+    expect(
+      recovery.prepare("SELECT value FROM records WHERE id='retry'").get()
+        ?.value,
+    ).toBe(bytes);
+    recovery.exec("DELETE FROM idempotency WHERE key='orphan'");
+  } finally {
+    recovery.close();
+  }
+  const db = new Database(filename);
+  try {
+    expect(
+      db.list("run", { parentRunId: "parent" }).map((item) => item.id),
+    ).toEqual(["retry"]);
+    expect(
+      db.runPage({ bankId: bank.bankId, search: "retry", limit: 1, offset: 0 })
+        .total,
+    ).toBe(1);
+  } finally {
+    db.close();
+  }
+  const after = new DatabaseSync(filename);
+  try {
+    expect(
+      after.prepare("SELECT value FROM records WHERE id='retry'").get()?.value,
+    ).toBe(bytes);
+    expect(after.prepare("PRAGMA user_version").get()?.user_version).toBe(7);
+    expect(after.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  } finally {
+    after.close();
+  }
 });

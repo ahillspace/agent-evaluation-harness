@@ -7,7 +7,6 @@ import { publicEvaluationGuidance } from "../contracts/evaluation-guidance.js";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  judgeVerdictSchema,
   targetOutputSchema,
   type AgentConfig,
   type AttemptRecord,
@@ -36,11 +35,13 @@ import { Database } from "../storage/database.js";
 import { EvaluationService } from "./evaluations.js";
 import { checkResearchBudget } from "./research-budget.js";
 import { JevService } from "./jev.js";
+import { LlmJudgeService } from "./llm-judge.js";
 import { savedTarget, managedAgent } from "../contracts/targets.js";
 import { UsageProjection } from "./usage-projection.js";
 import { RunRetries } from "./run-retries.js";
 import { TargetInvocations } from "./target-invocations.js";
 import { validateTargetEvidence } from "./evidence-requirements.js";
+import { AnswerSources } from "./answer-sources.js";
 
 export class RunService {
   private readonly jobs = new Map<string, Promise<void>>();
@@ -279,7 +280,10 @@ export class RunService {
   }
   view(runId: string, cursor = 0): RunView {
     const run = this.db.require("run", runId);
-    const results = this.db.list("result", { runId });
+    const sources = new AnswerSources(this.db);
+    const results = sources.results(runId);
+    const physicalAttempts = sources.physicalAttempts(runId);
+    const sourceRuns = [...new Set(physicalAttempts.values())];
     const events = this.db.events({ runId }, cursor, {
       summary: true,
       limit: 200,
@@ -294,9 +298,13 @@ export class RunService {
       run,
       retryEligibility,
       results,
-      attempts: this.usage.attempts(runId),
+      attempts: sourceRuns
+        .flatMap((sourceRunId) => this.usage.attempts(sourceRunId))
+        .filter((attempt) => physicalAttempts.has(attempt.id)),
       scoreSets,
-      jevAssessments: this.db.jevSummaries(runId),
+      jevAssessments: sourceRuns
+        .flatMap((sourceRunId) => this.db.jevSummaries(sourceRunId))
+        .filter((assessment) => physicalAttempts.has(assessment.attemptId)),
       reviews: this.db.list("review", { runId }),
       allowedActions: actions,
       controllingJob: {
@@ -306,8 +314,9 @@ export class RunService {
         allowedActions: actions,
       },
       progress: {
-        completed: results.filter((r) => r.status === "completed").length,
-        failed: results.filter((r) => r.status === "failed").length,
+        completed: results.filter((r) => r.answerSource).length,
+        failed: results.filter((r) => r.status === "failed" && !r.answerSource)
+          .length,
         total: results.length,
       },
       events,
@@ -321,21 +330,20 @@ export class RunService {
   }
   attempt(runId: string, attemptId: string): AttemptDetail {
     this.db.require("run", runId);
-    const attempt = this.db.require("attempt", attemptId);
-    if (attempt.runId !== runId)
-      throw new AppError(
-        "not_found",
-        "The attempt does not belong to this run.",
-      );
-    const assessments = this.db.attemptAssessments(runId, attemptId);
-    if (!assessments.some((item) => item.scoreSetId === `original_${runId}`)) {
+    const { attempt } = new AnswerSources(this.db).authorize(runId, attemptId);
+    const assessments = this.db.attemptAssessments(attempt.runId, attemptId);
+    if (
+      !assessments.some(
+        (item) => item.scoreSetId === `original_${attempt.runId}`,
+      )
+    ) {
       const assessment = this.db
         .list("assessment", { resultId: attempt.resultId })
         .find((item) => item.attemptId === attempt.id);
       if (assessment)
         assessments.unshift({
-          scoreSetId: `original_${runId}`,
-          evaluator: this.db.require("run", runId).manifest.evaluator,
+          scoreSetId: `original_${attempt.runId}`,
+          evaluator: this.db.require("run", attempt.runId).manifest.evaluator,
           assessment,
         });
     }
@@ -343,9 +351,9 @@ export class RunService {
     return {
       attempt: publicAttempt,
       jevAssessments: this.db
-        .jevSummaries(runId)
+        .jevSummaries(attempt.runId)
         .filter((value) => value.attemptId === attemptId),
-      events: this.db.events({ runId, attemptId }),
+      events: this.db.events({ runId: attempt.runId, attemptId }),
       assessments,
     };
   }
@@ -837,50 +845,18 @@ export class RunService {
         });
       }
       const assessment = await this.evaluation.assess(run, result, sealed);
-      if (run.manifest.judge.enabled && !controller.signal.aborted) {
-        this.db.append({
-          runId: run.id,
-          attemptId: attempt.id,
-          type: "judge.started",
-          message: "Independent judge started.",
-        });
-        try {
-          const { expected, ...publicFields } = question;
-          const judgeQuestion = publicQuestionSchema.parse(publicFields);
-          assessment.judgeRequest = jsonSchema.parse({
-            ...(output.evidenceScope
-              ? { observationLevel: output.evidenceScope }
-              : {}),
-            configuration: run.manifest.judge,
-            question: judgeQuestion,
-            expected,
-            answer: output.answer,
-          });
-          this.db.append({
+      if (run.manifest.judge.enabled)
+        Object.assign(
+          assessment,
+          await new LlmJudgeService(this.db, this.runtime).evaluate({
             runId: run.id,
             attemptId: attempt.id,
-            type: "judge.request",
-            message: "Saved the original judge request before admission.",
-            data: assessment.judgeRequest,
-          });
-          assessment.judge = judgeVerdictSchema.parse(
-            await this.runtime.judge({
-              observationLevel: output.evidenceScope,
-              configuration: run.manifest.judge,
-              question: judgeQuestion,
-              expected,
-              answer: output.answer,
-              artifactDirectory: join(artifactDirectory, "judge"),
-              timeoutMs: run.manifest.limits.timeoutMs,
-              signal: controller.signal,
-            }),
-          );
-          assessment.judgeResponse = jsonSchema.parse(assessment.judge);
-        } catch (error) {
-          assessment.judgeError = errorMessage(error);
-        }
-      } else if (run.manifest.judge.enabled)
-        assessment.judgeError = "Judge interrupted before admission.";
+            configuration: run.manifest.judge,
+            artifactDirectory: join(artifactDirectory, "judge"),
+            signal: controller.signal,
+            original: true,
+          }),
+        );
       this.db.insert(
         "assessment",
         { ...assessment, runId: run.id, id: id("assessment") },
@@ -1022,17 +998,21 @@ export class RunService {
         systemPrompt: agent.systemPrompt,
         settings: agent.settings,
         tools: agent.tools,
-        connections: agent.connections.map((binding) => ({
-          ...binding,
-          credentials: Object.fromEntries(
-            (binding.credentialFields ?? []).map((field) => [
-              field,
-              "${" +
-                `${binding.provider.toUpperCase()}_${field.toUpperCase()}` +
-                "}",
-            ]),
-          ),
-        })),
+        connections: agent.connections.map((binding) => {
+          const exported = { ...binding };
+          delete exported.credentialBinding;
+          return {
+            ...exported,
+            credentials: Object.fromEntries(
+              (binding.credentialFields ?? []).map((field) => [
+                field,
+                "${" +
+                  `${binding.provider.toUpperCase()}_${field.toUpperCase()}` +
+                  "}",
+              ]),
+            ),
+          };
+        }),
       },
     } as Json;
   }

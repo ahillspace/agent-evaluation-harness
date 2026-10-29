@@ -2,21 +2,30 @@ import { targetFixture } from "../../tests/fixtures/runtime-targets.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { createServer } from "node:http";
+import { afterEach, expect, it, vi } from "vitest";
 import {
   agentSchema,
   jevProfileSettingsSchema,
   type RuntimePort,
   type JudgeEvidence,
+  type Question,
 } from "../contracts.js";
 import { createApplication } from "./application.js";
 import { Database } from "../storage/database.js";
+import { digest } from "../domain/identity.js";
+import { JevClassifier } from "../runtime/jev.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
+  vi.unstubAllGlobals();
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
-async function setup() {
+async function setup(
+  questions: Question[] = [
+    { id: "q1", text: "Answer?", expected: 42, tags: [] },
+  ],
+) {
   const directory = await mkdtemp(join(tmpdir(), "aeh-jev-"));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   let targetCalls = 0,
@@ -124,7 +133,7 @@ async function setup() {
   cleanups.push(() => app.close());
   const bank = await app.execute("banks.create", {
     name: "Bank",
-    questions: [{ id: "q1", text: "Answer?", expected: 42 }],
+    questions,
   });
   const profile = await app.execute("jev.profiles.publish", {
     bankId: bank.bankId,
@@ -143,6 +152,120 @@ async function setup() {
     counts: () => ({ targetCalls, judgeCalls, llmCalls }),
   };
 }
+
+it("rejects Jev launch when its saved connection has no bank profile", async () => {
+  const { app, bank, agent, counts } = await setup();
+  const bankWithoutProfile = await app.execute("banks.create", {
+    name: "Bank without Jev profile",
+    questions: bank.questions,
+  });
+
+  await expect(
+    app.execute("runs.launch", {
+      bankRevisionId: bankWithoutProfile.id,
+      agent,
+      jevJudge: { connectionId: "typesafe" },
+    }),
+  ).rejects.toThrow("Publish a Jev profile for this bank before enabling Jev.");
+  expect(counts()).toEqual({ targetCalls: 0, judgeCalls: 0, llmCalls: 0 });
+});
+
+it("keeps confident answer verdicts despite secondary Jev review flags", async () => {
+  const questions: Question[] = [
+    { id: "acceptable", text: "Acceptable answer?", expected: 42, tags: [] },
+    { id: "incorrect", text: "Incorrect answer?", expected: 43, tags: [] },
+    { id: "low-confidence", text: "Low confidence?", expected: 42, tags: [] },
+    { id: "abstain", text: "Insufficient evidence?", expected: 42, tags: [] },
+  ];
+  const { app, bank, agent, runtime, counts } = await setup(questions);
+  const evaluate = runtime.classifier!.evaluate;
+  runtime.classifier!.evaluate = async (input) => {
+    const result = await evaluate(input);
+    const id = input.evidence.question.id;
+    const choice =
+      id === "incorrect"
+        ? "incorrect"
+        : id === "abstain"
+          ? "insufficient_evidence"
+          : "acceptable";
+    const confidence =
+      id === "low-confidence" ? 0.69 : id === "abstain" ? 0.9 : 0.71;
+    result.checks.answer = {
+      choice,
+      confidence,
+      probabilities: {
+        acceptable: choice === "acceptable" ? confidence : 0.05,
+        incorrect: choice === "incorrect" ? confidence : 0.05,
+        insufficient_evidence:
+          choice === "insufficient_evidence" ? confidence : 0.05,
+      },
+    };
+    result.checks.reference = {
+      choice: "unknown",
+      confidence: 0.9,
+      probabilities: { consistent: 0.05, suspected_issue: 0.05, unknown: 0.9 },
+    };
+    return result;
+  };
+
+  const launched = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+    jevJudge: { connectionId: "typesafe" },
+  });
+  await app.waitForIdle();
+  const view = await app.execute("runs.get", { runId: launched.run.id });
+  const summary = view.assessmentPasses?.find((pass) => pass.source === "jev");
+  const pass = await app.execute("runs.assessment", {
+    runId: launched.run.id,
+    passId: summary!.id,
+  });
+  const statuses = Object.fromEntries(
+    pass.judgments.map((judgment) => {
+      const question = questions.find(
+        (item) =>
+          item.id ===
+          view.results.find((result) => result.id === judgment.resultId)!
+            .questionId,
+      )!;
+      return [question.id, judgment.status];
+    }),
+  );
+
+  expect(statuses).toEqual({
+    acceptable: "correct",
+    incorrect: "incorrect",
+    "low-confidence": "unjudged",
+    abstain: "unjudged",
+  });
+  expect(
+    view.jevAssessments.every((assessment) => assessment.reviewRequired),
+  ).toBe(true);
+
+  const namedPass = await app.execute("runs.assess", {
+    runId: launched.run.id,
+    name: "Answer decisions",
+    source: "jev",
+    jevJudge: { connectionId: "typesafe" },
+  });
+  expect(
+    Object.fromEntries(
+      namedPass.judgments.map((judgment) => {
+        const question = questions.find(
+          (item) =>
+            item.id ===
+            view.results.find((result) => result.id === judgment.resultId)
+              ?.questionId,
+        )!;
+        return [question.id, judgment.status];
+      }),
+    ),
+  ).toEqual(statuses);
+  expect(
+    namedPass.judgments.every((judgment) => judgment.jevAssessmentId),
+  ).toBe(true);
+  expect(counts()).toMatchObject({ targetCalls: 4, judgeCalls: 8 });
+});
 
 it("freezes independent Jev and LLM judges and publishes saved-evidence previews without target or judge reruns", async () => {
   const { app, bank, profile, agent, evidence, counts } = await setup();
@@ -377,8 +500,8 @@ it("requests review when confident Jev checks contradict one another", async () 
   });
   await app.waitForIdle();
   const view = await app.execute("runs.get", { runId: launched.run.id });
-  expect(view.jevAssessments[0]?.checks?.answer.choice).toBe("acceptable");
-  expect(view.jevAssessments[0]?.checks?.evidence.choice).toBe("contradicted");
+  expect(view.jevAssessments[0]?.checks?.answer?.choice).toBe("acceptable");
+  expect(view.jevAssessments[0]?.checks?.evidence?.choice).toBe("contradicted");
   expect(view.jevAssessments[0]?.reviewRequired).toBe(true);
   expect(view.scoreSets[0]?.assessments[0]?.deterministic.status).toBe(
     "correct",
@@ -488,4 +611,464 @@ it("keeps external evidence answer-only and refuses incompatible saved judging w
   });
   expect(preview.error?.code).toBe("unsupported_evidence");
   expect(counts()).toEqual(before);
+});
+
+it.each([429, 529])(
+  "makes only one fallback HTTP attempt after trace rejection and HTTP %i",
+  async (status) => {
+    const { app, bank, agent, runtime } = await setup();
+    const profile = await app.execute("jev.profiles.publish", {
+      bankId: bank.bankId,
+      name: "Bounded fallback",
+      settings: jevProfileSettingsSchema.parse({
+        evidenceRequirement: "internal-activity",
+        answerOnlyFallback: {},
+      }),
+    });
+    runtime.classifier = new JevClassifier({
+      snapshot: async () => {
+        throw new Error("This test does not probe connections.");
+      },
+      freeze: async () => ({
+        connectionId: "typesafe",
+        provider: "typesafe",
+        settings: {},
+        credentialFields: ["apiKey"],
+      }),
+      resolveCredentials: async () => ({ apiKey: "fixture-secret" }),
+      redactionSecrets: async () => [],
+    });
+    const requests: unknown[] = [];
+    const server = createServer(async (request, response) => {
+      let body = "";
+      for await (const chunk of request) body += String(chunk);
+      requests.push(JSON.parse(body));
+      response
+        .writeHead(requests.length === 1 ? 413 : status, {
+          "content-type": "application/json",
+          "retry-after": "0",
+        })
+        .end(
+          JSON.stringify(
+            requests.length === 1
+              ? { error: { code: "max_tokens_exceeded" } }
+              : {},
+          ),
+        );
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    cleanups.push(async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+    const address = server.address();
+    if (!address || typeof address === "string")
+      throw new Error("Fixture did not bind");
+    const fetchHttp = globalThis.fetch;
+    vi.stubGlobal("fetch", (url: string, options: RequestInit) => {
+      expect(url).toBe("https://api.typesafe.ai/v1/systemone");
+      return fetchHttp(`http://127.0.0.1:${address.port}/systemone`, options);
+    });
+    const launched = await app.execute("runs.launch", {
+      bankRevisionId: bank.id,
+      agent,
+      jevJudge: { connectionId: "typesafe", profileRevisionId: profile.id },
+    });
+    await app.waitForIdle();
+    const view = await app.execute("runs.get", { runId: launched.run.id });
+    const record = await app.execute("jev.get", {
+      assessmentId: view.jevAssessments[0]!.id,
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toHaveProperty(
+      "state.trace.format",
+      "provider_transcript",
+    );
+    expect(requests[1]).toHaveProperty("state.trace.entries", null);
+    expect(record.status).toBe("error");
+    expect(record.error?.code).toBe("provider_unavailable");
+    expect(record.fallback?.trigger).toMatchObject({
+      httpStatus: 413,
+      error: { code: "token_limit_exceeded" },
+    });
+    expect(record.attempts).toEqual([{ status, response: {} }]);
+    expect(record.usage).toBeUndefined();
+    expect(record.evidence.trace.format).toBe("provider_transcript");
+  },
+);
+
+it("falls back once on trace capacity errors and preserves both call records and usage", async () => {
+  const { app, bank, agent, runtime } = await setup();
+  const profile = await app.execute("jev.profiles.publish", {
+    bankId: bank.bankId,
+    name: "Answer-only overflow fallback",
+    settings: jevProfileSettingsSchema.parse({
+      evidenceRequirement: "internal-activity",
+      answerOnlyFallback: {
+        instructions:
+          "Judge answer correctness from answer and reference only.",
+        answer: {
+          instructions: "Compare the final answer with expected.",
+        },
+      },
+    }),
+  });
+  const calls: Array<Record<string, unknown>> = [];
+  runtime.classifier!.evaluate = async (input) => {
+    calls.push(input as unknown as Record<string, unknown>);
+    if (calls.length === 1) {
+      const error = Object.assign(new Error("Trace request exceeded tokens."), {
+        code: "token_limit_exceeded",
+        request: { marker: "full-trace-request" },
+        response: { marker: "provider-limit-response" },
+        attempts: [
+          { status: 413, response: { marker: "provider-limit-response" } },
+        ],
+        httpStatus: 413,
+        usage: { inputTokens: 11, outputTokens: 2, costUsd: 0.11 },
+        pricing: {
+          model: "jev-1.13.0",
+          inputUsdPerMillion: 0.042,
+          outputUsdPerMillion: 0,
+          source: "fixture",
+          basis: "reported_tokens" as const,
+        },
+      });
+      input.onRequest({ marker: "full-trace-request" });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      throw error;
+    }
+    input.onRequest({ marker: "answer-only-request" });
+    return {
+      request: { marker: "answer-only-request" },
+      response: { marker: "answer-only-response" },
+      model: "jev-1.13.0",
+      checks: {
+        answer: {
+          choice: "acceptable",
+          probabilities: {
+            acceptable: 0.9,
+            incorrect: 0.05,
+            insufficient_evidence: 0.05,
+          },
+          confidence: 0.9,
+        },
+      },
+      usage: { inputTokens: 17, outputTokens: 3, costUsd: 0.17 },
+    };
+  };
+
+  const launched = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+    jevJudge: {
+      connectionId: "typesafe",
+      profileRevisionId: profile.id,
+    },
+  });
+  await app.waitForIdle();
+  const view = await app.execute("runs.get", { runId: launched.run.id });
+  const record = await app.execute("jev.get", {
+    assessmentId: view.jevAssessments[0]!.id,
+  });
+
+  expect(calls).toHaveLength(2);
+  expect(calls[0]?.scope).toBeUndefined();
+  expect(calls[1]?.scope).toBe("answer-only-fallback");
+  expect(calls[1]?.timeoutMs).toBeLessThan(calls[0]?.timeoutMs as number);
+  expect(record.status).toBe("completed");
+  expect(record.evidence.trace.format).toBe("provider_transcript");
+  expect(record.request).toEqual({ marker: "answer-only-request" });
+  expect(record.checks).toHaveProperty("answer");
+  expect(record.checks).not.toHaveProperty("evidence");
+  expect(record.checks).not.toHaveProperty("reference");
+  expect(record.reviewRequired).toBe(true);
+  expect(record.usage).toEqual({
+    inputTokens: 28,
+    outputTokens: 5,
+    costUsd: 0.28,
+  });
+  expect(record.fallback?.resultUsage).toEqual({
+    inputTokens: 17,
+    outputTokens: 3,
+    costUsd: 0.17,
+  });
+  expect(view.performance!.judge).toMatchObject({
+    calls: 2,
+    inputTokens: 28,
+    outputTokens: 5,
+  });
+  expect(record.fallback).toMatchObject({
+    trigger: {
+      request: { marker: "full-trace-request" },
+      response: { marker: "provider-limit-response" },
+      httpStatus: 413,
+      error: { code: "token_limit_exceeded" },
+    },
+    criteria: {
+      instructions: "Judge answer correctness from answer and reference only.",
+      answer: { instructions: "Compare the final answer with expected." },
+    },
+  });
+});
+
+it("keeps initial-request provenance in the trigger when fallback fails before admission", async () => {
+  const { app, bank, agent, runtime } = await setup();
+  const profile = await app.execute("jev.profiles.publish", {
+    bankId: bank.bankId,
+    name: "Answer-only overflow fallback failure",
+    settings: jevProfileSettingsSchema.parse({
+      evidenceRequirement: "internal-activity",
+      answerOnlyFallback: {
+        instructions: "Compare the submitted answer with the reference.",
+        answer: { instructions: "Judge answer correctness." },
+      },
+    }),
+  });
+  let calls = 0;
+  runtime.classifier!.evaluate = async (input) => {
+    calls++;
+    if (calls === 1) {
+      input.onRequest({ marker: "original-request" });
+      throw Object.assign(new Error("Trace request exceeded tokens."), {
+        code: "token_limit_exceeded",
+      });
+    }
+    throw Object.assign(new Error("Credentials unavailable."), {
+      code: "authentication_failed",
+    });
+  };
+
+  const launched = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+    jevJudge: {
+      connectionId: "typesafe",
+      profileRevisionId: profile.id,
+    },
+  });
+  await app.waitForIdle();
+  const view = await app.execute("runs.get", { runId: launched.run.id });
+  const record = await app.execute("jev.get", {
+    assessmentId: view.jevAssessments[0]!.id,
+  });
+
+  expect(calls).toBe(2);
+  expect(record.status).toBe("error");
+  expect(record.request).toBeUndefined();
+  expect(record.response).toBeUndefined();
+  expect(record.fallback?.trigger.request).toEqual({
+    marker: "original-request",
+  });
+  expect(record.fallback?.resultUsage).toBeUndefined();
+  expect(record.usage).toBeUndefined();
+});
+
+it("does not retry an oversized answer-only request and keeps unknown trigger usage unknown", async () => {
+  const { app, bank, agent, runtime } = await setup();
+  const profile = await app.execute("jev.profiles.publish", {
+    bankId: bank.bankId,
+    name: "Still oversized fallback",
+    settings: jevProfileSettingsSchema.parse({
+      evidenceRequirement: "internal-activity",
+      answerOnlyFallback: {
+        instructions: "Compare the submitted answer with the reference.",
+        answer: { instructions: "Judge answer correctness." },
+      },
+    }),
+  });
+  const calls: Array<Record<string, unknown>> = [];
+  runtime.classifier!.evaluate = async (input) => {
+    calls.push(input as unknown as Record<string, unknown>);
+    if (calls.length === 1) {
+      input.onRequest({ marker: "full-trace-request" });
+      throw Object.assign(new Error("Trace request exceeded tokens."), {
+        code: "token_limit_exceeded",
+      });
+    }
+    input.onRequest({ marker: "oversized-answer-request" });
+    throw Object.assign(new Error("Answer-only request exceeds local limit."), {
+      code: "capacity_exceeded",
+      request: { marker: "oversized-answer-request" },
+      usage: {
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        costUsd: 0,
+      },
+    });
+  };
+
+  const launched = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+    jevJudge: {
+      connectionId: "typesafe",
+      profileRevisionId: profile.id,
+    },
+  });
+  await app.waitForIdle();
+  const view = await app.execute("runs.get", { runId: launched.run.id });
+  const record = await app.execute("jev.get", {
+    assessmentId: view.jevAssessments[0]!.id,
+  });
+
+  expect(calls).toHaveLength(2);
+  expect(record.status).toBe("error");
+  expect(record.error?.code).toBe("capacity_exceeded");
+  expect(record.request).toEqual({ marker: "oversized-answer-request" });
+  expect(record.fallback?.trigger.request).toEqual({
+    marker: "full-trace-request",
+  });
+  expect(record.fallback?.trigger.usage).toBeUndefined();
+  expect(record.fallback?.resultUsage).toEqual({
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+  });
+  expect(record.usage).toBeUndefined();
+  expect(view.performance!.judge).toMatchObject({
+    calls: 2,
+    inputTokens: 0,
+    reporting: { inputTokens: { reported: 1, missing: 1 } },
+  });
+});
+
+it.each([
+  {
+    label: "fallback is disabled",
+    fallback: false,
+    evidenceRequirement: "internal-activity" as const,
+    errorCode: "token_limit_exceeded",
+  },
+  {
+    label: "the primary profile is answer-only",
+    fallback: true,
+    evidenceRequirement: "answer" as const,
+    errorCode: "token_limit_exceeded",
+  },
+  {
+    label: "the initial failure is authentication-related",
+    fallback: true,
+    evidenceRequirement: "internal-activity" as const,
+    errorCode: "authentication_failed",
+  },
+  {
+    label: "the initial failure is network-related",
+    fallback: true,
+    evidenceRequirement: "internal-activity" as const,
+    errorCode: "network_error",
+  },
+])("does not retry when $label", async (testCase) => {
+  const { app, bank, agent, runtime } = await setup();
+  const profile = await app.execute("jev.profiles.publish", {
+    bankId: bank.bankId,
+    name: "No fallback retry",
+    settings: jevProfileSettingsSchema.parse({
+      evidenceRequirement: testCase.evidenceRequirement,
+      ...(testCase.fallback
+        ? {
+            answerOnlyFallback: {
+              instructions: "Compare the submitted answer with the reference.",
+              answer: { instructions: "Judge answer correctness." },
+            },
+          }
+        : {}),
+    }),
+  });
+  let calls = 0;
+  runtime.classifier!.evaluate = async () => {
+    calls++;
+    throw Object.assign(new Error("Fixture judge failure."), {
+      code: testCase.errorCode,
+    });
+  };
+
+  const launched = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+    jevJudge: {
+      connectionId: "typesafe",
+      profileRevisionId: profile.id,
+    },
+  });
+  await app.waitForIdle();
+  const view = await app.execute("runs.get", { runId: launched.run.id });
+  const record = await app.execute("jev.get", {
+    assessmentId: view.jevAssessments[0]!.id,
+  });
+
+  expect(calls).toBe(1);
+  expect(record.status).toBe("error");
+  expect(record.fallback).toBeUndefined();
+});
+
+it("sends an answer-only projection while preserving full sealed evidence and criteria", async () => {
+  const { app, bank, agent, evidence } = await setup();
+  const profile = await app.execute("jev.profiles.publish", {
+    bankId: bank.bankId,
+    name: "Answer-only correctness",
+    settings: jevProfileSettingsSchema.parse({
+      evidenceRequirement: "answer",
+    }),
+  });
+  const launched = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+    jevJudge: {
+      connectionId: "typesafe",
+      profileRevisionId: profile.id,
+    },
+  });
+  await app.waitForIdle();
+
+  const view = await app.execute("runs.get", { runId: launched.run.id });
+  const record = await app.execute("jev.get", {
+    assessmentId: view.jevAssessments[0]!.id,
+  });
+
+  expect(evidence[0]?.observationLevel).toBe("answer-only");
+  expect(evidence[0]?.trace).toEqual({ format: "unavailable", entries: null });
+  expect(record.evidence.trace.format).toBe("provider_transcript");
+  expect(JSON.stringify(record.evidence.trace)).toContain("query");
+  expect(record.evidenceHash).toBe(digest(record.evidence));
+  const attemptDetail = await app.execute("runs.attempt", {
+    runId: view.run.id,
+    attemptId: view.attempts[0]!.id,
+  });
+  expect(record.attemptEvidenceHash).toBe(attemptDetail.attempt.evidenceHash);
+  expect(record.request).toMatchObject({
+    state: evidence[0],
+    questions: {
+      answer: { criteria: profile.settings.checks.answer.criteria },
+      evidence: { criteria: profile.settings.checks.evidence.criteria },
+      reference: { criteria: profile.settings.checks.reference.criteria },
+    },
+  });
+
+  const internalProfile = await app.execute("jev.profiles.publish", {
+    bankId: bank.bankId,
+    name: "Internal-activity review",
+    settings: jevProfileSettingsSchema.parse({
+      evidenceRequirement: "internal-activity",
+    }),
+  });
+  const internalPreview = await app.execute("jev.preview", {
+    runId: view.run.id,
+    attemptId: view.attempts[0]!.id,
+    configuration: {
+      connectionId: "typesafe",
+      profileRevisionId: internalProfile.id,
+    },
+  });
+  const internalRecord = await app.execute("jev.get", {
+    assessmentId: internalPreview.id,
+  });
+  expect(evidence[1]?.trace).toEqual(record.evidence.trace);
+  expect(internalRecord.request).toMatchObject({
+    state: { trace: record.evidence.trace },
+  });
 });

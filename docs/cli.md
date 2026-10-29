@@ -32,8 +32,73 @@ node dist/cli.js workspace.get --url http://127.0.0.1:4390
 ```
 
 Alternatively, set `AEH_URL` in the CLI's environment.
+An explicit `--url` overrides `AEH_URL`; without either, the CLI uses `http://127.0.0.1:4381`.
 The CLI accepts loopback HTTP endpoints only.
 The HTTP equivalent is `POST /api/commands/<operation>` with the same JSON body; discovery uses `GET /api/discovery`.
+
+## Transport and failure contracts
+
+The CLI does not open a workspace database or start an engine.
+[`runCli`](../src/cli.ts) sends requests to [`startServer`](../src/server.ts), which dispatches commands through [`Application.execute`](../src/application/application.ts).
+React uses the same route through [`command`](../src/web/api.ts).
+[`commandSchemas`](../src/contracts.ts) owns input validation and discovery; `CommandResultMap` owns the TypeScript result contract.
+The discovery response describes inputs, not result schemas or command side effects.
+
+HTTP errors contain `error.code` and `error.message`; schema errors also contain `error.details`.
+The CLI preserves an engine error response and exits with code 1.
+Argument, input-file, JSON parsing, and connection failures use the local `cli_error` code.
+Successful commands exit with code 0 and print their JSON result to standard output.
+HTTP responses use 403 for `forbidden`, 404 for `not_found`, and 500 for `internal_error`.
+They use 409 for `idempotency_conflict` and `invalid_state`, and 400 for other error codes, including `conflict`.
+Branch on `error.code` when your automation needs to distinguish stale publication from invalid input.
+
+A lost response does not establish that the operation failed.
+Preserve the exact launch payload and `idempotencyKey` before sending `runs.launch` or `research.launch`.
+Replay that payload to recover an accepted launch; changed input with the same key is rejected.
+Do not assume every mutation supports replay: inspect its discovery schema and operation contract.
+Closing a client request does not send a Run control action.
+Use `runs.control` or `research.control` to pause, halt, resume, or cancel engine work.
+
+The [configuration guide](configuration-guide.md#local-engine-configuration) owns server configuration and the local trust boundary.
+The [architecture guide](architecture.md) owns application services, immutable records, and recovery guarantees.
+
+## Save a Tableau connection
+
+Use `connections.save` to create or update a saved Tableau connection.
+The settings object holds the Tableau server, site, token name, local MCP command and arguments, additional environment variables, and feature flags.
+The PAT value belongs under `credentials.patValue`, separate from the settings object.
+
+```json
+{
+  "name": "Tableau QA",
+  "provider": "tableau",
+  "settings": {
+    "server": "https://tableau.example.com",
+    "site": "my-site",
+    "patName": "harness-token",
+    "mcpCommand": "npx",
+    "mcpArgs": ["-y", "@tableau/mcp-server@4.13.3"],
+    "mcpEnv": {
+      "INCLUDE_DATASOURCE_IDS": "your-datasource-id"
+    },
+    "mcpFeatures": {
+      "knowledge-tools": true
+    }
+  },
+  "credentials": {
+    "patValue": "SUPPLY_VIA_PROTECTED_INPUT"
+  }
+}
+```
+
+Send this object to `node dist/cli.js connections.save --stdin` or `POST /api/commands/connections.save`.
+For updates, include the connection `id`; omit `credentials` to keep the currently saved PAT.
+The default `mcpCommand` is `npx`, and the default `mcpArgs` are `["-y", "@tableau/mcp-server@4.13.3"]`.
+The web editor's **Tableau MCP settings (JSON)** accepts `mcpCommand`, `mcpArgs`, `mcpEnv`, and `mcpFeatures`.
+`mcpEnv` maps additional environment variable names to string values, and `mcpFeatures` maps feature names to booleans.
+The harness reserves its authentication, transport, tool selection, and internal feature override variable.
+Do not put a real PAT in `settings`, `mcpArgs`, command-line arguments, or a committed JSON file.
+Use the web editor or provide the credential through controlled standard input.
 
 ## Create a bank and launch a run
 
@@ -110,6 +175,53 @@ Reusing a launch idempotency key with identical input returns the original run.
 Reusing it with different input is an error.
 Use a new key for an intentional new evaluation.
 
+## Author and check a bank
+
+Use `banks.publish` to save questions and deterministic grading rules atomically.
+For a new bank, supply `name`, `questions`, `evaluatorName`, and `evaluatorSettings`.
+For an existing bank, also supply `bankId`, `baseRevisionId`, and `baseEvaluatorRevisionId` from the bank detail you edited.
+The engine rejects stale bases and failing calibration examples without publishing a partial revision.
+Existing runs keep their frozen questions and evaluator.
+
+These operations check a draft without publishing or calling a model:
+
+| Operation               | Input                                       | Result                                                        |
+| ----------------------- | ------------------------------------------- | ------------------------------------------------------------- |
+| `banks.check-answer`    | `question`, `settings`, `answer`            | The deterministic verdict for one sample answer.              |
+| `banks.calibrate-draft` | `questions`, `settings`                     | Calibration results for the proposed bank and rules.          |
+| `banks.preview-draft`   | `bankId`, `questions`, `settings`, `runIds` | Proposed verdicts beside original verdicts for saved answers. |
+
+Preview requires compatible saved questions and uses their sealed answers; it does not rerun the target agent.
+Use `banks.export-package` with `bankRevisionId` and optional `evaluatorRevisionId` and `jevProfileRevisionId` to export a versioned package containing questions, deterministic rules, and the selected Jev profile.
+The package excludes credentials.
+The web importer accepts this package and reviews included settings before publication.
+Use `discover` for complete schemas and defaults.
+
+## Find saved runs
+
+Save the filters and page size as `run-search.json`:
+
+```json
+{
+  "bankId": "BANK_ID",
+  "status": "completed",
+  "search": "supply chain",
+  "limit": 25,
+  "offset": 0
+}
+```
+
+```sh
+node dist/cli.js runs.list --file run-search.json
+```
+
+Bank, status, and search filters are optional.
+Search matches Run names, frozen bank names, and agent labels across all saved Runs before pagination.
+The response includes the matching `total` and `nextOffset`; use that offset with the same filters to request another page.
+A null `nextOffset` marks the last page.
+Rows contain compact target labels, answer counts, and saved score summaries.
+Use `runs.get` for the selected Run's frozen configuration and evidence.
+
 ## Control and recover a run
 
 Save a control request as `control.json`:
@@ -141,6 +253,26 @@ node dist/cli.js runs.retry-failed --file retry.json
 This creates a linked run rather than changing original answers.
 An optional `resultIds` array restricts the selection.
 If the engine requires acknowledgment of possible repeated actions, inspect the prior attempts before setting `acknowledgeDuplicateWork` to `true`.
+
+After the linked rerun finishes, apply its completed answers to the original Run:
+
+```json
+{
+  "runId": "ORIGINAL_RUN_ID",
+  "retryRunId": "LINKED_RETRY_RUN_ID",
+  "idempotencyKey": "apply-retry-1"
+}
+```
+
+```sh
+node dist/cli.js runs.apply-retry --file apply-retry.json
+```
+
+The operation creates updated assessment passes without invoking the target or judges.
+Original attempts and scores remain available.
+An optional `resultIds` array selects original result slots.
+Set `replaceApplied` to `true` only when intentionally replacing an answer already applied from a different rerun.
+Use `runs.get` to inspect eligible linked reruns, applied answer sources, and the updated scores.
 
 ## Score saved answers
 

@@ -16,10 +16,12 @@ import {
   allowedActions,
   controlTransition,
   isTerminal,
+  faultTransition,
+  cancellationRequested,
 } from "../domain/lifecycle.js";
 import { Database } from "../storage/database.js";
 import { AssessmentPassService } from "./assessment-passes.js";
-import { RunService } from "./runs.js";
+import { RunService, type ResearchControlAdmission } from "./runs.js";
 import { checkResearchBudget } from "./research-budget.js";
 import { validateResearchProposal } from "../domain/research-proposal.js";
 import { AnswerSources } from "./answer-sources.js";
@@ -60,6 +62,17 @@ export class ResearchService {
     for (let session of this.db
       .list("research")
       .filter((s) => !isTerminal(s.status))) {
+      if (cancellationRequested(session)) {
+        this.db.update("research", {
+          ...session,
+          ...faultTransition(session, true),
+          ...(session.pendingTurn
+            ? { interruptedTurns: (session.interruptedTurns ?? 0) + 1 }
+            : {}),
+          updatedAt: now(),
+        });
+        continue;
+      }
       if (!session.baselineRunId) {
         const baselineInput = {
           ...session.configuration.baseline,
@@ -74,6 +87,14 @@ export class ResearchService {
           ? this.db.require("run", receipt.id)
           : undefined;
         if (!baseline || baseline.researchSessionId !== session.id) {
+          if (session.intent === "pause") {
+            this.db.update("research", {
+              ...session,
+              status: "paused",
+              updatedAt: now(),
+            });
+            continue;
+          }
           this.db.update("research", {
             ...session,
             status: "failed",
@@ -199,33 +220,73 @@ export class ResearchService {
       if (key) this.db.remember(key, hash, "research", sessionId);
       return initial;
     });
+    const sourceSequence = this.db.controlSequence({ sessionId });
     try {
-      const baseline = await this.runs.launch(
-        {
-          ...input.baseline,
-          name: `${input.name}: baseline`,
-          idempotencyKey: `research:${sessionId}:baseline`,
-        },
-        sessionId,
-      );
-      this.db.update("research", {
-        ...session,
-        baselineRunId: baseline.run.id,
-        currentRunId: baseline.run.id,
-        bestRunId: baseline.run.id,
-        runIds: [baseline.run.id],
-      });
+      await this.launchBaseline(session);
       this.schedule(sessionId);
     } catch (error) {
-      this.db.update("research", {
-        ...session,
-        status: "failed",
-        error: errorMessage(error),
-        updatedAt: now(),
-      });
+      const current = this.db.require("research", sessionId);
+      if (current.intent !== "run") this.settle(sessionId);
+      else if (
+        digest(current) === digest(session) &&
+        this.db.controlSequence({ sessionId }) === sourceSequence
+      )
+        this.db.update("research", {
+          ...current,
+          ...faultTransition(current, true),
+          error: errorMessage(error),
+          updatedAt: now(),
+        });
       throw error;
     }
     return this.launchReceipt(sessionId);
+  }
+  private researchAdmission(
+    expected: ResearchRecord,
+    sourceSequence: number,
+  ): ResearchRecord {
+    const current = this.db.require("research", expected.id);
+    if (this.closing || current.intent !== "run" || isTerminal(current.status))
+      throw new AppError(
+        "interrupted",
+        "Research stopped before target admission.",
+      );
+    if (
+      digest(current) !== digest(expected) ||
+      this.db.controlSequence({ sessionId: expected.id }) !== sourceSequence
+    )
+      throw new AppError(
+        "conflict",
+        "Research changed while preparing target admission.",
+      );
+    return current;
+  }
+  private async launchBaseline(session: ResearchRecord): Promise<void> {
+    const sourceSequence = this.db.controlSequence({ sessionId: session.id });
+    await this.runs.launch(
+      {
+        ...session.configuration.baseline,
+        name: `${session.name}: baseline`,
+        idempotencyKey: `research:${session.id}:baseline`,
+      },
+      session.id,
+      undefined,
+      (baseline) => {
+        const current = this.researchAdmission(session, sourceSequence);
+        if (baseline.researchSessionId !== current.id)
+          throw new AppError(
+            "conflict",
+            "The baseline receipt belongs to a different owner.",
+          );
+        this.db.update("research", {
+          ...current,
+          baselineRunId: baseline.id,
+          currentRunId: baseline.id,
+          bestRunId: baseline.id,
+          runIds: [baseline.id],
+        });
+      },
+    );
   }
   private launchReceipt(sessionId: string): ResearchView {
     const receipt = this.view(sessionId);
@@ -251,25 +312,88 @@ export class ResearchService {
       cursor: events.at(-1)?.sequence ?? cursor,
     };
   }
-  control(sessionId: string, action: Control): ResearchView {
+  prepareControl(sessionId: string, action: Control): ResearchControlAdmission {
     const session = this.db.require("research", sessionId);
     const transition = controlTransition(session.status, action);
-    this.db.update("research", { ...session, ...transition, updatedAt: now() });
-    this.db.append({
-      sessionId,
-      type: "research.control.requested",
-      message: `${action} requested.`,
-      data: { action },
-    });
-    if (action === "halt" || action === "cancel")
-      this.controllers.get(sessionId)?.abort(new Error(action));
+    const acknowledgeRunning =
+      action === "resume" &&
+      session.intent === "run" &&
+      ["queued", "running"].includes(session.status);
+    const expected = digest(session);
+    const sourceSequence = this.db.controlSequence({ sessionId });
+    const run = session.currentRunId
+      ? this.db.require("run", session.currentRunId)
+      : undefined;
+    const runSequence = run
+      ? this.db.controlSequence({ runId: run.id })
+      : undefined;
+    const commit = () => {
+      const current = this.db.require("research", sessionId);
+      if (
+        digest(current) !== expected ||
+        this.db.controlSequence({ sessionId }) !== sourceSequence
+      )
+        throw new AppError(
+          "conflict",
+          "The research session changed while preparing its control action.",
+        );
+      if (
+        run &&
+        (digest(this.db.require("run", run.id)) !== digest(run) ||
+          this.db.controlSequence({ runId: run.id }) !== runSequence)
+      )
+        throw new AppError(
+          "conflict",
+          "The current Research child changed while preparing its control action.",
+        );
+      if (acknowledgeRunning) return;
+      this.db.update("research", {
+        ...current,
+        ...transition,
+        updatedAt: now(),
+      });
+      this.db.append({
+        sessionId,
+        type: "research.control.requested",
+        message: `${action} requested.`,
+        data: { action },
+      });
+    };
+    const researchOwned =
+      !isTerminal(session.status) &&
+      run?.researchSessionId === sessionId &&
+      (run.execution?.controller === "research" || !run.execution);
+    return {
+      targetRunId:
+        researchOwned && allowedActions(run.status).includes(action)
+          ? run.id
+          : undefined,
+      commit,
+      activate: () => {
+        if (acknowledgeRunning) return;
+        if (action === "halt" || action === "cancel")
+          this.controllers.get(sessionId)?.abort(new Error(action));
+        if (action === "resume") this.schedule(sessionId);
+        else if (!this.jobs.has(sessionId)) this.settle(sessionId);
+      },
+    };
+  }
+  async control(sessionId: string, action: Control): Promise<ResearchView> {
+    const session = this.db.require("research", sessionId);
     if (session.currentRunId) {
-      const run = this.db.require("run", session.currentRunId);
-      if (allowedActions(run.status).includes(action))
-        this.runs.control(run.id, action);
+      await this.runs.control(
+        {
+          runId: session.currentRunId,
+          action,
+          acknowledgeDuplicateWork: false,
+        },
+        () => this.prepareControl(sessionId, action),
+      );
+    } else {
+      const admission = this.prepareControl(sessionId, action);
+      this.db.transaction(admission.commit);
+      admission.activate();
     }
-    if (action === "resume") this.schedule(sessionId);
-    else if (!this.jobs.has(sessionId)) this.settle(sessionId);
     return this.view(sessionId);
   }
   evidence(sessionId: string, request: ResearchEvidenceRequest): Json {
@@ -400,20 +524,19 @@ export class ResearchService {
             ...current,
             interruptedTurns: (current.interruptedTurns ?? 0) + 1,
           });
-        const code =
-          error && typeof error === "object" && "code" in error
-            ? String(error.code)
-            : "";
+        const continuityLost =
+          current.phase === "researching" &&
+          !!current.pendingTurn &&
+          !current.conversationId;
         if (
           current.intent !== "run" &&
-          (current.conversationId || current.intent === "cancel") &&
-          code === "interrupted"
+          (cancellationRequested(current) || !continuityLost)
         )
           this.settle(sessionId);
         else
           this.db.update("research", {
             ...current,
-            status: "failed",
+            ...faultTransition(current, true),
             error: errorMessage(error),
             updatedAt: now(),
           });
@@ -430,6 +553,9 @@ export class ResearchService {
     this.jobs.set(sessionId, job);
   }
   private stop(session: ResearchRecord, reason: string): void {
+    session = this.db.require("research", session.id);
+    if (isTerminal(session.status)) return;
+    if (session.intent !== "run") return this.settle(session.id);
     this.db.update("research", {
       ...session,
       status: "completed",
@@ -473,6 +599,20 @@ export class ResearchService {
       .filter((result) => eligibleQuestions.has(result.questionId));
     const metric = session.configuration.selectionMetric ?? "deterministic";
     const pass = this.passes.original(runId, metric);
+    const originallyAnswered = new Set(
+      pass.judgments
+        .filter((judgment) => judgment.attemptId)
+        .map((judgment) => judgment.resultId),
+    );
+    const originalAttempts = new Map(
+      results.map((result) => [
+        result.id,
+        result.attemptIds
+          .map((attemptId) => this.db.require("attempt", attemptId))
+          .filter((attempt) => (attempt.executionId ?? runId) === runId)
+          .at(-1),
+      ]),
+    );
     let correct = 0,
       judged = 0;
     for (const result of results) {
@@ -520,13 +660,19 @@ export class ResearchService {
       eligibleOutcome: eligible ? correct / eligible : null,
       judgedAccuracy: judged ? correct / judged : null,
       coverage: eligible ? judged / eligible : 0,
-      completed: results.filter((result) => result.status === "completed")
+      completed: results.filter((result) => originallyAnswered.has(result.id))
         .length,
-      failed: results.filter((result) => result.status === "failed").length,
+      failed: results.filter(
+        (result) =>
+          !originallyAnswered.has(result.id) &&
+          originalAttempts.get(result.id)?.status === "failed",
+      ).length,
     };
   }
   private async drive(sessionId: string): Promise<void> {
     let session = this.db.require("research", sessionId);
+    if (isTerminal(session.status) || session.intent !== "run")
+      return this.settle(sessionId);
     this.db.update("research", {
       ...session,
       status: "running",
@@ -535,6 +681,10 @@ export class ResearchService {
     while (!this.closing) {
       session = this.db.require("research", sessionId);
       if (session.intent !== "run") return this.settle(sessionId);
+      if (!session.baselineRunId) {
+        await this.launchBaseline(session);
+        continue;
+      }
       await this.runs.waitFor(session.currentRunId);
       session = this.db.require("research", sessionId);
       if (session.intent !== "run") return this.settle(sessionId);
@@ -566,7 +716,8 @@ export class ResearchService {
             session,
             "The next candidate exceeds the remaining target invocation budget.",
           );
-        const child = await this.runs.launch(
+        const sourceSequence = this.db.controlSequence({ sessionId });
+        await this.runs.launch(
           {
             ...session.configuration.baseline,
             bankRevisionId: baseline.manifest.bank.id,
@@ -581,15 +732,23 @@ export class ResearchService {
           },
           session.id,
           baseline.manifest.jevJudge,
+          (child) => {
+            const current = this.researchAdmission(session, sourceSequence);
+            if (child.researchSessionId !== current.id)
+              throw new AppError(
+                "conflict",
+                "The candidate receipt belongs to a different owner.",
+              );
+            this.db.update("research", {
+              ...current,
+              phase: "evaluating",
+              pendingProposal: undefined,
+              currentRunId: child.id,
+              runIds: [...current.runIds, child.id],
+              updatedAt: now(),
+            });
+          },
         );
-        this.db.update("research", {
-          ...session,
-          phase: "evaluating",
-          pendingProposal: undefined,
-          currentRunId: child.run.id,
-          runIds: [...session.runIds, child.run.id],
-          updatedAt: now(),
-        });
         continue;
       }
       if (
@@ -832,7 +991,8 @@ export class ResearchService {
     this.closing = true;
     for (const sessionId of this.jobs.keys()) {
       const session = this.db.require("research", sessionId);
-      if (!isTerminal(session.status)) this.control(sessionId, "halt");
+      if (!isTerminal(session.status) && session.intent !== "cancel")
+        await this.control(sessionId, "halt");
     }
     await this.waitForIdle();
   }

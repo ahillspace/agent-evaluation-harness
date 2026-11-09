@@ -17,6 +17,37 @@ export function selectedAssessment<T extends AssessmentPassSummary>(
   return passes.find((pass) => pass.id === selectedId) ?? passes[0];
 }
 
+function assessmentOptionLabels(passes: AssessmentPassSummary[]) {
+  const nameCounts = new Map<string, number>();
+  for (const pass of passes)
+    nameCounts.set(pass.name, (nameCounts.get(pass.name) ?? 0) + 1);
+  const labels = passes.map((pass) => {
+    if (nameCounts.get(pass.name) === 1)
+      return { id: pass.id, label: pass.name };
+    const created = new Date(pass.createdAt);
+    const timestamp = Number.isNaN(created.getTime())
+      ? "Time not recorded"
+      : created.toLocaleString(undefined, {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+    return { id: pass.id, label: `${pass.name} (${timestamp})` };
+  });
+  const labelCounts = new Map<string, number>();
+  for (const { label } of labels)
+    labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+  return new Map(
+    labels.map(({ id, label }) => [
+      id,
+      labelCounts.get(label) === 1 ? label : `${label} [${id}]`,
+    ]),
+  );
+}
+
 export function AssessmentSelector({
   runId,
   passes,
@@ -32,6 +63,7 @@ export function AssessmentSelector({
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const optionLabels = assessmentOptionLabels(passes);
   return (
     <div className="score-selector">
       <select
@@ -51,7 +83,7 @@ export function AssessmentSelector({
         {!passes.length && <option value="">Awaiting assessment</option>}
         {passes.map((pass) => (
           <option key={pass.id} value={pass.id}>
-            {pass.name}
+            {optionLabels.get(pass.id)}
             {pass.status === "completed" ? "" : ` (${pass.status})`}
           </option>
         ))}

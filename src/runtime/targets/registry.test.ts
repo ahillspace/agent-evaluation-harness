@@ -3,6 +3,70 @@ import { TargetRegistry } from "./registry.js";
 import { externalCapabilities } from "../../contracts/targets.js";
 import type { TargetAdapter } from "./contracts.js";
 
+it("rejects frozen-target preflight when cleanup becomes unsafe during resolution and before a later resolution starts", async () => {
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const resolve = vi.fn(
+    async (target: Parameters<TargetAdapter["resolve"]>[0]) => {
+      await barrier;
+      return target;
+    },
+  );
+  const adapter: TargetAdapter = {
+    id: "unsafe-fixture",
+    version: 1,
+    capabilities: externalCapabilities,
+    validate: (target) => target,
+    resolve,
+    invoke: async () => ({
+      answer: 42,
+      text: "42",
+      evidenceScope: "answer-only",
+      cleanup: "unavailable",
+    }),
+    recover: async () => ({ cleanup: "complete", remoteCompletion: "unknown" }),
+    close: async () => {},
+  };
+  const registry = new TargetRegistry([adapter], 1);
+  const target = {
+    kind: "external" as const,
+    adapterId: adapter.id,
+    adapterVersion: 1,
+    name: "Fixture",
+    configuration: {},
+  };
+  try {
+    const resolving = registry.resolve(target);
+    const rejected = expect(resolving).rejects.toMatchObject({
+      code: "cleanup_failed",
+    });
+    await registry.invoke({
+      target,
+      attemptId: "a",
+      runId: "r",
+      repetition: 1,
+      question: { id: "q", text: "Answer", tags: [] },
+      artifactDirectory: "unused",
+      timeoutMs: 1000,
+      maxOutputBytes: 1024,
+      signal: new AbortController().signal,
+      onEvent() {},
+      async checkpoint() {},
+    });
+    release();
+    await rejected;
+    await expect(registry.resolve(target)).rejects.toMatchObject({
+      code: "cleanup_failed",
+    });
+    expect(resolve).toHaveBeenCalledTimes(1);
+  } finally {
+    release();
+    await registry.close();
+  }
+});
+
 it("registers an internal session adapter with shared invocation and recovery", async () => {
   const actions: string[] = [];
   const adapter: TargetAdapter = {

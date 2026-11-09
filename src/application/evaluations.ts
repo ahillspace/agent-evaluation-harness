@@ -11,6 +11,7 @@ import type {
   EvaluatorRevision,
   ResultRecord,
   RunRecord,
+  AnswerSource,
 } from "../contracts.js";
 import { AnswerSources } from "./answer-sources.js";
 import { AppError } from "../domain/errors.js";
@@ -24,6 +25,16 @@ import {
   evaluatorEvidenceRequirement,
   evidenceSupports,
 } from "../domain/evidence-requirements.js";
+
+export interface PreviewRunSnapshot {
+  readonly run: Readonly<RunRecord>;
+  readonly passId: string;
+  readonly answers: readonly {
+    readonly result: Readonly<ResultRecord>;
+    readonly source?: Readonly<AnswerSource>;
+    readonly before?: Readonly<Verdict>;
+  }[];
+}
 
 function scoredAssessments(assessments: Assessment[]): Assessment[] {
   return assessments.filter((a) =>
@@ -90,7 +101,7 @@ export class EvaluationService {
   }
   async previewDraft(
     input: CommandValue<"banks.preview-draft">,
-    previous: ReadonlyMap<string, ReadonlyMap<string, Verdict>>,
+    snapshots: ReadonlyMap<string, PreviewRunSnapshot>,
   ): Promise<EvaluationPreview> {
     const bank = this.db.require("bank", input.bankId);
     const reference = this.draftReference(input.questions, bank.id, bank.name);
@@ -103,7 +114,7 @@ export class EvaluationService {
       createdAt,
       updatedAt: createdAt,
     };
-    return this.previewSettings(draft, input.runIds, reference, previous);
+    return this.previewSettings(draft, input.runIds, reference, snapshots);
   }
   async recover(): Promise<void> {
     for (const result of this.db.list("result", { status: "completed" })) {
@@ -188,28 +199,23 @@ export class EvaluationService {
     };
   }
   private async assessSaved(
-    run: RunRecord,
+    snapshot: PreviewRunSnapshot,
     evaluator: EvaluatorRevision,
     referenceBank?: BankRevision,
   ): Promise<Assessment[]> {
-    const results = this.db
-      .list("result", { runId: run.id })
-      .filter((r) => new AnswerSources(this.db).source(r));
-    if (!results.length)
+    const answers = snapshot.answers.filter((answer) => answer.source);
+    if (!answers.length)
       throw new AppError(
         "evidence_unavailable",
         "This run has no completed answers to evaluate.",
       );
     const assessments: Assessment[] = [];
-    for (const result of results) {
+    for (const answer of answers) {
       assessments.push(
         await this.assess(
-          run,
-          result,
-          new AnswerSources(this.db).verify(
-            result,
-            new AnswerSources(this.db).source(result)!,
-          ),
+          snapshot.run,
+          answer.result,
+          new AnswerSources(this.db).verify(answer.result, answer.source!),
           evaluator,
           referenceBank,
         ),
@@ -264,28 +270,40 @@ export class EvaluationService {
     draftId: string,
     runIds: string[],
     bankRevisionId: string | undefined,
-    previous: ReadonlyMap<string, ReadonlyMap<string, Verdict>>,
+    snapshots: ReadonlyMap<string, PreviewRunSnapshot>,
   ): Promise<EvaluationPreview> {
     const draft = this.db.require("evaluatorDraft", draftId);
     const reference = bankRevisionId
       ? this.db.require("bankRevision", bankRevisionId)
       : undefined;
-    return this.previewSettings(draft, runIds, reference, previous);
+    return this.previewSettings(draft, runIds, reference, snapshots);
   }
   private async previewSettings(
     draft: EvaluatorDraft,
     runIds: string[],
     reference: BankRevision | undefined,
-    previous: ReadonlyMap<string, ReadonlyMap<string, Verdict>>,
+    snapshots: ReadonlyMap<string, PreviewRunSnapshot>,
   ): Promise<EvaluationPreview> {
     const evaluator: EvaluatorRevision = {
       ...draft,
       number: 0,
       digest: digest(draft.settings),
     };
+    const calibrationReference =
+      reference ??
+      this.db.require(
+        "bankRevision",
+        this.db.require("bank", draft.bankId).latestRevisionId,
+      );
     const runs = [];
     for (const runId of runIds) {
-      const run = this.db.require("run", runId);
+      const snapshot = snapshots.get(runId);
+      if (!snapshot || snapshot.run.id !== runId)
+        throw new AppError(
+          "incompatible_basis",
+          "The preview requires a captured current score for each Run.",
+        );
+      const run = snapshot.run;
       if (run.manifest.bank.bankId !== draft.bankId)
         throw new AppError(
           "incompatible_basis",
@@ -294,14 +312,21 @@ export class EvaluationService {
       const referenceBank = this.referenceBasis(run, reference?.id, reference);
       for (const question of referenceBank?.questions ?? run.manifest.questions)
         validateQuestionPolicy(question, draft.settings);
-      const assessments = await this.assessSaved(run, evaluator, referenceBank);
-      const before = (resultId: string) => previous.get(runId)?.get(resultId);
+      const assessments = await this.assessSaved(
+        snapshot,
+        evaluator,
+        referenceBank,
+      );
+      const answers = new Map(
+        snapshot.answers.map((answer) => [answer.result.id, answer]),
+      );
+      const before = (resultId: string) => answers.get(resultId)?.before;
       runs.push({
         runId,
         name: run.name,
         assessments,
         rows: assessments.map((assessment) => {
-          const result = this.db.require("result", assessment.resultId);
+          const result = answers.get(assessment.resultId)!.result;
           const question = (
             referenceBank?.questions ?? run.manifest.questions
           ).find((item) => item.id === result.questionId)!;
@@ -328,12 +353,6 @@ export class EvaluationService {
           .filter((change) => digest(change.before) !== digest(change.after)),
       });
     }
-    const calibrationReference =
-      reference ??
-      this.db.require(
-        "bankRevision",
-        this.db.require("bank", draft.bankId).latestRevisionId,
-      );
     const calibration = await calibrateSettings(
       calibrationReference,
       draft.settings,

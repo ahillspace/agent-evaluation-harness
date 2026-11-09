@@ -122,6 +122,7 @@ export interface UsageTotals {
   reporting?: UsageReporting;
 }
 export interface RunPerformance {
+  durationIncomplete?: boolean;
   recoveredResults?: number;
   originalFailures?: number;
   durationMs: number | null;

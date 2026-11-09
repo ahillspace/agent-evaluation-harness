@@ -207,14 +207,19 @@ A corrected-reference rescore request contains:
 
 Omitting the bank revision preserves the run's frozen references.
 Corrected references must belong to the same bank and preserve the evaluated questions' identity.
+Both evaluator preview operations compare proposed rules against the current automatic deterministic basis, including recovered answers.
+They do not rewrite the first family, later saved scores, or display selection.
 Rescoring saves a named assessment pass with reference provenance and leaves target evidence and original assessments unchanged.
 An original LLM judge remains labeled as original when displayed beside a later deterministic rescore.
 
 [`RunService.executeAttempt`](../src/application/runs.ts) seals the target response before deterministic or optional model judging.
 [`EvaluationService.recover`](../src/application/evaluations.ts) restores missing deterministic assessments from completed evidence without invoking a target or judge.
 An interrupted model assessment receives an explicit error or unavailable record instead of an automatic paid retry.
-Applying retry answers uses [`RetryApplicationService.apply`](../src/application/retry-applications.ts) to create derived passes with physical attempt identifiers and evidence hashes.
-The original result, attempt, manifest, and saved scores remain unchanged.
+Failed-question recovery uses [`RunService.retryFailed`](../src/application/runs.ts) to append attempts to the original Run.
+[`AssessmentPassService`](../src/application/assessment-passes.ts) creates a distinct full-Run automatic family with physical attempt identifiers and evidence hashes.
+The first automatic family and every saved assessment retain their captured bindings.
+Historical adopted answers remain readable through [`AnswerSources`](../src/application/answer-sources.ts).
+Logical Result identifiers remain stable; earlier physical attempts, the manifest, and saved scores remain unchanged.
 
 ## Execution and comparison bounds
 

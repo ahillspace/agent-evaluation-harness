@@ -17,6 +17,7 @@ import { AppError, errorMessage } from "../domain/errors.js";
 import { digest, id, now } from "../domain/identity.js";
 import { Database } from "../storage/database.js";
 import { evidenceSupports } from "../domain/evidence-requirements.js";
+import { attemptBudgetResearchSessionId } from "./research-budget.js";
 
 function evidenceForClassificationRequest(
   evidence: JudgeEvidence,
@@ -345,8 +346,15 @@ export class JevService {
           "unavailable",
           "No classification judge is configured.",
         );
-      const parent = run.researchSessionId
-        ? this.db.require("research", run.researchSessionId)
+      const budgetSessionId =
+        kind === "original"
+          ? attemptBudgetResearchSessionId(
+              this.db,
+              this.db.require("attempt", attemptId),
+            )
+          : undefined;
+      const parent = budgetSessionId
+        ? this.db.require("research", budgetSessionId)
         : undefined;
       const timeoutMs = parent
         ? Math.max(

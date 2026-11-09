@@ -1,6 +1,18 @@
-import type { ResearchRecord } from "../contracts.js";
+import type { AttemptRecord, ResearchRecord } from "../contracts.js";
 import { researchBudgetReason } from "../domain/research-budget.js";
 import { Database } from "../storage/database.js";
+
+export function attemptBudgetResearchSessionId(
+  db: Database,
+  attempt: Pick<
+    AttemptRecord,
+    "runId" | "executionId" | "budgetResearchSessionId"
+  >,
+): string | undefined {
+  return attempt.executionId === undefined
+    ? db.require("run", attempt.runId).researchSessionId
+    : attempt.budgetResearchSessionId;
+}
 
 export function checkResearchBudget(
   db: Database,
@@ -11,9 +23,20 @@ export function checkResearchBudget(
   const runIds = additionalRunId
     ? [...new Set([...session.runIds, additionalRunId])]
     : session.runIds;
-  const attempts = db.list("attempt", { runId: runIds });
+  const attempts = db
+    .list("attempt", { runId: runIds })
+    .filter(
+      (attempt) => attemptBudgetResearchSessionId(db, attempt) === session.id,
+    );
   const judgeUsage = runIds.flatMap((runId) =>
-    db.originalJudgeUsage(runId).map((report) => report.usage),
+    db
+      .originalJudgeUsage(
+        runId,
+        attempts
+          .filter((attempt) => attempt.runId === runId)
+          .map((attempt) => attempt.id),
+      )
+      .map((report) => report.usage),
   );
   return researchBudgetReason(
     session,
@@ -24,7 +47,11 @@ export function checkResearchBudget(
       ...judgeUsage,
       ...db
         .list("jevAssessment", { runId: runIds })
-        .filter((record) => record.kind === "original")
+        .filter(
+          (record) =>
+            record.kind === "original" &&
+            attempts.some((attempt) => attempt.id === record.attemptId),
+        )
         .map((record) => record.usage),
     ],
   );

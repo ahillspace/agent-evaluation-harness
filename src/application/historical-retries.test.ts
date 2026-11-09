@@ -19,7 +19,7 @@ import { AnswerSources } from "./answer-sources.js";
 import { AssessmentPassService, summarizePass } from "./assessment-passes.js";
 import { EvaluationService } from "./evaluations.js";
 import { JevService } from "./jev.js";
-import { RetryApplicationService } from "./retry-applications.js";
+import { recordHistoricalRetry } from "../../tests/fixtures/historical-retry.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -162,176 +162,12 @@ async function fixture(expected: Json = 42) {
     runtime,
     directory,
   );
-  const service = new RetryApplicationService(db, passes, evaluations);
-  return { db, run, addRetry, passes, service, sources: new AnswerSources(db) };
+  return { db, run, addRetry, passes, sources: new AnswerSources(db) };
 }
 
-it("accumulates three partial applications while retaining unrelated human decisions", async () => {
-  const { db, passes, service } = await fixture();
-  const original = passes.list("original", true)[0]!;
-  passes.review({
-    runId: "original",
-    parentPassId: original.id,
-    name: "Reviewed",
-    overrides: [{ resultId: "ok", verdict: false, note: "Reviewed answer" }],
-  });
-  for (const resultId of ["a", "b", "c"]) {
-    await service.apply({
-      runId: "original",
-      retryRunId: "retry",
-      resultIds: [resultId],
-      idempotencyKey: resultId,
-    });
-    const selected = passes.get(
-      "original",
-      db.require("run", "original").selectedAssessmentPassId!,
-    );
-    expect(selected.source).toBe("human");
-    expect(
-      selected.judgments.find((judgment) => judgment.resultId === "ok"),
-    ).toMatchObject({
-      status: "incorrect",
-      review: { note: "Reviewed answer" },
-    });
-  }
-  const selected = passes.get(
-    "original",
-    db.require("run", "original").selectedAssessmentPassId!,
-  );
-  expect(selected.coverage).toMatchObject({
-    answered: 4,
-    reviewed: 1,
-    correct: 3,
-    incorrect: 1,
-  });
-  expect(
-    passes
-      .list("original", true)
-      .filter((pass) => pass.source === "deterministic")
-      .at(-1)?.coverage.answered,
-  ).toBe(4);
-  expect(
-    original.judgments.filter((judgment) => judgment.attemptId),
-  ).toHaveLength(1);
-});
-
-it("uses all applied answers when a historical pass is selected before the next application", async () => {
-  const { passes, service, db } = await fixture();
-  const original = passes.list("original", true)[0]!;
-  await service.apply({
-    runId: "original",
-    retryRunId: "retry",
-    resultIds: ["a"],
-    idempotencyKey: "first",
-  });
-  passes.select("original", original.id);
-  await service.apply({
-    runId: "original",
-    retryRunId: "retry",
-    resultIds: ["b"],
-    idempotencyKey: "second",
-  });
-  const selected = passes.get(
-    "original",
-    db.require("run", "original").selectedAssessmentPassId!,
-  );
-  expect(selected.coverage.answered).toBe(3);
-  expect(
-    selected.judgments.find((judgment) => judgment.resultId === "a")?.attemptId,
-  ).toBe("retry_attempt_a");
-});
-
-it("requires confirmation for replacements and preserves exact idempotent receipts across later changes", async () => {
-  const { service, sources, db, addRetry } = await fixture();
-  const first = await service.apply({
-    runId: "original",
-    retryRunId: "retry",
-    resultIds: ["a"],
-    idempotencyKey: "first",
-  });
-  await service.apply({
-    runId: "original",
-    retryRunId: "retry",
-    resultIds: ["b"],
-    idempotencyKey: "second",
-  });
-  const receipt = await service.apply({
-    runId: "original",
-    retryRunId: "retry",
-    resultIds: ["a", "b"],
-    idempotencyKey: "both-noop",
-  });
-  expect(receipt).toMatchObject({
-    appliedResultIds: ["a", "b"],
-    alreadyApplied: true,
-  });
-  addRetry("new-retry");
-  await expect(
-    service.apply({
-      runId: "original",
-      retryRunId: "new-retry",
-      resultIds: ["a"],
-      idempotencyKey: "replace",
-    }),
-  ).rejects.toThrow("Confirm replacement");
-  await service.apply({
-    runId: "original",
-    retryRunId: "new-retry",
-    resultIds: ["a"],
-    idempotencyKey: "replace",
-    replaceApplied: true,
-  });
-  expect(sources.source(db.require("result", "a"))?.runId).toBe("new-retry");
-  expect(
-    await service.apply({
-      runId: "original",
-      retryRunId: "retry",
-      resultIds: ["a", "b"],
-      idempotencyKey: "both-noop",
-    }),
-  ).toEqual(receipt);
-  expect(
-    (
-      await service.apply({
-        runId: "original",
-        retryRunId: "retry",
-        resultIds: ["a"],
-        idempotencyKey: "first",
-      })
-    ).applicationId,
-  ).toBe(first.applicationId);
-  expect(sources.source(db.require("result", "a"))?.runId).toBe("new-retry");
-});
-
-it("rejects changed frozen configurations and mismatched repetitions", async () => {
-  const { addRetry, service } = await fixture();
-  addRetry("changed", true);
-  await expect(
-    service.apply({
-      runId: "original",
-      retryRunId: "changed",
-      idempotencyKey: "changed",
-    }),
-  ).rejects.toThrow("different frozen configuration");
-  addRetry("wrong-repetition", false, true);
-  await expect(
-    service.apply({
-      runId: "original",
-      retryRunId: "wrong-repetition",
-      idempotencyKey: "wrong",
-    }),
-  ).rejects.toThrow("Select completed rerun answers");
-});
-
 it("seals application records and authorizes only explicitly adopted physical attempts", async () => {
-  const { service, db, sources } = await fixture();
-  const receipt = await service.apply({
-    runId: "original",
-    retryRunId: "retry",
-    resultIds: ["a"],
-    idempotencyKey: "apply",
-  });
-  const application = db.require("retryApplication", receipt.applicationId);
+  const { db, sources } = await fixture();
+  const application = recordHistoricalRetry(db, "original", "retry", ["a"]);
   expect(() =>
     db.update("retryApplication", { ...application, bindings: [] }),
   ).toThrow();
@@ -342,7 +178,7 @@ it("seals application records and authorizes only explicitly adopted physical at
 });
 
 it("reads retry links and answer metadata without unrelated manifests or full attempt outputs", async () => {
-  const { db, run, service, sources } = await fixture();
+  const { db, run, sources } = await fixture();
   db.insert("run", {
     ...run,
     id: "unrelated",
@@ -365,7 +201,7 @@ it("reads retry links and answer metadata without unrelated manifests or full at
     return get(kind, recordId);
   });
   try {
-    const view = service.enrich({ run: { id: run.id } });
+    const view = sources.history(run.id);
     expect(view.retryRuns.map((item) => item.runId)).toEqual(["retry"]);
     const results = sources.results(run.id);
     expect(
@@ -377,30 +213,48 @@ it("reads retry links and answer metadata without unrelated manifests or full at
   }
 });
 
-it("keeps compact score summaries identical to detailed passes and preserves selected retry provenance", async () => {
-  const { db, passes, service } = await fixture();
-  const summaries = passes.summaries("original");
-  expect(summaries).toEqual(passes.list("original", true).map(summarizePass));
-  await service.apply({
-    runId: "original",
-    retryRunId: "retry",
-    resultIds: ["a"],
-    idempotencyKey: "summary",
-  });
+it("preserves compact historical scores separately from adopted answer coverage", async () => {
+  const { db, passes } = await fixture();
+  passes.sealOriginal("original");
+  const before = passes.list("original", true);
+  recordHistoricalRetry(db, "original", "retry", ["a"]);
   expect(passes.summaries("original")).toEqual(
     passes.list("original", true).map(summarizePass),
   );
+  expect(passes.list("original", true)).toEqual(before);
   expect(db.runOutcomeCounts("original")).toEqual({
     total: 4,
     completed: 2,
     failed: 2,
   });
-  const selected = db.require("run", "original").selectedAssessmentPassId;
-  expect(
-    passes.summaries("original").find((pass) => pass.id === selected)?.coverage
-      .answered,
-  ).toBe(2);
 });
+
+it.each(["configuration", "repetition"])(
+  "rejects incompatible historical answer %s during inspection",
+  async (mismatch) => {
+    const { db, addRetry, sources } = await fixture();
+    addRetry(
+      "incompatible",
+      mismatch === "configuration",
+      mismatch === "repetition",
+    );
+    if (mismatch === "repetition") {
+      db.insert("retryApplication", {
+        id: "mismatched-repetition",
+        runId: "original",
+        retryRunId: "incompatible",
+        createdAt: "2026-10-12T00:00:00Z",
+        bindings: [
+          { resultId: "a", source: db.answerSource("incompatible_attempt_a") },
+        ],
+        assessmentPassIds: [],
+      });
+    } else recordHistoricalRetry(db, "original", "incompatible", ["a"]);
+    expect(() =>
+      sources.authorize("original", "incompatible_attempt_a"),
+    ).toThrow(/question|configuration|repetition/i);
+  },
+);
 
 it.each(
   [

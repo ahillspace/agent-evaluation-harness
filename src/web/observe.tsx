@@ -25,6 +25,7 @@ import { RunConfiguration } from "./run-configuration.js";
 import { ResearchPanel } from "./research-observation.js";
 import { RetryFailures } from "./retry-failures.js";
 import { RetryResults } from "./retry-results.js";
+import { RunRecoveryNotice, useRunRecovery } from "./run-recovery.js";
 import {
   ControlButtons,
   DownloadButton,
@@ -69,6 +70,15 @@ export function Observe({
   const [pending, setPending] = useState<string | null>(null);
   const [exported, setExported] = useState<AssessmentPass | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const recovery = useRunRecovery({
+    workspaceId: workspace?.workspaceId,
+    runId,
+    onAcknowledged: () => {
+      setSelectedId("");
+      resource.refresh();
+      refreshWorkspace();
+    },
+  });
   const view = resource.data;
   const currentPass = selectedAssessment(
     view?.assessmentPasses ?? [],
@@ -98,7 +108,11 @@ export function Observe({
       </>
     );
   const { run } = view;
-  const controllingSession = sessionId ?? run.researchSessionId;
+  const researchSession =
+    view.controllingJob?.kind === "research"
+      ? view.controllingJob.id
+      : (sessionId ?? run.researchSessionId);
+  const researchControls = view.controllingJob?.kind === "research";
   const passes = view.assessmentPasses ?? [];
   const pass = currentPass;
   const refresh = () => {
@@ -118,24 +132,36 @@ export function Observe({
       .catch(setError);
   };
   const control = async (action: string) => {
+    if (action === "resume") {
+      if (recovery.request) {
+        await recovery.replay();
+        return;
+      }
+      const uncertain = view.resumeEligibility?.requiresAcknowledgment ?? false;
+      const acknowledgeDuplicateWork = uncertain
+        ? window.confirm(
+            "Previous attempts might still be running. Resume can repeat remote work. Continue?",
+          )
+        : false;
+      if (uncertain && !acknowledgeDuplicateWork) return;
+      await recovery.submit({
+        operation: "runs.control",
+        input: {
+          runId,
+          action: "resume",
+          acknowledgeDuplicateWork,
+          idempotencyKey: crypto.randomUUID(),
+          expectedExecutionId: run.execution?.id ?? run.id,
+        },
+      });
+      return;
+    }
     setPending(action);
     setError(null);
     try {
-      const uncertain = view.attempts.some(
-        (item) =>
-          item.status === "interrupted" && item.remoteCompletion === "unknown",
-      );
-      const acknowledgeDuplicateWork =
-        action === "resume" && uncertain
-          ? window.confirm(
-              "The external agent might still be running. Resume can create duplicate remote work. Continue?",
-            )
-          : false;
-      if (action === "resume" && uncertain && !acknowledgeDuplicateWork) return;
       await command("runs.control", {
         runId,
         action: action as Control,
-        acknowledgeDuplicateWork,
       });
       refresh();
     } catch (cause) {
@@ -153,16 +179,21 @@ export function Observe({
         description={`${run.manifest.bank.name} · ${run.manifest.repetitions} repetition${run.manifest.repetitions === 1 ? "" : "s"} · ${date(run.createdAt)}`}
       >
         <Status value={run.status} />
-        {!controllingSession && (
+        {!researchControls && (
           <ControlButtons
-            actions={view.allowedActions}
-            pending={pending}
+            actions={(
+              view.controllingJob?.allowedActions ?? view.allowedActions
+            ).filter(
+              (action) =>
+                action !== "resume" || (recovery.ready && !recovery.request),
+            )}
+            pending={pending ?? (recovery.busy ? "resume" : null)}
             onAction={(action) => {
               void control(action);
             }}
           />
         )}
-        {controllingSession &&
+        {researchControls &&
           section !== "research" &&
           !!view.controllingJob?.allowedActions.length && (
             <button
@@ -174,13 +205,8 @@ export function Observe({
           )}
       </PageHeading>
       <ErrorNotice error={error ?? resource.error ?? passDetail.error} />
-      <RetryResults
-        view={view}
-        onSaved={() => {
-          setSelectedId("");
-          refresh();
-        }}
-      />
+      <RunRecoveryNotice recovery={recovery} />
+      <RetryResults view={view} />
       <section
         className="observation-totals"
         aria-label="Run progress and totals"
@@ -199,7 +225,7 @@ export function Observe({
               view.progress.failed}{" "}
             unfinished
           </span>
-          <RetryFailures view={view} />
+          <RetryFailures view={view} recovery={recovery} />
         </div>
         <RunPerformanceTotals performance={view.performance} />
       </section>
@@ -279,7 +305,7 @@ export function Observe({
         items={[
           { value: "questions", label: "Questions" },
           { value: "summary", label: "Summary" },
-          ...(controllingSession
+          ...(researchSession
             ? [{ value: "research", label: "Research" }]
             : []),
           { value: "configuration", label: "Configuration" },
@@ -387,8 +413,8 @@ export function Observe({
             }}
           />
         )}
-        {section === "research" && controllingSession && (
-          <ResearchPanel sessionId={controllingSession} selectedRunId={runId} />
+        {section === "research" && researchSession && (
+          <ResearchPanel sessionId={researchSession} selectedRunId={runId} />
         )}
         {section === "configuration" && <RunConfiguration view={view} />}
       </Tabs>

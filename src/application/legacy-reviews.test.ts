@@ -7,6 +7,7 @@ import { createApplication } from "./application.js";
 import { agentSchema, commandSchemas, type RuntimePort } from "../contracts.js";
 import { targetFixture } from "../../tests/fixtures/runtime-targets.js";
 import { Database } from "../storage/database.js";
+import { recordHistoricalRetry } from "../../tests/fixtures/historical-retry.js";
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), "aeh-review-migration-"));
@@ -228,17 +229,11 @@ it("preserves an ambiguous applied-answer legacy review without blocking startup
     await app.waitForIdle();
     const runId = launched.run.id;
     const original = await app.execute("runs.get", { runId });
-    const retry = await app.execute("runs.retry-failed", {
-      runId,
-      acknowledgeDuplicateWork: true,
-      idempotencyKey: "retry",
+    const retry = await app.execute("runs.launch", {
+      bankRevisionId: bank.id,
+      agent,
     });
     await app.waitForIdle();
-    await app.execute("runs.apply-retry", {
-      runId,
-      retryRunId: retry.run.id,
-      idempotencyKey: "apply",
-    });
     const review = {
       id: "ambiguous-review",
       runId,
@@ -250,8 +245,12 @@ it("preserves an ambiguous applied-answer legacy review without blocking startup
     };
     await app.close();
     const db = new Database(join(directory, "workspace.sqlite"));
-    db.insert("review", review);
-    db.close();
+    try {
+      recordHistoricalRetry(db, runId, retry.run.id, [original.results[0]!.id]);
+      db.insert("review", review);
+    } finally {
+      db.close();
+    }
     app = await createApplication({ dataDirectory: directory, runtime });
     const recovered = await app.execute("runs.get", { runId });
     const human = recovered.assessmentPasses!.find(

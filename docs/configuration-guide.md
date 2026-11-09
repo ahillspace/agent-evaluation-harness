@@ -274,6 +274,8 @@ Keep duplicate-preserving comparison when repeated rows have meaning.
 Specify ordering requirements explicitly when row sequence matters.
 
 Under the bank's evaluator controls, preview a draft against saved answers and check calibration examples before publishing it.
+The preview compares proposed judgments with the current automatic deterministic score, including recovered answers.
+Saved historical scores remain unchanged.
 Publishing creates an immutable evaluator revision; activation chooses the default for future launches.
 Select a corrected bank revision when the reference itself changes.
 
@@ -308,31 +310,55 @@ Existing scores keep their original question counts; score saved answers again t
 | Resume  | Starts fresh attempts for unfinished questions and preserves completed answers. |
 | Cancel  | Interrupts work and makes the run or research session terminal after cleanup.   |
 
-Controls on a research-owned run apply to the research session.
+Controls on a research-owned execution apply to its research session.
+The engine exposes eligible actions and duplicate-work acknowledgment requirements for the current selected scope.
+If the final slot settles during Pause or Halt, the Run completes even when that execution failed nonfatally.
+Fatal faults and remaining unfinished questions keep the Run stopped.
+Cancel remains terminal when a late answer or cleanup error arrives; recorded evidence and diagnostics remain available.
+A paused research session can resume its researcher against that completed Run without rerunning questions.
 Resume does not restore an operating-system process.
 After a restart, the engine reconciles interrupted work before admitting new requests.
 A cleanup failure remains visible and blocks unsafe admission.
 
-Eligible transient failures receive at most three total attempts: the initial attempt and two delayed retries with increasing backoff and jitter.
+Each admitted question execution receives at most three automatic attempts: its first attempt and two delayed retries with increasing backoff and jitter.
+An explicit recovery receives its own bounded allowance while physical attempt numbers continue increasing.
 The runtime must establish that repetition is safe.
 For native Codex capacity rejection, complete terminal evidence can establish that no work started, even when tools are configured.
 Tool activity, uncertain execution, and external HTTP requests prevent automatic repetition.
 Permanent authentication or configuration errors stop further admission instead of repeatedly retrying.
 
-After active work settles, **Rerun failed questions** creates a linked run containing only failed question and repetition slots.
-It uses the original frozen configuration and retains the original attempts and scores.
-When prior actions could repeat, the app requires acknowledgment.
-Incorrect answers do not trigger automatic execution retries.
+After active work settles, **Recover failed questions** retries failed unanswered question and repetition slots in the original Run.
+It preserves the frozen configuration, logical Result identifiers, every physical attempt, and all saved scores.
+Completed answers, including incorrect answers and historical adopted answers, remain untouched.
+The app requires acknowledgment when prior actions could repeat.
+An optional selection restricts recovery to those failed slots.
+Other interrupted or never-started slots remain unfinished until you resume them explicitly.
 
-After a linked rerun finishes, choose **Apply rerun results** to include its completed answers in the original Run.
-The original Run also lists linked reruns that have answers ready to apply.
-The app creates updated scores and keeps the original failures, answers, and scores available.
-Each applied answer identifies its source rerun.
-Applying results does not call the target agent or judges again.
-Compatible saved judge decisions carry forward; missing compatible decisions remain unjudged.
-Existing human review decisions on other questions stay in the updated human score.
-Only completed answers from a linked rerun with the same frozen configuration qualify.
-Replacing an answer already applied from another rerun requires an explicit replacement choice.
+Recovery creates a new automatic score for all questions in the Run.
+Earlier scores keep their original answer bindings and judgments.
+Selecting a historical score shows the answer that score assessed, while Attempts retains every later physical attempt.
+Recovery selects the new deterministic score when admitted; choosing another score during execution remains your selection.
+Review notes and human scores remain available as saved history.
+
+Pause and Halt retain an unfinished recovery's selected scope and score identity.
+After that scope finishes, Resume starts a new continuation for remaining interrupted or never-started questions.
+Cancel remains terminal.
+Refresh and request replay do not start another recovery.
+If a response is uncertain, the app retains the exact saved request for acknowledgment or replay.
+Discarding that request requires an explicit choice because prior work might already have started.
+
+**Run duration** totals active execution segments and excludes time spent paused or saved.
+If an interruption prevents reliable timing, the app displays Unknown and records that timing is incomplete.
+Historical linked reruns and applied answers remain inspectable without an Apply action.
+
+After a research session completes, fails, or is cancelled, eligible manual Run recovery uses ordinary Run limits.
+This applies to failed-question recovery and Resume for unfinished questions.
+The app waits for target and judge work to settle before transferring control.
+The original research decisions, scores, conversation, and spending remain unchanged.
+New target and automatic judge work uses the Run's frozen configuration and deadlines, even when the former research budget expired.
+Its usage appears in the Run lifetime totals and does not consume the old research budget.
+A live, paused, or halted research session keeps its controls and budget.
+A cancelled Run cannot resume.
 
 ## Run bounded research
 
@@ -359,6 +385,9 @@ Invocation, duration, researcher-turn, token, and cost budgets constrain further
 Token and cost ceilings are checked between invocations, so an active request can consume additional usage before returning.
 Missing usage stops research when the engine cannot evaluate a configured spending ceiling.
 Pause does not reset the duration budget.
+A proposal waiting for target readiness remains saved during Pause.
+Resume continues its admission in the same research conversation.
+Cancellation prevents pending baseline or candidate preparation from creating another Run.
 Provider conversation continuity failure stops the session instead of opening another conversation.
 
 ## Compare, reuse, and export

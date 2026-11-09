@@ -14,6 +14,10 @@ import type {
 import { createApplication } from "./application.js";
 import { Database } from "../storage/database.js";
 import { digest } from "../domain/identity.js";
+import { TargetRegistry } from "../runtime/targets/registry.js";
+import type { TargetAdapter } from "../runtime/targets/contracts.js";
+import { managedCapabilities } from "../contracts/targets.js";
+import { startServer } from "../server.js";
 
 const agent: AgentConfig = {
   harness: "codex",
@@ -55,7 +59,9 @@ afterEach(async () => {
 });
 async function setup(port = runtime()) {
   const directory = await mkdtemp(join(tmpdir(), "aeh-"));
-  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  cleanups.push(() =>
+    rm(directory, { recursive: true, force: true, maxRetries: 3 }),
+  );
   const app = await createApplication({
     dataDirectory: directory,
     runtime: port,
@@ -68,6 +74,192 @@ async function setup(port = runtime()) {
   return { app, bank, directory };
 }
 describe("shared application", () => {
+  it("keeps a fatal resource stop explicit after its final answer is sealed", async () => {
+    const { app, bank } = await setup(
+      runtime(async () => ({
+        answer: 42,
+        text: "42",
+        cleanup: "unavailable",
+        evidenceScope: "internal-activity",
+      })),
+    );
+    const launched = await app.execute("runs.launch", {
+      bankRevisionId: bank.id,
+      agent,
+    });
+    await app.waitForIdle();
+    const view = await app.execute("runs.get", { runId: launched.run.id });
+    expect(view.run).toMatchObject({
+      status: "halted",
+      intent: "halt",
+      execution: { stopReason: "failed" },
+    });
+    expect(view.progress.completed).toBe(1);
+    expect(view.assessmentPasses![0]!.coverage.correct).toBe(1);
+    expect(view.run.error).toMatch(/cleanup/i);
+  });
+  it.each(["unavailable-output", "cleanup-failed"] as const)(
+    "keeps acknowledged Cancel terminal after late %s through the real registry and HTTP",
+    async (mode) => {
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const adapter: TargetAdapter = {
+        id: "managed",
+        version: 1,
+        capabilities: managedCapabilities,
+        validate: (target) => target,
+        resolve: async (target) => target,
+        recover: async () => ({
+          cleanup: "complete",
+          remoteCompletion: "unknown",
+        }),
+        close: async () => {},
+        invoke: async (input) => {
+          entered();
+          await gate;
+          expect(input.signal.aborted).toBe(true);
+          if (mode === "cleanup-failed")
+            throw Object.assign(new Error("Late cleanup failure"), {
+              code: "cleanup_failed",
+            });
+          return {
+            answer: 42,
+            text: "42",
+            evidenceScope: "internal-activity",
+            cleanup: "unavailable",
+          };
+        },
+      };
+      const registry = new TargetRegistry([adapter], 1);
+      const port = runtime();
+      port.resolveTarget = (target) => registry.resolve(target);
+      port.execute = (input) => registry.invoke(input);
+      port.recoverTarget = (target, checkpoint) =>
+        registry.recover(target, checkpoint);
+      port.close = () => registry.close();
+      const { app, bank } = await setup(port);
+      const server = await startServer({
+        application: app,
+        port: 0,
+        host: "127.0.0.1",
+      });
+      cleanups.push(() => server.close());
+      const post = async (operation: string, input: unknown) => {
+        const response = await fetch(
+          `${server.url}/api/commands/${operation}`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(input),
+          },
+        );
+        const body = await response.json();
+        expect(response.status, JSON.stringify(body)).toBe(200);
+        return body as RunView;
+      };
+      try {
+        const launched = await post("runs.launch", {
+          bankRevisionId: bank.id,
+          agent,
+        });
+        await started;
+        const receipt = await post("runs.control", {
+          runId: launched.run.id,
+          action: "cancel",
+        });
+        expect(receipt.run.intent).toBe("cancel");
+        release();
+        await app.waitForIdle();
+        const settled = await post("runs.get", { runId: launched.run.id });
+        expect(settled.run).toMatchObject({
+          status: "cancelled",
+          intent: "cancel",
+        });
+        expect(settled.run.error).toMatch(/cleanup/i);
+        expect(settled.retryEligibility?.available).toBe(false);
+        expect(settled.resumeEligibility?.available).toBe(false);
+        expect(settled.allowedActions).toEqual([]);
+        expect(settled.progress.completed).toBe(
+          mode === "unavailable-output" ? 1 : 0,
+        );
+      } finally {
+        release();
+      }
+    },
+  );
+  it.each(["pause", "halt", "cancel"] as const)(
+    "settles a final saved answer under %s while preserving Cancel precedence",
+    async (action) => {
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { app, bank } = await setup(
+        runtime(async () => {
+          entered();
+          await gate;
+          return { answer: 42, text: "42" };
+        }),
+      );
+      const launch = await app.execute("runs.launch", {
+        bankRevisionId: bank.id,
+        agent,
+      });
+      await started;
+      try {
+        await app.execute("runs.control", { runId: launch.run.id, action });
+      } finally {
+        release();
+      }
+      await app.waitForIdle();
+      const settled = await app.execute("runs.get", { runId: launch.run.id });
+      expect(settled.run.status).toBe(
+        action === "cancel" ? "cancelled" : "completed",
+      );
+      expect(settled.progress.completed).toBe(1);
+      expect(settled.run.execution?.id).toBe(launch.run.id);
+      expect(settled.run.execution?.settledAt).toBeDefined();
+      expect(settled.assessmentPasses).toHaveLength(1);
+    },
+  );
+  it("rejects recovery when frozen target resolution changes instead of adopting the new configuration", async () => {
+    let calls = 0;
+    const port = runtime(async () => {
+      calls++;
+      throw Object.assign(new Error("Fixture failure"), {
+        code: "target_failure",
+      });
+    });
+    const { app, bank } = await setup(port);
+    const launched = await app.execute("runs.launch", {
+      bankRevisionId: bank.id,
+      agent,
+    });
+    await app.waitForIdle();
+    const before = await app.execute("runs.get", { runId: launched.run.id });
+    port.resolveAgent = async (value) => ({ ...value, model: "changed-model" });
+    await expect(
+      app.execute("runs.retry-failed", {
+        runId: launched.run.id,
+        acknowledgeDuplicateWork: true,
+        idempotencyKey: "changed-frozen-target",
+      }),
+    ).rejects.toMatchObject({ code: "conflict" });
+    const after = await app.execute("runs.get", { runId: launched.run.id });
+    expect(after.run).toEqual(before.run);
+    expect(after.attempts).toEqual(before.attempts);
+    expect(calls).toBe(1);
+  });
   it("lists compact live score metadata without reading full manifests, attempts, or judgments", async () => {
     const { app, bank } = await setup(
       runtime(async () => ({
@@ -1316,7 +1508,7 @@ it("retains safe transient attempts and does not retry a wrong answer", async ()
   expect(view.attempts.map((a) => a.status)).toEqual(["failed", "completed"]);
   expect(view.assessmentPasses![0]?.judgments[0]?.status).toBe("incorrect");
 });
-it("creates an acknowledged linked retry of failed slots without changing the original", async () => {
+it("recovers acknowledged failed slots in the original Run without changing its manifest", async () => {
   let fail = true;
   const { app, bank } = await setup(
     runtime(async () => {
@@ -1346,13 +1538,59 @@ it("creates an acknowledged linked retry of failed slots without changing the or
   });
   await app.waitForIdle();
   expect(retry.run.manifest).toEqual(original.run.manifest);
-  expect(retry.run.retryOf?.runId).toBe(original.run.id);
+  expect(retry.run.id).toBe(original.run.id);
   expect(
     (await app.execute("runs.get", { runId: original.run.id })).attempts,
-  ).toHaveLength(1);
+  ).toHaveLength(2);
   expect(
     (await app.execute("runs.get", { runId: retry.run.id })).results[0]?.status,
   ).toBe("completed");
+});
+
+it("gives each explicit recovery a bounded transient retry allowance without resetting physical attempt numbers", async () => {
+  let calls = 0;
+  const { app, bank } = await setup(
+    runtime(async () => {
+      calls++;
+      if (calls <= 2)
+        throw Object.assign(new Error("Unknown failure"), {
+          code: "target_failure",
+        });
+      if (calls === 3)
+        throw Object.assign(new Error("Provider busy"), {
+          code: "target_failure",
+          executionFailure: {
+            category: "rate-limit",
+            transient: true,
+            retrySafety: "not-started",
+          },
+        });
+      return { answer: 42, text: "42" };
+    }),
+  );
+  const original = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+  });
+  await app.waitForIdle();
+  for (const key of ["first-recovery", "second-recovery"]) {
+    await app.execute("runs.retry-failed", {
+      runId: original.run.id,
+      acknowledgeDuplicateWork: true,
+      idempotencyKey: key,
+    });
+    await app.waitForIdle();
+  }
+  const recovered = await app.execute("runs.get", { runId: original.run.id });
+  expect(calls).toBe(4);
+  expect(recovered.attempts.map((attempt) => attempt.number)).toEqual([
+    1, 2, 3, 4,
+  ]);
+  expect(recovered.progress.completed).toBe(1);
+  expect(recovered.performance).toMatchObject({
+    originalFailures: 1,
+    recoveredResults: 1,
+  });
 });
 
 it("caps transient retries at three physical attempts", async () => {

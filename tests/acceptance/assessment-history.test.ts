@@ -26,7 +26,10 @@ async function fixture() {
   cleanups.push(() =>
     rm(directory, { recursive: true, force: true, maxRetries: 3 }),
   );
-  const execute = vi.fn(async () => ({ answer: 42, text: "42" }));
+  const execute = vi.fn<RuntimePort["execute"]>(async () => ({
+    answer: 42,
+    text: "42",
+  }));
   const runtime: RuntimePort = {
     ...targetFixture,
     recover: async () => ({ recovered: [], errors: [] }),
@@ -90,6 +93,66 @@ async function fixture() {
   }
   return { directory, app, execute, records, state, post };
 }
+
+it.each(["evaluators.preview", "banks.preview-draft"] as const)(
+  "%s compares recovered answers against the current automatic basis without changing saved history",
+  async (operation) => {
+    const { app, execute, state, post } = await fixture();
+    execute.mockRejectedValueOnce(
+      Object.assign(new Error("Fixture failure"), { code: "target_failure" }),
+    );
+    execute.mockResolvedValue({ answer: "answer", text: "answer" });
+    const bank = await post("banks.create", {
+      name: "Recovered preview",
+      questions: [{ id: "q1", text: "Answer", expected: "ANSWER" }],
+    });
+    const launched = await post("runs.launch", {
+      bankRevisionId: bank.id,
+      agent: agentSchema.parse({ harness: "codex", model: "fixture" }),
+    });
+    const runId = launched.run.id;
+    await app.waitForIdle();
+    const original = await post("runs.export-assessment", {
+      runId,
+      passId: `original_deterministic_${runId}`,
+    });
+    await post("runs.retry-failed", {
+      runId,
+      acknowledgeDuplicateWork: true,
+      idempotencyKey: "preview-recovery",
+    });
+    await app.waitForIdle();
+    for (const caseSensitive of [false, true]) {
+      const settings = evaluatorSettingsSchema.parse({ caseSensitive });
+      const draft = await post("evaluators.draft", {
+        bankId: bank.bankId,
+        name: "Preview current answer",
+        settings,
+      });
+      const before = state();
+      const preview =
+        operation === "evaluators.preview"
+          ? await post(operation, { draftId: draft.id, runIds: [runId] })
+          : await post(operation, {
+              bankId: bank.bankId,
+              questions: bank.questions,
+              settings,
+              runIds: [runId],
+            });
+      expect(preview.runs[0]!.rows[0]).toMatchObject({
+        before: { status: "correct" },
+        after: { status: caseSensitive ? "incorrect" : "correct" },
+        changed: caseSensitive,
+      });
+      expect(preview.runs[0]!.changes).toHaveLength(caseSensitive ? 1 : 0);
+      expect(state()).toBe(before);
+    }
+    expect(
+      await post("runs.export-assessment", { runId, passId: original.id }),
+    ).toEqual(original);
+    expect(execute).toHaveBeenCalledTimes(2);
+  },
+);
 
 it.each(["evaluators.preview", "banks.preview-draft"] as const)(
   "%s preserves exact first-execution verdicts behind saved generic exclusion metadata",

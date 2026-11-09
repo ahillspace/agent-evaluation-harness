@@ -4,7 +4,8 @@ import type { AssessmentPassSummary } from "../contracts/assessment-passes.js";
 import { AssessmentScore, AssessmentSelector } from "./assessment-controls.js";
 import { RunPerformanceSummary } from "./run-performance.js";
 
-vi.mock("./api.js", () => ({ command: vi.fn() }));
+const { command } = vi.hoisted(() => ({ command: vi.fn() }));
+vi.mock("./api.js", () => ({ command }));
 
 const pass: AssessmentPassSummary = {
   id: "pass",
@@ -72,4 +73,104 @@ it("shows unknown performance instead of fabricated zero usage", () => {
   expect(html).toContain("Researcher");
   expect(html).toContain("Judges");
   expect(html).not.toContain(">0<");
+});
+// @vitest-environment happy-dom
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+
+it("distinguishes repeated score names with seconds and selects physical pass IDs", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  command.mockReset().mockResolvedValue({});
+  const onSaved = vi.fn();
+  const repeated = [
+    {
+      ...pass,
+      id: "first-pass",
+      name: "Updated deterministic",
+      createdAt: "2026-11-09T12:00:03Z",
+    },
+    {
+      ...pass,
+      id: "second-pass",
+      name: "Updated deterministic",
+      createdAt: "2026-11-09T12:00:06Z",
+    },
+    { ...pass, id: "unique-pass", name: "Human review" },
+  ];
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <AssessmentSelector runId="run" passes={repeated} onSaved={onSaved} />,
+      ),
+    );
+    const selector = container.querySelector("select")!;
+    const labels = new Map(
+      Array.from(selector.options).map((option) => [
+        option.value,
+        option.textContent,
+      ]),
+    );
+    expect(labels.get("first-pass")).not.toBe(labels.get("second-pass"));
+    expect(labels.get("first-pass")).toMatch(/:\d{2}:03/);
+    expect(labels.get("second-pass")).toMatch(/:\d{2}:06/);
+    expect(labels.get("unique-pass")).toBe("Human review");
+    for (const passId of ["second-pass", "first-pass"]) {
+      await act(async () => {
+        selector.value = passId;
+        selector.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      expect(command).toHaveBeenLastCalledWith("runs.select-assessment", {
+        runId: "run",
+        passId,
+      });
+      expect(onSaved).toHaveBeenLastCalledWith(passId);
+    }
+    await act(async () =>
+      root.render(
+        <AssessmentSelector
+          runId="run"
+          passes={[...repeated].reverse()}
+          onSaved={onSaved}
+        />,
+      ),
+    );
+    expect(
+      new Map(
+        Array.from(selector.options).map((option) => [
+          option.value,
+          option.textContent,
+        ]),
+      ),
+    ).toEqual(labels);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("keeps same-second duplicate scores distinguishable by their own physical identity", () => {
+  const html = renderToStaticMarkup(
+    <AssessmentSelector
+      runId="run"
+      passes={[
+        {
+          ...pass,
+          id: "physical-first",
+          createdAt: "2026-11-09T12:00:03.100Z",
+        },
+        {
+          ...pass,
+          id: "physical-second",
+          createdAt: "2026-11-09T12:00:03.900Z",
+        },
+      ]}
+      onSaved={() => {}}
+    />,
+  );
+  expect(html).toMatch(/>Reviewed answers[^<]*physical-first/);
+  expect(html).toMatch(/>Reviewed answers[^<]*physical-second/);
 });

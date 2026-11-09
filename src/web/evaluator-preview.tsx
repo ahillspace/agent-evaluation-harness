@@ -54,7 +54,7 @@ export function EvaluatorPreview({ preview }: { preview: EvaluationPreview }) {
                 <tr>
                   <th>Question</th>
                   <th>Submitted answer</th>
-                  <th>Original</th>
+                  <th>Current score</th>
                   <th>Draft</th>
                   <th>Explanation</th>
                 </tr>

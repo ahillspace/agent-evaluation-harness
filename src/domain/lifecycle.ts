@@ -42,3 +42,34 @@ export function controlTransition(
 export function isTerminal(status: RunStatus): boolean {
   return ["completed", "cancelled", "failed"].includes(status);
 }
+
+type Lifecycle = { status: RunStatus; intent: RunIntent };
+export function cancellationRequested(current: Lifecycle): boolean {
+  return (
+    current.intent === "cancel" ||
+    ["cancelling", "cancelled"].includes(current.status)
+  );
+}
+export function faultTransition(
+  current: Lifecycle,
+  settled = false,
+): Lifecycle {
+  return cancellationRequested(current)
+    ? { status: settled ? "cancelled" : "cancelling", intent: "cancel" }
+    : { status: settled ? "failed" : "halting", intent: "halt" };
+}
+
+export function settlementStatus(
+  current: Lifecycle,
+  unfinished: boolean,
+  fatalStop = false,
+): Extract<
+  RunStatus,
+  "completed" | "cancelled" | "failed" | "paused" | "halted"
+> {
+  if (cancellationRequested(current)) return "cancelled";
+  if (current.status === "failed") return "failed";
+  if (fatalStop) return "halted";
+  if (!unfinished) return "completed";
+  return current.intent === "pause" ? "paused" : "halted";
+}

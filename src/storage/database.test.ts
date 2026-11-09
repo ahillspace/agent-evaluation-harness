@@ -19,6 +19,8 @@ import {
   type BankRevision,
   type EvaluatorRevision,
   type RunRecord,
+  type AttemptRecord,
+  type ResultRecord,
   type JevAssessmentRecord,
 } from "../contracts.js";
 import { Database } from "./database.js";
@@ -77,6 +79,127 @@ function run(id: string): RunRecord {
 }
 
 describe("typed durable records", () => {
+  it.each<[string, string[], string | undefined, string[] | undefined]>([
+    ["empty slots", [], undefined, undefined],
+    [
+      "incomplete attempts",
+      ["failed", "interrupted", "running"],
+      undefined,
+      undefined,
+    ],
+    ["later executions", ["later"], undefined, undefined],
+    ["legacy execution attribution", ["legacy"], "legacy", undefined],
+    [
+      "newest eligible attempt",
+      ["original-old", "original-new", "later", "failed"],
+      "original-new",
+      undefined,
+    ],
+    [
+      "array order",
+      ["original-new", "original-old"],
+      "original-old",
+      undefined,
+    ],
+    ["frozen missing answers", ["original-new"], undefined, []],
+    [
+      "first captured duplicate",
+      ["original-new"],
+      "original-old",
+      ["original-old", "original-new", "original-old"],
+    ],
+  ])(
+    "projects the exact first-execution binding for %s",
+    async (_name, attemptIds, expectedAttemptId, capturedIds) => {
+      const db = await setup();
+      db.insert("run", run("logical"));
+      const result: ResultRecord = {
+        id: "result",
+        runId: "logical",
+        questionId: "q1",
+        repetition: 1,
+        status: "interrupted",
+        attemptIds,
+      };
+      db.insert("result", result);
+      const output = { answer: 42, text: "42" };
+      const evidenceHash = digest(output);
+      const candidates: Array<
+        Pick<AttemptRecord, "id" | "status" | "executionId">
+      > = [
+        { id: "original-old", status: "completed", executionId: "logical" },
+        { id: "original-new", status: "completed", executionId: "logical" },
+        { id: "legacy", status: "completed" },
+        { id: "later", status: "completed", executionId: "recovery" },
+        { id: "failed", status: "failed" },
+        { id: "interrupted", status: "interrupted" },
+        { id: "running", status: "running" },
+      ];
+      for (const [index, candidate] of candidates.entries())
+        db.insert("attempt", {
+          ...candidate,
+          runId: "logical",
+          resultId: result.id,
+          number: index + 1,
+          startedAt: bank.createdAt,
+          finishedAt: bank.createdAt,
+          ...(candidate.status === "completed" ? { output, evidenceHash } : {}),
+        });
+      const assessments = capturedIds?.map((attemptId, index) => ({
+        resultId: result.id,
+        attemptId,
+        deterministic: {
+          status: "correct" as const,
+          explanation: `Captured ${index}`,
+        },
+      }));
+      if (assessments)
+        db.insert("scoreSet", {
+          id: "original-score",
+          runId: "logical",
+          evaluator,
+          createdAt: bank.createdAt,
+          kind: "original",
+          published: true,
+          assessments,
+        });
+      expect(db.automaticAssessmentInputs("logical", true)).toEqual([
+        {
+          result,
+          ...(expectedAttemptId
+            ? {
+                attemptId: expectedAttemptId,
+                source: {
+                  runId: "logical",
+                  resultId: result.id,
+                  attemptId: expectedAttemptId,
+                  evidenceHash,
+                },
+                attempt: {
+                  runId: "logical",
+                  resultId: result.id,
+                  status: "completed",
+                  finishedAt: bank.createdAt,
+                  evidenceHash,
+                  hasOutput: true,
+                },
+                owner: { runId: "logical", questionId: "q1", repetition: 1 },
+                sourceRun: { id: "logical", retryOf: null, sameManifest: true },
+                ...(assessments
+                  ? {
+                      raw: {
+                        scoreSetId: "original-score",
+                        assessment: assessments[0],
+                        judgeResponded: false,
+                      },
+                    }
+                  : {}),
+              }
+            : {}),
+        },
+      ]);
+    },
+  );
   it("compares adopted frozen manifests structurally without parsing configurations or evidence bodies", async () => {
     const directory = await mkdtemp(join(tmpdir(), "aeh-structural-source-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));

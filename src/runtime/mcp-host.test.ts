@@ -55,7 +55,7 @@ it.skipIf(!["win32", "darwin"].includes(process.platform))(
       });
     } finally {
       await supervisor.close();
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 3 });
     }
   },
 );
@@ -154,7 +154,7 @@ it.skipIf(!["win32", "darwin"].includes(process.platform)).each([
       }
     } finally {
       await supervisor.close();
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 3 });
     }
   },
 );
@@ -217,7 +217,7 @@ it.skipIf(!["win32", "darwin"].includes(process.platform))(
       });
     } finally {
       await supervisor.close();
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 3 });
     }
   },
 );
@@ -320,7 +320,7 @@ it.skipIf(!["win32", "darwin"].includes(process.platform))(
       });
     } finally {
       await supervisor.close();
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 3 });
     }
   },
 );

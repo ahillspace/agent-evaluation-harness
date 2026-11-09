@@ -17,10 +17,7 @@ import {
 import { AssessmentDialog } from "./assessment-dialog.js";
 import { ReviewDialog } from "./human-review.js";
 import { RunQuestions } from "./observation-questions.js";
-import {
-  RunPerformanceSummary,
-  RunPerformanceTotals,
-} from "./run-performance.js";
+import { RunPerformanceSummary } from "./run-performance.js";
 import { RunConfiguration } from "./run-configuration.js";
 import { ResearchPanel } from "./research-observation.js";
 import { RetryFailures } from "./retry-failures.js";
@@ -207,27 +204,19 @@ export function Observe({
       <ErrorNotice error={error ?? resource.error ?? passDetail.error} />
       <RunRecoveryNotice recovery={recovery} />
       <RetryResults view={view} />
-      <section
-        className="observation-totals"
-        aria-label="Run progress and totals"
-      >
-        <div className="run-progress-line">
-          <strong>
-            {view.progress.completed} / {view.progress.total} answered
-          </strong>
-          <span>
-            {view.progress.failed} execution failure
-            {view.progress.failed === 1 ? "" : "s"}
-          </span>
-          <span>
-            {view.progress.total -
-              view.progress.completed -
-              view.progress.failed}{" "}
-            unfinished
-          </span>
-          <RetryFailures view={view} recovery={recovery} />
-        </div>
-        <RunPerformanceTotals performance={view.performance} />
+      <section className="run-progress" aria-label="Run progress">
+        <strong>
+          {view.progress.completed} / {view.progress.total} answered
+        </strong>
+        <span>
+          {view.progress.failed} execution failure
+          {view.progress.failed === 1 ? "" : "s"}
+        </span>
+        <span>
+          {view.progress.total - view.progress.completed - view.progress.failed}{" "}
+          unfinished
+        </span>
+        <RetryFailures view={view} recovery={recovery} />
       </section>
       <section className="run-score-toolbar" aria-label="Selected saved score">
         <div className="selected-score-identity">

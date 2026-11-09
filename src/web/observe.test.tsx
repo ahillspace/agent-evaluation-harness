@@ -49,7 +49,7 @@ vi.mock("./observation-stream.js", () => ({
   }),
 }));
 
-it("opens Questions first with run totals and Summary second", () => {
+it("opens Questions first with run progress and Summary second", () => {
   const html = renderToStaticMarkup(
     <Observe runId="run-1" refreshWorkspace={() => {}} />,
   );
@@ -66,7 +66,9 @@ it("opens Questions first with run totals and Summary second", () => {
   expect(html).toContain("without running the agent again");
   expect(html).toContain('aria-label="Filter questions"');
   expect(html).toContain("0 / 1 answered");
-  expect(html).toContain("Run duration");
+  expect(html).toContain('aria-label="Run progress"');
+  expect(html).toContain("0 execution failures");
+  expect(html).toContain("1 unfinished");
   expect(html).toContain("Awaiting results");
   expect(html).not.toContain("Evaluation workspace");
 });

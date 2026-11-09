@@ -14,7 +14,10 @@ import { AppError, errorMessage } from "../domain/errors.js";
 import { evidenceSupports } from "../domain/evidence-requirements.js";
 import { Database } from "../storage/database.js";
 import { buildJudgeEvidence } from "./judge-evidence.js";
-import { checkResearchBudget } from "./research-budget.js";
+import {
+  attemptBudgetResearchSessionId,
+  checkResearchBudget,
+} from "./research-budget.js";
 
 type JudgeAssessment = Pick<
   Assessment,
@@ -87,8 +90,14 @@ export class LlmJudgeService {
           "Judge interrupted before admission.",
         );
       let timeoutMs = run.manifest.limits.timeoutMs;
-      if (input.original && run.researchSessionId) {
-        const parent = this.db.require("research", run.researchSessionId);
+      const budgetSessionId = input.original
+        ? attemptBudgetResearchSessionId(
+            this.db,
+            this.db.require("attempt", input.attemptId),
+          )
+        : undefined;
+      if (budgetSessionId) {
+        const parent = this.db.require("research", budgetSessionId);
         const budget = checkResearchBudget(this.db, parent, 0, run.id);
         if (budget) throw new AppError("budget_exhausted", budget);
         timeoutMs = Math.max(

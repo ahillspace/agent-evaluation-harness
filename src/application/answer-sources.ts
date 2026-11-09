@@ -15,6 +15,14 @@ export class AnswerSources {
   applications(runId: string) {
     return this.db.list("retryApplication", { runId });
   }
+  history(runId: string) {
+    return {
+      retryApplications: this.applications(runId),
+      retryRuns: this.db
+        .runHeaders({ parentRunId: runId })
+        .map((run) => ({ runId: run.id, name: run.name })),
+    };
+  }
   source(result: ResultRecord): AnswerSource | undefined {
     const applied = this.db.appliedAnswerSource(result.runId, result.id);
     if (applied) return applied;

@@ -54,7 +54,7 @@ The checker separates credential infrastructure from process ownership and rejec
 | Blueprint                    | Reusable launch settings; changed settings create a new saved configuration.                                  |
 | Run                          | Frozen target, questions, evaluator, repetitions, and limits, with mutable lifecycle and display preferences. |
 | Result and attempt           | A logical question/repetition slot and its physical invocations.                                              |
-| Retry application            | Immutable binding of sealed retry answers to original logical slots.                                          |
+| Historical retry binding     | Read-only binding from a retired workflow to its original physical evidence.                                  |
 | Assessment pass              | Named frozen judgments and provenance; selection is a separate Run preference.                                |
 | Research session             | One exact provider conversation and ordinary baseline/candidate Runs.                                         |
 | Target invocation checkpoint | Private resource recovery state, separate from immutable answer evidence.                                     |
@@ -76,7 +76,8 @@ Completed evidence uses a staging file, atomic rename, and persisted hash.
 Evaluators verify sealed evidence before consuming it.
 Unreferenced staging files are not grading input.
 [AnswerSources](../src/application/answer-sources.ts) resolves logical selections to physical attempt identifiers and hashes.
-Retry applications create bindings and derived assessments without editing physical attempts.
+Historical retry bindings remain readable without changing physical ownership.
+New recovery attempts belong to the original Run and logical Result.
 
 ## Operation traces
 
@@ -115,10 +116,25 @@ Only completed sealed answers enter grading.
 Malformed submissions receive structural feedback before sealing; execution failures remain distinct from incorrect judgments.
 
 Pause stops admissions and lets active attempts settle.
+A settled execution completes when no unfinished slots remain, even if its final slot fails nonfatally under Pause or Halt.
+Fatal and resource stops remain explicit; unfinished outside-scope slots keep the Run stopped.
+Cancel has priority over every late answer, cleanup fault, and failure transition, while evidence and diagnostics remain available.
+A paused research session resumes from that completed child without replacing its execution or score family.
+Research and child control transitions commit together after readiness checks and fresh-state validation.
+Resume acknowledges an already queued or running research session without replacing its intent, appending a control barrier, or scheduling duplicate work; any unfinished child that needs Resume still uses ordinary child admission.
+Run control preserves the complete request through ownership routing; its receipt lookup precedes owner selection and execution guards, including after ownership changes.
+The requested Run owns the execution guard and receipt, while Research independently validates its current child; a completed child needs no transition to save a parent-only control receipt.
+Frozen-target resolution precedes the transaction; process signals and scheduling follow its commit.
 Halt interrupts work and leaves unfinished slots resumable.
 Cancel becomes terminal after cleanup settles.
-Resume never repeats completed slots.
+Resume never repeats completed slots, including incorrect answers and historical adopted answers.
+An unsettled Run execution context retains its selected scope and automatic score family through Pause, Halt, and restart.
+After that scope settles, Resume creates a continuation for remaining pending or interrupted slots.
+Failed slots require explicit failed-question recovery.
+Run lifecycle remains authoritative; the context records scope, control ownership, budget attribution, and timing.
+The application shares control ownership and eligibility between dispatch and observation.
 Startup reconciles abandoned attempts and recovers missing deterministic assessments without rerunning targets.
+It normalizes settled recovered scopes after grading recovery and before sealing their automatic scores.
 Unknown external completion requires duplicate-work acknowledgment before potentially repeating a request.
 Unconfirmed cleanup blocks unsafe admission.
 
@@ -134,26 +150,38 @@ See [configuration guidance](configuration-guide.md) for user recovery and [runt
 
 ### Retry, assess, review, and compare
 
-[RunRetries](../src/application/run-retries.ts) creates an ordinary linked Run for eligible failed slots with frozen configuration.
-[RetryApplicationService](../src/application/retry-applications.ts) validates compatibility and sealed sources before atomically binding answers.
-Replays return the recorded application; conflicts fail.
-Original attempts remain historical evidence.
+[RunService.retryFailed](../src/application/runs.ts) recovers failed unanswered slots in the same Run with its frozen configuration.
+A supplied Result selection bounds the work without admitting unrelated interrupted or never-started slots.
+Admission freezes the previous automatic family, records a new execution context, and saves a receipt in one transaction.
+The receipt lookup precedes mutable eligibility checks, including concurrent request replay.
+Admission rechecks the captured Run and its latest accepted control sequence after target readiness, so intervening controls win even when timestamps and execution identity repeat.
+Replaying an accepted request returns its acknowledgment without scheduling more work.
+An optional execution identifier rejects stale new requests.
+Frozen-target resolution rejects configuration drift and unresolved cleanup before admission.
+All physical attempts keep their original Run, Result, ordinal, and sealed evidence.
+Historical child Runs and applied bindings remain available for inspection; new recovery creates neither.
 
 [EvaluationService](../src/application/evaluations.ts) grades saved answers without invoking targets.
 [AssessmentPassService](../src/application/assessment-passes.ts) creates deterministic, LLM, Jev, and attributed human passes.
-It owns every new aggregate score, including automatic scores saved at terminal Run settlement.
+It owns every new aggregate score, including automatic scores saved when an execution scope drains.
+The first automatic family keeps its fixed original identity.
+Each recovery or continuation receives a separate full-Run automatic family with exact physical answer bindings.
+Recovery selects the new deterministic family at admission; settlement preserves later user selections.
+Original and other saved families retain their captured answers, judgments, and configuration.
 EvaluationService owns grading calculations and recovery of raw per-attempt assessments.
 Existing ScoreSets remain readable as historical passes; new Runs and saved-answer assessments never write ScoreSets.
 Unpublished historical scores remain inspectable and explicitly labeled; explicit-evaluator comparisons exclude them.
 Explicit-evaluator comparisons select the newest completed deterministic pass for that evaluator.
+Both evaluator preview operations compare proposed rules against the current automatic deterministic basis.
+Preview leaves every historical family and Run preference unchanged.
 Research reads the first execution's frozen automatic pass, independently of later assessments and display selection.
 [Judge evidence](../src/application/judge-evidence.ts) verifies physical sources and assembles sealed evidence.
 Judge requests are checkpointed before admission; interrupted requests are explicit rather than automatically replayed.
 Human review derives a pass while retaining untouched judgments.
-Retry validates eligibility and freezes a virtual parent before atomically creating its child.
+Retrying missing judgments freezes the selected assessment before atomically creating a derived pass.
 Historical scores derive answer bindings and missing judgments only from their frozen ScoreSet, even after the Run resumes.
-Run settlement seals original passes transactionally for completed, cancelled, and failed Runs.
-Startup recovery seals missing terminal originals after recovering deterministic grading.
+Run settlement seals the current family transactionally, including a drained scope whose unrelated unfinished slots leave the Run Halted.
+Startup recovery seals missing settled automatic families after recovering deterministic grading.
 Observation and assessment detail reads do not materialize records.
 Conditional detail, review, export, and retry requests reject a changed observation revision before writing records or invoking providers.
 Revision checks use the compact projection before Jev detail enrichment; revisions never enter stored passes or evidence artifacts.
@@ -177,6 +205,13 @@ See [judging](judging.md) for independent providers, evidence, recovery, and spe
 ### Research and spending
 
 [ResearchService](../src/application/research.ts) completes a baseline before requesting candidates from one persistent conversation.
+Baseline and candidate readiness can resolve asynchronously without admitting work.
+Fresh research ownership and intent validation, child creation, receipt, and parent linkage commit together before target scheduling.
+Control and child admission validate the captured Research record and latest accepted control sequence, so operative controls such as repeated Pause or Halt invalidate earlier readiness checks even when records and timestamps are identical.
+Evidence retrieval and other audit events preserve that intent boundary and cannot invalidate target readiness.
+Pause preserves a pending proposal and conversation; Resume retries admission through the same contract.
+An explicitly paused initialization without a baseline can resume from its saved configuration and launch identity.
+An unacknowledged run-intent initialization without a receipt remains an explicit failure.
 The initial bundle contains objectives, configuration, instructions, budgets, and identifiers without golds or transcripts.
 Evidence retrieval is explicit; gold retrieval is audited.
 Mutation validation constrains candidates, which use the ordinary Run engine.
@@ -189,9 +224,22 @@ Evidence resolves authorized original and adopted physical attempts and drains e
 Responses above 16 MiB fail explicitly without returning partial evidence; whole-Run requests can select a result instead.
 
 [Research budgets](../src/application/research-budget.ts) count target, researcher, and judge usage separately.
+Attempt attribution fixes the admitted research budget independently of later Run provenance or display selection.
+Legacy attempts without execution attribution inherit only their recorded original Run provenance.
+New standalone attempts never inherit a research budget implicitly.
+Manual recovery and continuation of a terminal research Run use its ordinary frozen Run limits.
+The original research session remains provenance, with unchanged decisions, conversation, first scores, outcomes, and spending.
+Admission requires a terminal parent and settled target, automatic judge, and saved-assessment work.
+A manual takeover creates a fresh Run-controlled execution even when the former research execution lacks a settlement timestamp.
+New targets and their automatic LLM/Jev judgments have no research-budget attribution and use the frozen Run deadlines.
+Research budget queries exclude that work; Run lifetime usage includes it.
+Active, paused, and halted research sessions retain ownership; cancelled Runs remain terminal.
 Unknown usage blocks admissions under a configured spending ceiling.
 Thresholds cannot retract work already in flight.
 [Performance](../src/application/performance.ts) and [usage projection](../src/application/usage-projection.ts) preserve subtotals, unknown components, and pending counts.
+Run duration sums active execution segments and excludes paused, saved, and restart downtime.
+A crash without a provable segment end marks total duration incomplete instead of estimating it.
+Original failure and recovered-result counts follow physical first-execution history after logical recovery.
 Conversation increments and physical judgment identifiers prevent double counting.
 Historical cache recovery is bounded to 4,096 events and 1 MiB per attempt with a 1,000-entry settled-attempt cache.
 Missing or inconsistent components remain unknown.

@@ -13,6 +13,7 @@ import { createApplication } from "./application.js";
 import { startServer } from "../server.js";
 import { grade } from "../evaluation/scoring.js";
 import { Database } from "../storage/database.js";
+import { recordHistoricalRetry } from "../../tests/fixtures/historical-retry.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -123,17 +124,25 @@ it("research evidence drains each physical attempt and includes adopted retry ev
   await app.waitForIdle();
   const runId = session.session.baselineRunId;
   fail = false;
-  const retry = await app.execute("runs.retry-failed", {
-    runId,
-    acknowledgeDuplicateWork: true,
-    idempotencyKey: "retry",
+  const retry = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
   });
   await app.waitForIdle();
-  await app.execute("runs.apply-retry", {
-    runId,
-    retryRunId: retry.run.id,
-    idempotencyKey: "apply",
-  });
+  const legacyDatabase = new Database(join(directory, "workspace.sqlite"));
+  try {
+    const failed = legacyDatabase
+      .list("result", { runId })
+      .filter((result) => result.status === "failed");
+    recordHistoricalRetry(
+      legacyDatabase,
+      runId,
+      retry.run.id,
+      failed.map((result) => result.id),
+    );
+  } finally {
+    legacyDatabase.close();
+  }
   const view = await app.execute("runs.get", { runId });
   const recovered = view.results.find(
     (result) => result.questionId === "retry",
@@ -261,18 +270,20 @@ it("comparison reports partial logical recovery while retaining historical pass 
   fail = false;
   const retry = await app.execute("runs.retry-failed", {
     runId: original.run.id,
+    resultIds: [before.results[0]!.id],
     acknowledgeDuplicateWork: true,
     idempotencyKey: "retry",
   });
   await app.waitForIdle();
-  await app.execute("runs.apply-retry", {
-    runId: original.run.id,
-    retryRunId: retry.run.id,
-    resultIds: [before.results[0]!.id],
-    idempotencyKey: "apply",
+  expect(retry.run.id).toBe(original.run.id);
+  const comparisonRun = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+    repetitions: 2,
   });
+  await app.waitForIdle();
   const response = await post("runs.compare", {
-    runIds: [original.run.id, retry.run.id],
+    runIds: [original.run.id, comparisonRun.run.id],
   });
   expect(response.ok).toBe(true);
   expect((await response.json()).rows[0]).toMatchObject({
@@ -291,7 +302,7 @@ it("comparison reports partial logical recovery while retaining historical pass 
     passId: historicalId,
   });
   const comparison = await app.execute("runs.compare", {
-    runIds: [original.run.id, retry.run.id],
+    runIds: [original.run.id, comparisonRun.run.id],
   });
   expect(comparison.rows[0]).toMatchObject({
     completed: 1,
@@ -313,7 +324,7 @@ it("comparison reports partial logical recovery while retaining historical pass 
     evaluatorRevisionId: before.run.manifest.evaluator.id,
   });
   const explicit = await app.execute("runs.compare", {
-    runIds: [original.run.id, retry.run.id],
+    runIds: [original.run.id, comparisonRun.run.id],
     evaluatorRevisionId: rescored.configuration.evaluator!.id,
   });
   expect(explicit.rows[0]).toMatchObject({

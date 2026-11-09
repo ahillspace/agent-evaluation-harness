@@ -134,22 +134,25 @@ The target harness has no access to the judge's reference answer or credentials.
 This page describes the inspected working tree on 2026-10-22.
 The architecture audit records its revision and validation scope in the repository's audit ledger.
 
-| Concern                               | Source owner                                                                                                                                   |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Shared dispatch                       | [`createApplication`](../src/application/application.ts) validates the CLI and HTTP operation payloads.                                        |
-| Sealed evidence                       | [`buildJudgeEvidence`](../src/application/judge-evidence.ts) verifies hashes, resolves adopted retry answers, and assembles the frozen basis.  |
-| Original and saved LLM judging        | [`LlmJudgeService.evaluate`](../src/application/llm-judge.ts) owns evidence projection, admission, request checkpoints, and recorded outcomes. |
-| Jev profiles, inference, and recovery | [`JevService`](../src/application/jev.ts) owns profile resolution, frozen criteria, fallback, publication, and interrupted requests.           |
-| Named and human assessments           | [`AssessmentPassService`](../src/application/assessment-passes.ts) owns creation, retry, coverage, selection, and attributed review.           |
-| Retry evidence adoption               | [`RetryApplicationService.apply`](../src/application/retry-applications.ts) derives compatible passes without target or judge calls.           |
-| Usage projection                      | [`runPerformance`](../src/application/performance.ts) combines physical target attempts and separately recorded researcher and judge usage.    |
+| Concern                               | Source owner                                                                                                                                     |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Shared dispatch                       | [`createApplication`](../src/application/application.ts) validates the CLI and HTTP operation payloads.                                          |
+| Sealed evidence                       | [`buildJudgeEvidence`](../src/application/judge-evidence.ts) verifies hashes, resolves adopted retry answers, and assembles the frozen basis.    |
+| Original and saved LLM judging        | [`LlmJudgeService.evaluate`](../src/application/llm-judge.ts) owns evidence projection, admission, request checkpoints, and recorded outcomes.   |
+| Jev profiles, inference, and recovery | [`JevService`](../src/application/jev.ts) owns profile resolution, frozen criteria, fallback, publication, and interrupted requests.             |
+| Named and human assessments           | [`AssessmentPassService`](../src/application/assessment-passes.ts) owns creation, retry, coverage, selection, and attributed review.             |
+| Recovery automatic scores             | [`AssessmentPassService.sealCurrent`](../src/application/assessment-passes.ts) freezes full-Run judgments with exact physical evidence bindings. |
+| Usage projection                      | [`runPerformance`](../src/application/performance.ts) combines physical target attempts and separately recorded researcher and judge usage.      |
 
 `buildJudgeEvidence` prefers a nonempty provider transcript; otherwise, it drains every page of the attempt-scoped event log.
 It excludes evaluation, judge, Jev, review, research, and assessment events from that reconstructed trace.
-Logical answers adopted from a linked retry retain the physical source Run, result, attempt, and evidence hash.
+Historical adopted answers retain the physical source Run, Result, attempt, and evidence hash.
+New target recovery appends attempts to the original Run and creates a distinct full-Run automatic score.
+Earlier scores retain their original answers and judgments.
 [`AnswerSources.authorize` and `verify`](../src/application/answer-sources.ts) reject unrelated or unsealed evidence.
 
-Original LLM judging checks research spending and duration immediately before its durable admission checkpoint.
+Automatic LLM judging checks its physical attempt's admitted research spending and duration before the durable admission checkpoint.
+Automatic Jev uses the same frozen attempt attribution; saved manual assessments have separate admission.
 A saved LLM pass checkpoints its semantic request and judgment identifier before calling the runtime.
 Jev checkpoints its assessment and provider request separately, preserving a primary size error before an enabled fallback request.
 Startup converts pending Jev requests to explicit errors and running named passes to interrupted passes.

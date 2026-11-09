@@ -2,7 +2,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { runPerformance } from "../application/performance.js";
+import {
+  attemptBudgetResearchSessionId,
+  checkResearchBudget,
+} from "../application/research-budget.js";
 import {
   agentSchema,
   jsonSchema,
@@ -17,6 +22,8 @@ import {
   type JevAssessmentRecord,
 } from "../contracts.js";
 import { Database } from "./database.js";
+import { digest } from "../domain/identity.js";
+import { AnswerSources } from "../application/answer-sources.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -70,6 +77,211 @@ function run(id: string): RunRecord {
 }
 
 describe("typed durable records", () => {
+  it("compares adopted frozen manifests structurally without parsing configurations or evidence bodies", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "aeh-structural-source-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const filename = join(directory, "workspace.sqlite");
+    const db = new Database(filename);
+    cleanups.push(async () => db.close());
+    const parent = run("logical");
+    parent.manifest.agent!.systemPrompt = "PRIVATE_CONFIG".repeat(5000);
+    db.insert("run", parent);
+    const physical = {
+      ...parent,
+      id: "physical",
+      retryOf: { runId: parent.id, resultIds: ["logical-result"] },
+    };
+    const writer = new DatabaseSync(filename);
+    try {
+      // Historical serializers can use a different object order and numeric spelling.
+      writer
+        .prepare("INSERT INTO records(kind,id,value) VALUES ('run',?,?)")
+        .run(
+          physical.id,
+          JSON.stringify(physical).replace(
+            '"repetitions":1',
+            '"repetitions":1.0',
+          ),
+        );
+    } finally {
+      writer.close();
+    }
+    const output = { answer: 42, text: "PRIVATE_OUTPUT".repeat(20_000) };
+    db.insert("result", {
+      id: "logical-result",
+      runId: parent.id,
+      questionId: "q1",
+      repetition: 1,
+      status: "failed",
+      attemptIds: [],
+    });
+    db.insert("result", {
+      id: "physical-result",
+      runId: physical.id,
+      questionId: "q1",
+      repetition: 1,
+      status: "completed",
+      completedAttemptId: "physical-attempt",
+      attemptIds: ["physical-attempt"],
+    });
+    db.insert("attempt", {
+      id: "physical-attempt",
+      runId: physical.id,
+      resultId: "physical-result",
+      number: 1,
+      startedAt: bank.createdAt,
+      finishedAt: bank.createdAt,
+      status: "completed",
+      output,
+      evidenceHash: digest(output),
+    });
+    const source = db.answerSource("physical-attempt");
+    db.insert("retryApplication", {
+      id: "historical-binding",
+      runId: parent.id,
+      retryRunId: physical.id,
+      createdAt: bank.createdAt,
+      bindings: [{ resultId: "logical-result", source }],
+      assessmentPassIds: [],
+    });
+    const parse = JSON.parse;
+    const bodies: string[] = [];
+    const parseSpy = vi
+      .spyOn(JSON, "parse")
+      .mockImplementation((text, reviver) => {
+        if (text.includes("PRIVATE_CONFIG") || text.includes("PRIVATE_OUTPUT"))
+          bodies.push("full body");
+        return parse(text, reviver);
+      });
+    let metadata;
+    try {
+      metadata = db.automaticAssessmentInputs(parent.id, false)[0]!;
+      expect(metadata.sourceRun?.sameManifest).toBe(true);
+      expect(metadata.source).toEqual(source);
+      expect(bodies).toEqual([]);
+    } finally {
+      parseSpy.mockRestore();
+    }
+    expect(
+      new AnswerSources(db).verify(metadata.result, metadata.source!).id,
+    ).toBe("physical-attempt");
+  });
+  it("uses frozen attempt attribution for research budgets and treats new standalone usage as separate", async () => {
+    const db = await setup();
+    const timestamp = new Date().toISOString();
+    const configuration = researchSchema.parse({
+      baseline: {
+        bankRevisionId: bank.id,
+        agent: { harness: "codex", model: "fixture" },
+      },
+      researcher: { harness: "codex", model: "fixture" },
+      objective: "Fixture objective",
+      maxTargetInvocations: 1,
+      maxTotalTokens: 100,
+    });
+    const session = db.insert("research", {
+      id: "budget-session",
+      name: "Budget fixture",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      status: "completed",
+      intent: "run",
+      configuration,
+      baselineRunId: "budget-run",
+      currentRunId: "budget-run",
+      bestRunId: "budget-run",
+      runIds: ["budget-run"],
+      phase: "finished",
+      turns: [],
+    });
+    db.insert("run", { ...run("budget-run"), researchSessionId: session.id });
+    const legacy = db.insert("attempt", {
+      id: "legacy-budget-attempt",
+      runId: "budget-run",
+      resultId: "q",
+      number: 1,
+      startedAt: timestamp,
+      status: "failed",
+      failure: {
+        code: "fixture",
+        classification: {
+          category: "unknown",
+          transient: false,
+          retrySafety: "unknown",
+          usage: { inputTokens: 10, outputTokens: 10 },
+        },
+      },
+    });
+    const standalone = db.insert("attempt", {
+      id: "standalone-attempt",
+      runId: "budget-run",
+      resultId: "q",
+      number: 2,
+      executionId: "standalone-execution",
+      startedAt: timestamp,
+      status: "failed",
+    });
+    expect(attemptBudgetResearchSessionId(db, legacy)).toBe(session.id);
+    expect(attemptBudgetResearchSessionId(db, standalone)).toBeUndefined();
+    expect(checkResearchBudget(db, session)).toBeUndefined();
+    expect(checkResearchBudget(db, session, 1)).toContain("invocation budget");
+  });
+  it("keeps admitted attempt execution and budget attribution immutable", async () => {
+    const db = await setup();
+    const attempt = db.insert("attempt", {
+      id: "attributed",
+      runId: "r",
+      resultId: "q",
+      number: 1,
+      startedAt: bank.createdAt,
+      status: "running",
+      executionId: "execution-a",
+      budgetResearchSessionId: "research-a",
+    });
+    expect(() =>
+      db.update("attempt", { ...attempt, executionId: "execution-b" }),
+    ).toThrow(/immutable/i);
+    expect(() =>
+      db.update("attempt", { ...attempt, budgetResearchSessionId: undefined }),
+    ).toThrow(/immutable/i);
+    expect(db.require("attempt", attempt.id)).toEqual(attempt);
+  });
+  it("measures active execution segments without paused idle time and preserves incomplete timing", async () => {
+    const db = await setup();
+    const record = run("timed");
+    const segmentStart = Date.parse(bank.createdAt);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(segmentStart + 500);
+    try {
+      const active = db.insert("run", {
+        ...record,
+        status: "running",
+        activeDurationMs: 120,
+        execution: {
+          id: record.id,
+          resultIds: [],
+          controller: "run",
+          createdAt: bank.createdAt,
+          activeSegmentStartedAt: bank.createdAt,
+        },
+      });
+      expect(runPerformance(db, record.id).durationMs).toBe(620);
+      const paused = db.update("run", {
+        ...active,
+        status: "paused",
+        activeDurationMs: 620,
+        execution: { ...active.execution!, activeSegmentStartedAt: undefined },
+      });
+      clock.mockReturnValue(segmentStart + 100000);
+      expect(runPerformance(db, record.id).durationMs).toBe(620);
+      db.update("run", { ...paused, activeDurationIncomplete: true });
+      expect(runPerformance(db, record.id)).toMatchObject({
+        durationMs: null,
+        durationIncomplete: true,
+      });
+    } finally {
+      clock.mockRestore();
+    }
+  });
   it("keeps fallback payloads out of observation while retaining per-call usage", async () => {
     const db = await setup();
     const criteria = jevProfileSettingsSchema.parse({ answerOnlyFallback: {} });
@@ -283,7 +495,30 @@ describe("typed durable records", () => {
     expect(JSON.stringify(summaries)).not.toContain("private-evidence-");
     expect(summaries[0]?.assessments[0]?.deterministic).toBe("correct");
     expect(summaries[0]).not.toHaveProperty("evaluator");
-    expect(db.originalAssessmentMetadata("run1")[0]?.judgeVerdict).toBe(true);
+    const output = { answer: 42, text: payload };
+    db.insert("result", {
+      id: "result1",
+      runId: "run1",
+      questionId: "q1",
+      repetition: 1,
+      status: "completed",
+      completedAttemptId: "attempt1",
+      attemptIds: ["attempt1"],
+    });
+    db.insert("attempt", {
+      id: "attempt1",
+      runId: "run1",
+      resultId: "result1",
+      status: "completed",
+      number: 1,
+      startedAt: bank.createdAt,
+      finishedAt: bank.createdAt,
+      output,
+      evidenceHash: digest(output),
+    });
+    const automatic = db.automaticAssessmentInputs("run1", true);
+    expect(automatic[0]?.raw?.assessment.judge?.verdict).toBe(true);
+    expect(JSON.stringify(automatic)).not.toContain("private-evidence-");
     expect(
       db.attemptAssessments("run1", "attempt1")[0]?.assessment.deterministic
         .details,

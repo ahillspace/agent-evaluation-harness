@@ -8,6 +8,12 @@
 - A saved Run contains one immutable agent configuration and the requested repetitions.
 - Restart preserves completed results and exposes interrupted work as resumable.
 - Pause drains active work, Halt interrupts it, Resume preserves finished work, and Cancel remains terminal.
+- A scope whose final slot settles nonfatally under Pause or Halt completes; a paused researcher can resume without another target request.
+- Cancel remains terminal through late answers, unavailable cleanup, cleanup failures, fatal catches, and startup recovery.
+- Baseline and candidate creation commit with fresh research intent and ownership validation, durable receipts, and parent linkage before scheduling.
+- Pause preserves pending proposals and conversations, and paused initialization can resume without admitting stale or orphan target work.
+- Startup normalizes completed recovered scopes after deterministic and judge recovery, before freezing automatic scores.
+- Failed Resume readiness leaves parent and child unchanged, and competing controls cannot be overwritten by stale admission.
 - Cursor reconnect returns durable observation events without creating duplicate work.
 
 ## Evaluation
@@ -97,6 +103,7 @@
 - Labeled acceptable and unacceptable examples calibrate evaluator drafts without target calls.
 - Publication rejects failed calibration cases and validates against the latest bank revision.
 - Saved answers can be previewed and rescored against an explicitly selected compatible reference revision without changing the original Run.
+- Both evaluator previews compare against the current automatic deterministic basis after recovery while preserving historical scores.
 - Scalar and list submission formats disclose structure without exposing expected values or cardinality.
 - Optional LLM judges can abstain when available evidence cannot support a verdict.
 
@@ -149,12 +156,21 @@ Clearly distinguish implementation coverage from checks blocked by local authent
 - JSON settings include valid examples and runtime-aligned validation.
 - Execution failures remain separate from incorrect answers; all physical attempts and available usage remain inspectable.
 - Safe transient failures receive bounded retries through the same admission controls as ordinary work.
-- Manual retries preserve original evidence and disclose possible duplicate external actions.
-- Applying a completed linked retry makes its sealed answer available in the original Run without changing original attempts, manifests, or saved scores.
-- Application rejects unrelated Runs, incompatible frozen configurations, mismatched repetitions, unsealed answers, and silent replacement of previously applied answers.
-- Updated deterministic, LLM, and Jev scores preserve untouched judgments and retain the physical source of each applied judgment.
-- Applying retries makes no target or judge provider call, and unavailable compatible model judgments remain explicitly unjudged.
-- Updated human scores preserve unrelated review decisions, and historical score selection retrieves the answer that score originally assessed.
-- Applied answers support observation, human review, saved-answer rescoring, findings, and exports through the same application contracts.
-- Repeating an identical application is safe, and a failed application cannot leave partial answer selections or scores.
-- Replaying an application request returns its saved receipt even after a later application replaces an answer.
+- Manual recovery uses the original Run, logical Result identifiers, frozen manifest, and physical attempt ownership.
+- Explicit failed-slot subsets leave unrelated failed, interrupted, and never-started slots untouched.
+- Completed answers, including incorrect answers and historical adopted answers, cannot be selected for target recovery.
+- Each recovery creates a full-Run automatic score while preserving every saved score and answer binding.
+- Recovery selects its deterministic score at admission, and settlement preserves later user score selection.
+- Same-key concurrent recovery and Resume requests admit one scope; accepted replay never schedules more work.
+- Stale new execution actions, competing active requests, and configuration drift fail before partial admission.
+- Pause, Halt, and restart preserve an unsettled execution scope; a settled continuation admits pending or interrupted slots only.
+- Cancel remains terminal even when failed slots remain.
+- Unknown selected remote completion requires acknowledgment, and unresolved cleanup prevents unsafe admission.
+- Automatic transient retry limits apply per admitted question execution while physical attempt ordinals remain monotonic.
+- Target and automatic judge admissions use immutable attempt budget attribution; standalone usage never inherits historical research provenance.
+- Run time sums active segments, excludes idle and restart downtime, and reports incomplete timing when a crash prevents proof.
+- Historical child Runs, retry applications, adopted answers, and their saved scores remain readable without retired write commands.
+- Manual failed-slot recovery and pending/interrupted continuation from terminal research use normal frozen Run limits and a fresh Run-controlled execution.
+- New manual target and automatic LLM/Jev attempts have explicit execution identity without research-budget attribution or inherited research deadlines.
+- Original research records, decisions, first scores, outcomes, conversation, and spending remain unchanged while Run lifetime totals include manual work.
+- Live, paused, or halted research cannot be taken over, outstanding target/judge/assessment work blocks admission, and cancelled Runs remain terminal.

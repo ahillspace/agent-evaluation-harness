@@ -1,6 +1,6 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import type { RunView } from "../contracts.js";
-import { command, navigate } from "./api.js";
+import type { RunRecovery } from "./run-recovery.js";
 import { ErrorNotice, Modal } from "./ui.js";
 
 export const failureLabels: Record<string, string> = {
@@ -16,27 +16,34 @@ export const failureLabels: Record<string, string> = {
   unknown: "Cause not established",
 };
 
-export function RetryFailures({ view }: { view: RunView }) {
+export function RetryFailures({
+  view,
+  recovery,
+}: {
+  view: RunView;
+  recovery: RunRecovery;
+}) {
   const [open, setOpen] = useState(false);
   const [acknowledge, setAcknowledge] = useState(false);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<unknown>();
-  const key = useRef<string | undefined>(undefined);
   const failed = view.retryEligibility?.resultIds ?? [];
-  if (!failed.length) return null;
-  const settled = view.retryEligibility?.available ?? false;
+  if (!failed.length || recovery.request) return null;
+  const available =
+    view.retryEligibility?.available && recovery.ready && !recovery.busy;
   const uncertain = view.retryEligibility?.requiresAcknowledgment ?? true;
   return (
     <>
       <button
         className="button secondary"
-        disabled={!settled}
+        disabled={!available}
         title={
-          settled
-            ? "Retry execution failures without repeating graded answers"
-            : (view.retryEligibility?.reason ?? "Retry is not available")
+          view.retryEligibility?.available
+            ? "Recover unanswered failures in this Run"
+            : view.retryEligibility?.reason
         }
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          setAcknowledge(false);
+          setOpen(true);
+        }}
       >
         Rerun failed questions ({failed.length})
       </button>
@@ -44,20 +51,25 @@ export function RetryFailures({ view }: { view: RunView }) {
         <Modal
           title="Rerun failed questions"
           onClose={() => {
-            if (!pending) setOpen(false);
+            if (!recovery.busy) setOpen(false);
           }}
         >
           <div className="stack">
             <p>
-              Retry {failed.length} unanswered questions using the same frozen
-              questions, agent settings, and evaluation rules. Incorrect answers
-              are excluded.
+              Recover {failed.length} unanswered question
+              {failed.length === 1 ? "" : "s"} here with the same frozen
+              settings. Incorrect answers stay unchanged.
             </p>
             <p className="subtle">
-              This creates a linked run. Apply its completed answers to update
-              this run's results and scores. Original attempts, scores, and
-              research decisions stay available. New attempts can incur
+              Earlier attempts and scores stay available. New attempts can incur
               additional usage.
+              {view.run.researchSessionId && (
+                <>
+                  {" "}
+                  New attempts use this Run's limits and do not count toward the
+                  finished research budget.
+                </>
+              )}
             </p>
             {uncertain && (
               <label className="check-row">
@@ -72,25 +84,24 @@ export function RetryFailures({ view }: { view: RunView }) {
                 </span>
               </label>
             )}
-            <ErrorNotice error={error} />
+            <ErrorNotice error={recovery.error} />
             <button
               className="button primary"
-              disabled={pending || (uncertain && !acknowledge)}
+              disabled={!available || (uncertain && !acknowledge)}
               onClick={() => {
-                key.current ??= crypto.randomUUID();
-                setPending(true);
-                setError(undefined);
-                void command("runs.retry-failed", {
-                  runId: view.run.id,
-                  idempotencyKey: key.current,
-                  acknowledgeDuplicateWork: acknowledge,
-                })
-                  .then((result) => navigate(`/runs/${result.run.id}`))
-                  .catch(setError)
-                  .finally(() => setPending(false));
+                setOpen(false);
+                void recovery.submit({
+                  operation: "runs.retry-failed",
+                  input: {
+                    runId: view.run.id,
+                    expectedExecutionId: view.run.execution?.id ?? view.run.id,
+                    idempotencyKey: crypto.randomUUID(),
+                    acknowledgeDuplicateWork: acknowledge,
+                  },
+                });
               }}
             >
-              {pending ? "Starting retry..." : "Start retry run"}
+              Rerun failed questions
             </button>
           </div>
         </Modal>

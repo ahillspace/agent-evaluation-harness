@@ -1,5 +1,4 @@
 import type { AttemptSummary, RuntimePort, UsageReport } from "../contracts.js";
-import { savedTarget } from "../contracts/targets.js";
 import { Database } from "../storage/database.js";
 
 export function uncachedInput(usage: UsageReport["usage"]): number | undefined {
@@ -24,14 +23,15 @@ export class UsageProjection {
     private readonly normalize?: RuntimePort["normalizeRecordedUsage"],
   ) {}
   attempts(runId: string): AttemptSummary[] {
-    const target = savedTarget(this.db.require("run", runId).manifest);
+    const target = this.db.runState(runId);
     return this.db.attemptSummaries(runId).map((attempt) => {
       let usage = attempt.usage;
       if (
         usage &&
         usage.cachedInputTokens === undefined &&
         attempt.status !== "running" &&
-        target.kind === "managed" &&
+        target.targetKind === "managed" &&
+        target.targetHarness &&
         this.normalize
       ) {
         if (this.settled.has(attempt.id)) {
@@ -40,7 +40,7 @@ export class UsageProjection {
         } else {
           const events = this.db.attemptUsageEvents(attempt.id);
           const recovered =
-            events && this.normalize(target.agent.harness, events);
+            events && this.normalize(target.targetHarness, events);
           if (
             recovered &&
             recovered.inputTokens === usage.inputTokens &&

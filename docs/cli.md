@@ -185,11 +185,11 @@ Existing runs keep their frozen questions and evaluator.
 
 These operations check a draft without publishing or calling a model:
 
-| Operation               | Input                                       | Result                                                        |
-| ----------------------- | ------------------------------------------- | ------------------------------------------------------------- |
-| `banks.check-answer`    | `question`, `settings`, `answer`            | The deterministic verdict for one sample answer.              |
-| `banks.calibrate-draft` | `questions`, `settings`                     | Calibration results for the proposed bank and rules.          |
-| `banks.preview-draft`   | `bankId`, `questions`, `settings`, `runIds` | Proposed verdicts beside original verdicts for saved answers. |
+| Operation               | Input                                       | Result                                                                     |
+| ----------------------- | ------------------------------------------- | -------------------------------------------------------------------------- |
+| `banks.check-answer`    | `question`, `settings`, `answer`            | The deterministic verdict for one sample answer.                           |
+| `banks.calibrate-draft` | `questions`, `settings`                     | Calibration results for the proposed bank and rules.                       |
+| `banks.preview-draft`   | `bankId`, `questions`, `settings`, `runIds` | Proposed verdicts beside the current automatic verdicts for saved answers. |
 
 Preview requires compatible saved questions and uses their sealed answers; it does not rerun the target agent.
 Use `banks.export-package` with `bankRevisionId` and optional `evaluatorRevisionId` and `jevProfileRevisionId` to export a versioned package containing questions, deterministic rules, and the selected Jev profile.
@@ -250,29 +250,46 @@ To rerun failed questions after active work settles, save `retry.json`:
 node dist/cli.js runs.retry-failed --file retry.json
 ```
 
-This creates a linked run rather than changing original answers.
-An optional `resultIds` array restricts the selection.
-If the engine requires acknowledgment of possible repeated actions, inspect the prior attempts before setting `acknowledgeDuplicateWork` to `true`.
+This recovers failed unanswered slots in the original Run and returns that same Run identifier.
+An optional `resultIds` array restricts the selection without resuming unrelated unfinished questions.
+Completed answers, including incorrect answers, are excluded.
+An optional `expectedExecutionId` matches `run.execution.id`, or the Run identifier for a historical record without a context.
+A stale new action fails before admission.
+If acknowledgment is required, inspect the prior attempts before setting `acknowledgeDuplicateWork` to `true`.
 
-After the linked rerun finishes, apply its completed answers to the original Run:
+Keep the exact request and idempotency key until its acknowledgment arrives.
+Replaying the accepted request returns its receipt without restarting work, including after Halt or restart.
+Use a new key only for an intentional new recovery.
+Prior attempts and saved scores remain available.
+The new automatic score includes every logical slot and keeps the earlier automatic family unchanged.
+`runs.get` exposes the current execution, engine-owned recovery eligibility, selected score, and historical answer sources.
+
+Resume can also carry a durable key and execution guard:
 
 ```json
 {
-  "runId": "ORIGINAL_RUN_ID",
-  "retryRunId": "LINKED_RETRY_RUN_ID",
-  "idempotencyKey": "apply-retry-1"
+  "runId": "REPLACE_RUN_ID",
+  "action": "resume",
+  "idempotencyKey": "resume-unfinished-1",
+  "expectedExecutionId": "REPLACE_EXECUTION_ID",
+  "acknowledgeDuplicateWork": true
 }
 ```
 
-```sh
-node dist/cli.js runs.apply-retry --file apply-retry.json
-```
-
-The operation creates updated assessment passes without invoking the target or judges.
-Original attempts and scores remain available.
-An optional `resultIds` array selects original result slots.
-Set `replaceApplied` to `true` only when intentionally replacing an answer already applied from a different rerun.
-Use `runs.get` to inspect eligible linked reruns, applied answer sources, and the updated scores.
+Run control preserves its key, acknowledgment, and execution guard when routed to an owning research session.
+The guard refers to the requested Run; a historical Research Run can control the session's current child.
+Replaying an accepted control key returns the current view without scheduling or interrupting work, even after control ownership changes.
+Resume continues an unsettled execution's scope.
+A Run whose final slot settles nonfatally under Pause or Halt completes without another target request.
+Fatal stops and remaining unfinished slots stay stopped; Cancel takes priority over late cleanup failures.
+A paused research session can then resume its researcher against that completed Run.
+After that scope settles, it admits only remaining pending or interrupted slots in a new continuation.
+Cancelled Runs cannot resume.
+Manual recovery or continuation after a terminal research session uses ordinary frozen Run limits.
+The same operations apply without an additional budget option.
+They preserve research provenance and prior spending while attributing new target and automatic judge work only to the Run.
+The parent must be terminal and target/judge work must have settled; paused or halted research retains ownership.
+Historical linked reruns remain readable; the retired Apply operation is unavailable.
 
 ## Score saved answers
 

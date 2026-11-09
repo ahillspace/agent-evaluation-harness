@@ -106,7 +106,11 @@ export function RunPerformanceTotals({
       <Metric
         label="Attempts"
         value={count(performance?.attempts)}
-        detail={performance ? `${performance.retries} retries` : undefined}
+        detail={
+          performance
+            ? `${performance.retries} ${performance.retries === 1 ? "retry" : "retries"}`
+            : undefined
+        }
       />
     </div>
   );
@@ -122,13 +126,15 @@ export function RunPerformanceSummary({
       <div className="panel-heading">
         <h2>Performance</h2>
         <Help label="Run performance">
-          Duration covers the run. Answer time covers completed attempts. Tokens
-          measure text sent to and received from models. Turns are agent steps;
-          tool calls are requests to connected tools. Token totals include all
-          reported requests. Pending or unreported requests appear separately.
-          Input excludes reused text, which appears under Cache. Output is
-          generated text. Large counts use K for thousand and M for million;
-          hover over a count for its exact value.
+          Run duration adds active execution time and excludes idle gaps.
+          Incomplete historical or interrupted timing appears as Unknown. Answer
+          time covers completed attempts. Tokens measure text sent to and
+          received from models. Turns are agent steps; tool calls are requests
+          to connected tools. Token totals include all reported requests.
+          Pending or unreported requests appear separately. Input excludes
+          reused text, which appears under Cache. Output is generated text.
+          Large counts use K for thousand and M for million; hover over a count
+          for its exact value.
         </Help>
       </div>
       <div className="panel-body">
@@ -149,7 +155,9 @@ export function RunPerformanceSummary({
             label="Attempts"
             value={count(performance?.attempts)}
             detail={
-              performance ? `${performance.retries} retries` : "Retries unknown"
+              performance
+                ? `${performance.retries} ${performance.retries === 1 ? "retry" : "retries"}`
+                : "Retries unknown"
             }
           />
           <Metric

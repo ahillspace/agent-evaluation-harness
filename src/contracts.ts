@@ -858,6 +858,9 @@ export type RunManifest = TargetSnapshot & {
   digest: string;
 };
 export interface RunRecord {
+  execution?: RunExecution;
+  activeDurationMs?: number;
+  activeDurationIncomplete?: boolean;
   selectedAssessmentPassId?: string;
   retryOf?: { runId: string; resultIds: string[] };
   id: string;
@@ -870,7 +873,26 @@ export interface RunRecord {
   researchSessionId?: string;
   error?: string;
 }
+export interface RunExecution {
+  id: string;
+  resultIds: string[];
+  controller: "run" | "research";
+  budgetResearchSessionId?: string;
+  createdAt: string;
+  settledAt?: string;
+  activeSegmentStartedAt?: string;
+  stopReason?:
+    | "completed"
+    | "outside-scope-unfinished"
+    | "paused"
+    | "halted"
+    | "cancelled"
+    | "failed"
+    | "interrupted";
+}
 export interface AttemptRecord {
+  executionId?: string;
+  budgetResearchSessionId?: string;
   failure?: {
     code: string;
     transport?: Json;
@@ -918,14 +940,6 @@ export interface RunRetryApplication {
   createdAt: string;
   bindings: Array<{ resultId: string; source: AnswerSource }>;
   assessmentPassIds: string[];
-}
-export interface RetryApplyEligibility {
-  replacementResultIds?: string[];
-  available: boolean;
-  originalRunId: string;
-  resultIds: string[];
-  alreadyAppliedResultIds: string[];
-  reason?: string;
 }
 export interface Verdict {
   status: "correct" | "incorrect" | "error" | "unavailable" | "unscorable";
@@ -1242,23 +1256,13 @@ export interface ResearchRecord {
   stopReason?: string;
 }
 export interface RunView {
+  resumeEligibility?: RunRecoveryEligibility;
   retryApplications?: RunRetryApplication[];
-  retryApplyEligibility?: RetryApplyEligibility;
-  retryRuns?: Array<
-    Omit<RetryApplyEligibility, "originalRunId"> & {
-      runId: string;
-      name: string;
-    }
-  >;
+  retryRuns?: Array<{ runId: string; name: string }>;
   assessmentPasses?: AssessmentPassObservation[];
   selectedAssessmentPassId?: string;
   performance?: RunPerformance;
-  retryEligibility?: {
-    available: boolean;
-    resultIds: string[];
-    requiresAcknowledgment: boolean;
-    reason?: string;
-  };
+  retryEligibility?: RunRecoveryEligibility;
   run: RunRecord;
   results: ResultRecord[];
   attempts: AttemptSummary[];
@@ -1274,6 +1278,12 @@ export interface RunView {
   progress: { completed: number; failed: number; total: number };
   events: ObservationEvent[];
   cursor: number;
+}
+export interface RunRecoveryEligibility {
+  available: boolean;
+  resultIds: string[];
+  requiresAcknowledgment: boolean;
+  reason?: string;
 }
 export type RunObservation = Omit<RunView, "run"> & {
   run: Omit<RunRecord, "manifest">;
@@ -1498,15 +1508,7 @@ export const commandSchemas = {
       resultIds: z.array(identifier).min(1).optional(),
       acknowledgeDuplicateWork: z.boolean().default(false),
       idempotencyKey: z.string().min(1).max(200),
-    })
-    .strict(),
-  "runs.apply-retry": z
-    .object({
-      runId: identifier,
-      retryRunId: identifier,
-      resultIds: z.array(identifier).min(1).optional(),
-      idempotencyKey: z.string().min(1).max(200),
-      replaceApplied: z.boolean().default(false),
+      expectedExecutionId: identifier.optional(),
     })
     .strict(),
   "runs.control": z
@@ -1514,6 +1516,8 @@ export const commandSchemas = {
       runId: identifier,
       action: controlSchema,
       acknowledgeDuplicateWork: z.boolean().default(false),
+      idempotencyKey: z.string().min(1).max(200).optional(),
+      expectedExecutionId: identifier.optional(),
     })
     .strict(),
   "runs.events": z
@@ -1815,12 +1819,6 @@ export interface CommandResultMap {
   "runs.attempt-events": { events: ObservationEvent[]; cursor: number };
   "runs.control": RunView;
   "runs.retry-failed": RunView;
-  "runs.apply-retry": {
-    applicationId: string;
-    appliedResultIds: string[];
-    assessmentPassIds: string[];
-    alreadyApplied: boolean;
-  };
   "runs.events": { events: ObservationEvent[]; cursor: number };
   "runs.export-agent": Json;
   "runs.compare": RunComparison;

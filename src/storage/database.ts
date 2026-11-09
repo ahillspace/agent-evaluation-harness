@@ -53,6 +53,7 @@ export interface RecordMap {
 }
 export type RecordKind = keyof RecordMap;
 export interface RecordQuery {
+  ids?: string[];
   runId?: string | string[];
   resultId?: string;
   bankId?: string;
@@ -104,7 +105,14 @@ const policies: Record<RecordKind, { appendOnly: boolean; fixed: string[] }> = {
   result: { appendOnly: false, fixed: ["runId", "questionId", "repetition"] },
   attempt: {
     appendOnly: false,
-    fixed: ["runId", "resultId", "number", "startedAt"],
+    fixed: [
+      "runId",
+      "resultId",
+      "number",
+      "startedAt",
+      "executionId",
+      "budgetResearchSessionId",
+    ],
   },
   assessment: { appendOnly: true, fixed: [] },
   scoreSet: {
@@ -172,10 +180,33 @@ const compactAssessment = (value: string) =>
   `json_object('resultId',json_extract(${value},'$.resultId'),'attemptId',json_extract(${value},'$.attemptId'),'deterministic',json_extract(${value},'$.deterministic.status'),'judgeVerdict',json(${value} -> '$.judge.verdict'),'judgeError',json_type(${value},'$.judgeError') IS NOT NULL,'judgeResponded',json_type(${value},'$.judge') IS NOT NULL OR json_type(${value},'$.judgeResponse') IS NOT NULL)`;
 const referenceHash = (questions: string, selected: string) =>
   `reference_hash(COALESCE((SELECT json_group_array(json_object('id',json_extract(q.value,'$.id'),'expected',json(q.value -> '$.expected'))) FROM json_each(${questions}) q WHERE json_extract(q.value,'$.id') IN (SELECT json_extract(value,'$.id') FROM json_each(${selected}))),'[]'))`;
-export type RunHeader = Pick<
-  RunRecord,
-  "id" | "name" | "status" | "retryOf"
-> & { manifestHash: string };
+export type RunHeader = Pick<RunRecord, "id" | "name" | "status" | "retryOf">;
+export type RunState = Omit<RunRecord, "manifest"> & {
+  targetKind: "managed" | "external";
+  targetHarness?: string;
+  researchStatus?: ResearchRecord["status"];
+};
+export interface AutomaticAssessmentInput {
+  result: ResultRecord;
+  attemptId?: string;
+  source?: AnswerSource;
+  attempt?: Pick<
+    AttemptRecord,
+    "runId" | "resultId" | "status" | "finishedAt" | "evidenceHash"
+  > & { hasOutput: boolean };
+  owner?: Pick<ResultRecord, "runId" | "questionId" | "repetition">;
+  sourceRun?: Pick<RunRecord, "id" | "retryOf"> & { sameManifest: boolean };
+  raw?: {
+    recordId?: string;
+    scoreSetId?: string;
+    assessment: Assessment;
+    judgeResponded: boolean;
+  };
+  jev?: Pick<JevAssessmentRecord, "id" | "status" | "checks" | "usage"> & {
+    criteria: Pick<JevAssessmentRecord["criteria"], "confidenceThreshold">;
+    error?: { message: string };
+  };
+}
 export type RunListQuery = {
   bankId?: string;
   status?: string;
@@ -202,6 +233,10 @@ function recordFilter(
 ): { where: string; parameters: SQLInputValue[] } {
   const clauses = ["kind=?"];
   const parameters: SQLInputValue[] = [kind];
+  if (query.ids !== undefined) {
+    clauses.push("id IN (SELECT value FROM json_each(?))");
+    parameters.push(JSON.stringify(query.ids));
+  }
   for (const [key, column] of Object.entries(queryColumns)) {
     const value = query[key as keyof typeof queryColumns];
     if (value === undefined) continue;
@@ -220,9 +255,6 @@ export class Database {
     this.db = new DatabaseSync(path);
     this.db.function("normalize_search", { deterministic: true }, (value) =>
       normalizeRunSearch(String(value ?? "")),
-    );
-    this.db.function("manifest_hash", { deterministic: true }, (value) =>
-      digest(JSON.parse(String(value))),
     );
     this.db.function("reference_hash", { deterministic: true }, (value) =>
       digest(
@@ -299,6 +331,8 @@ export class Database {
       CREATE INDEX IF NOT EXISTS events_run ON events(run_id,sequence);
       CREATE INDEX IF NOT EXISTS events_session ON events(session_id,sequence);
       CREATE INDEX IF NOT EXISTS events_attempt ON events(attempt_id,sequence);
+      CREATE INDEX IF NOT EXISTS events_run_control ON events(run_id,sequence) WHERE type='run.control.requested';
+      CREATE INDEX IF NOT EXISTS events_session_control ON events(session_id,sequence) WHERE type='research.control.requested';
       CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY, hash TEXT NOT NULL, kind TEXT NOT NULL, record_id TEXT NOT NULL, response TEXT CHECK(response IS NULL OR json_valid(response)),
         FOREIGN KEY(kind,record_id) REFERENCES records(kind,id));
       CREATE TRIGGER IF NOT EXISTS records_append_only BEFORE UPDATE ON records
@@ -313,6 +347,9 @@ export class Database {
       CREATE TRIGGER IF NOT EXISTS completed_attempts_are_sealed BEFORE UPDATE ON records
       WHEN OLD.kind='attempt' AND json_extract(OLD.value,'$.status')='completed' AND OLD.value!=NEW.value
       BEGIN SELECT RAISE(ABORT,'Completed attempt evidence is immutable.'); END;
+      CREATE TRIGGER IF NOT EXISTS immutable_attempt_execution_fields BEFORE UPDATE ON records
+      WHEN OLD.kind='attempt' AND (json_extract(OLD.value,'$.executionId') IS NOT json_extract(NEW.value,'$.executionId') OR json_extract(OLD.value,'$.budgetResearchSessionId') IS NOT json_extract(NEW.value,'$.budgetResearchSessionId'))
+      BEGIN SELECT RAISE(ABORT,'Attempt execution attribution is immutable.'); END;
       CREATE TRIGGER IF NOT EXISTS assessment_passes_are_sealed BEFORE UPDATE ON records
       WHEN OLD.kind='assessmentPass' AND json_extract(OLD.value,'$.status')!='running' AND OLD.value!=NEW.value
       BEGIN SELECT RAISE(ABORT,'Completed assessment passes are immutable.'); END;
@@ -470,19 +507,22 @@ export class Database {
     const { where, parameters } = recordFilter("run", query);
     return this.db
       .prepare(
-        `SELECT json_object('id',id,'name',json_extract(value,'$.name'),'status',status,'retryOf',json_extract(value,'$.retryOf'),'manifestHash',manifest_hash(json_extract(value,'$.manifest'))) AS value FROM records WHERE ${where} ORDER BY ordinal`,
+        `SELECT json_object('id',id,'name',json_extract(value,'$.name'),'status',status,'retryOf',json_extract(value,'$.retryOf')) AS value FROM records WHERE ${where} ORDER BY ordinal`,
       )
       .all(...parameters)
       .map((row) => JSON.parse(String(row.value)) as RunHeader);
   }
-  runHeader(runId: string): RunHeader {
+  runState(runId: string): RunState {
     const row = this.db
       .prepare(
-        "SELECT json_object('id',id,'name',json_extract(value,'$.name'),'status',status,'retryOf',json_extract(value,'$.retryOf'),'manifestHash',manifest_hash(json_extract(value,'$.manifest'))) AS value FROM records WHERE kind='run' AND id=?",
+        "SELECT json_set(json_remove(value,'$.manifest'),'$.targetKind',COALESCE(json_extract(value,'$.manifest.target.kind'),'managed'),'$.targetHarness',COALESCE(json_extract(value,'$.manifest.target.agent.harness'),json_extract(value,'$.manifest.agent.harness')),'$.researchStatus',(SELECT parent.status FROM records parent WHERE parent.kind='research' AND parent.id=records.session_id)) AS value FROM records WHERE kind='run' AND id=?",
       )
       .get(runId);
     if (!row) throw new AppError("not_found", `run ${runId} was not found.`);
-    return JSON.parse(String(row.value)) as RunHeader;
+    const state = JSON.parse(String(row.value)) as RunState;
+    for (const key of ["targetHarness", "researchStatus"] as const)
+      if (state[key] === null) delete state[key];
+    return state;
   }
   appliedAnswerSource(
     runId: string,
@@ -631,16 +671,104 @@ export class Database {
       .all(runId)
       .map((row) => JSON.parse(String(row.value)) as AssessmentPassSummary);
   }
+  /** Logical bindings and raw automatic judgments, without evidence or configuration bodies. */
+  automaticAssessmentInputs(
+    runId: string,
+    first: boolean,
+    scoreSetId?: string,
+  ): AutomaticAssessmentInput[] {
+    const compact = (value: string) =>
+      `json_remove(${value},'$.deterministic.details','$.judgeRequest','$.judgeResponse','$.judge.custom')`;
+    const physical = `(SELECT json_object('recordId',a.id,'assessment',json(${compact("a.value")}), 'judgeResponded',json_type(a.value,'$.judge') IS NOT NULL OR json_type(a.value,'$.judgeResponse') IS NOT NULL) FROM records a WHERE a.kind='assessment' AND a.run_id=json_extract(b.answer,'$.runId') AND a.result_id=json_extract(b.answer,'$.resultId') AND json_extract(a.value,'$.attemptId')=b.attempt_id ORDER BY a.ordinal LIMIT 1)`;
+    const legacy = `(SELECT json_object('scoreSetId',s.id,'assessment',json(${compact("item.value")}), 'judgeResponded',json_type(item.value,'$.judge') IS NOT NULL OR json_type(item.value,'$.judgeResponse') IS NOT NULL) FROM records s,json_each(s.value,'$.assessments') item WHERE s.kind='scoreSet' AND s.run_id=json_extract(b.answer,'$.runId') AND json_extract(s.value,'$.kind')='original' AND json_extract(item.value,'$.resultId')=json_extract(b.answer,'$.resultId') AND json_extract(item.value,'$.attemptId')=b.attempt_id ORDER BY s.ordinal,CAST(item.key AS INTEGER) LIMIT 1)`;
+    const captured = `(SELECT json_object('scoreSetId',original.id,'assessment',json(${compact("item.value")}), 'judgeResponded',json_type(item.value,'$.judge') IS NOT NULL OR json_type(item.value,'$.judgeResponse') IS NOT NULL) FROM original,json_each(original.value,'$.assessments') item WHERE json_extract(item.value,'$.resultId')=json_extract(b.result,'$.id') AND json_extract(item.value,'$.attemptId')=b.attempt_id LIMIT 1)`;
+    const tree = (manifest: string) =>
+      `SELECT fullkey,CASE WHEN type IN ('integer','real') THEN 'number' ELSE type END AS type,atom FROM json_tree(${manifest})`;
+    const sameManifest = `NOT EXISTS (${tree("json_extract(b.source_run,'$.manifest')")} EXCEPT ${tree("json_extract(r.value,'$.manifest')")}) AND NOT EXISTS (${tree("json_extract(r.value,'$.manifest')")} EXCEPT ${tree("json_extract(b.source_run,'$.manifest')")})`;
+    return this.db
+      .prepare(
+        `
+      WITH original AS (
+        SELECT id,value FROM records WHERE kind='scoreSet' AND run_id=?1 AND ((?3 IS NULL AND json_extract(value,'$.kind')='original') OR id=?3) ORDER BY ordinal LIMIT 1
+      ), applied AS (
+        SELECT json_extract(item.value,'$.resultId') AS result_id,json_extract(item.value,'$.source') AS source,
+          ROW_NUMBER() OVER (PARTITION BY json_extract(item.value,'$.resultId') ORDER BY app.ordinal DESC,CAST(item.key AS INTEGER) DESC) AS rank
+        FROM records app,json_each(app.value,'$.bindings') item WHERE app.kind='retryApplication' AND app.run_id=?1
+      ), selected AS (
+        SELECT r.value AS result,r.ordinal,
+          CASE WHEN ?2 THEN CASE WHEN EXISTS(SELECT 1 FROM original)
+            THEN (SELECT json_extract(item.value,'$.attemptId') FROM original,json_each(original.value,'$.assessments') item WHERE json_extract(item.value,'$.resultId')=r.id LIMIT 1)
+            ELSE (SELECT a.id FROM json_each(r.value,'$.attemptIds') item JOIN records a ON a.kind='attempt' AND a.id=item.value WHERE a.status='completed' AND COALESCE(json_extract(a.value,'$.executionId'),?1)=?1 ORDER BY CAST(item.key AS INTEGER) DESC LIMIT 1) END
+            ELSE COALESCE(json_extract(applied.source,'$.attemptId'),json_extract(r.value,'$.completedAttemptId')) END AS attempt_id,
+          CASE WHEN NOT ?2 THEN applied.source END AS applied_source
+        FROM records r LEFT JOIN applied ON applied.result_id=r.id AND applied.rank=1 WHERE r.kind='result' AND r.run_id=?1
+      ), bound AS (
+        SELECT s.*,a.value AS attempt,owner.value AS owner,sr.value AS source_run,
+          CASE WHEN s.attempt_id IS NOT NULL THEN COALESCE(s.applied_source,json_object('runId',a.run_id,'resultId',a.result_id,'attemptId',s.attempt_id,'evidenceHash',json_extract(a.value,'$.evidenceHash'))) END AS answer
+        FROM selected s LEFT JOIN records a ON a.kind='attempt' AND a.id=s.attempt_id
+        LEFT JOIN records owner ON owner.kind='result' AND owner.id=COALESCE(json_extract(s.applied_source,'$.resultId'),a.result_id)
+        LEFT JOIN records sr ON sr.kind='run' AND sr.id=COALESCE(json_extract(s.applied_source,'$.runId'),a.run_id)
+      )
+      SELECT json_object('result',json(b.result),'attemptId',b.attempt_id,'source',json(b.answer),
+        'attempt',CASE WHEN b.attempt IS NOT NULL THEN json_object('runId',json_extract(b.attempt,'$.runId'),'resultId',json_extract(b.attempt,'$.resultId'),'status',json_extract(b.attempt,'$.status'),'finishedAt',json_extract(b.attempt,'$.finishedAt'),'evidenceHash',json_extract(b.attempt,'$.evidenceHash'),'hasOutput',json_type(b.attempt,'$.output')='object') END,
+        'owner',CASE WHEN b.owner IS NOT NULL THEN json_object('runId',json_extract(b.owner,'$.runId'),'questionId',json_extract(b.owner,'$.questionId'),'repetition',json_extract(b.owner,'$.repetition')) END,
+        'sourceRun',CASE WHEN b.source_run IS NOT NULL THEN json_object('id',json_extract(b.source_run,'$.id'),'retryOf',json_extract(b.source_run,'$.retryOf'),'sameManifest',CASE WHEN json_extract(b.source_run,'$.id')=?1 THEN 1 ELSE (${sameManifest}) END) END,
+        'raw',json(COALESCE(${first ? `${captured},${legacy},${physical}` : `${physical},${legacy}`})),
+        'jev',json((SELECT json_object('id',j.id,'status',j.status,'checks',json_extract(j.value,'$.checks'),'criteria',json_object('confidenceThreshold',json_extract(j.value,'$.criteria.confidenceThreshold')),'error',CASE WHEN json_type(j.value,'$.error')='object' THEN json_object('message',json_extract(j.value,'$.error.message')) END,'usage',json_extract(j.value,'$.usage')) FROM records j WHERE j.kind='jevAssessment' AND j.run_id=json_extract(b.answer,'$.runId') AND j.result_id=json_extract(b.answer,'$.resultId') AND json_extract(j.value,'$.attemptId')=b.attempt_id AND json_extract(j.value,'$.attemptEvidenceHash')=json_extract(b.answer,'$.evidenceHash') AND json_extract(j.value,'$.kind')='original' ORDER BY j.ordinal LIMIT 1))
+      ) AS value FROM bound b JOIN records r ON r.kind='run' AND r.id=?1 ORDER BY b.ordinal
+    `,
+      )
+      .all(runId, first ? 1 : 0, scoreSetId ?? null)
+      .map((row) => {
+        const input = JSON.parse(String(row.value));
+        for (const key of [
+          "attemptId",
+          "source",
+          "attempt",
+          "owner",
+          "sourceRun",
+          "raw",
+          "jev",
+        ])
+          if (input[key] === null) delete input[key];
+        if (input.attempt)
+          input.attempt.hasOutput = input.attempt.hasOutput === 1;
+        if (input.sourceRun)
+          input.sourceRun.sameManifest = input.sourceRun.sameManifest === 1;
+        if (input.raw)
+          input.raw.judgeResponded = input.raw.judgeResponded === 1;
+        if (input.jev)
+          for (const key of ["checks", "error", "usage"])
+            if (input.jev[key] === null) delete input.jev[key];
+        return input as AutomaticAssessmentInput;
+      });
+  }
+  legacyAssessmentInputs(runId: string): Array<
+    Omit<ScoreSummaryInput, "assessments"> & {
+      inputs: AutomaticAssessmentInput[];
+    }
+  > {
+    return this.legacyScoreSummaryInputs(runId).map(
+      ({ assessments: _assessments, ...seed }) => ({
+        ...seed,
+        inputs: this.automaticAssessmentInputs(
+          runId,
+          true,
+          seed.id.slice("scores_".length),
+        ),
+      }),
+    );
+  }
   runAssessmentState(runId: string): Pick<
     RunRecord,
-    "createdAt" | "updatedAt" | "status"
+    "createdAt" | "updatedAt" | "status" | "execution"
   > & {
     judgeEnabled: boolean;
     jevEnabled: boolean;
   } {
     const row = this.db
       .prepare(
-        "SELECT json_object('createdAt',json_extract(value,'$.createdAt'),'updatedAt',json_extract(value,'$.updatedAt'),'status',status,'judgeEnabled',json_extract(value,'$.manifest.judge.enabled'),'jevEnabled',json_type(value,'$.manifest.jevJudge')='object') AS value FROM records WHERE kind='run' AND id=?",
+        "SELECT json_object('createdAt',json_extract(value,'$.createdAt'),'updatedAt',json_extract(value,'$.updatedAt'),'status',status,'execution',json_extract(value,'$.execution'),'judgeEnabled',json_extract(value,'$.manifest.judge.enabled'),'jevEnabled',json_type(value,'$.manifest.jevJudge')='object') AS value FROM records WHERE kind='run' AND id=?",
       )
       .get(runId);
     if (!row) throw new AppError("not_found", `run ${runId} was not found.`);
@@ -661,48 +789,6 @@ export class Database {
       .get(runId);
     if (!row) throw new AppError("not_found", `run ${runId} was not found.`);
     return JSON.parse(String(row.value));
-  }
-  resultAssessmentMetadata(
-    runId: string,
-  ): Array<
-    Pick<ResultRecord, "id" | "questionId" | "status" | "completedAttemptId">
-  > {
-    return this.db
-      .prepare(
-        "SELECT json_object('id',id,'questionId',json_extract(value,'$.questionId'),'status',status,'completedAttemptId',json_extract(value,'$.completedAttemptId')) AS value FROM records WHERE kind='result' AND run_id=? ORDER BY ordinal",
-      )
-      .all(runId)
-      .map((row) => JSON.parse(String(row.value)));
-  }
-  originalAssessmentMetadata(runId: string): ScoreSummaryInput["assessments"] {
-    const saved = this.db
-      .prepare(
-        `SELECT (SELECT json_group_array(json(${compactAssessment("item.value")})) FROM json_each(records.value,'$.assessments') item) AS value FROM records WHERE kind='scoreSet' AND run_id=? AND json_extract(value,'$.kind')='original' ORDER BY ordinal LIMIT 1`,
-      )
-      .get(runId);
-    if (saved) return JSON.parse(String(saved.value));
-    return this.db
-      .prepare(
-        `SELECT ${compactAssessment("value")} AS value FROM records WHERE kind='assessment' AND run_id=? ORDER BY ordinal`,
-      )
-      .all(runId)
-      .map((row) => JSON.parse(String(row.value)));
-  }
-  originalJevMetadata(runId: string): Array<{
-    id: string;
-    resultId: string;
-    attemptId: string;
-    status: string;
-    choice: string | null;
-    confidence: number | null;
-    threshold: number;
-  }> {
-    return this.db
-      .prepare(
-        "SELECT json_object('id',id,'resultId',result_id,'attemptId',json_extract(value,'$.attemptId'),'status',status,'choice',json_extract(value,'$.checks.answer.choice'),'confidence',json_extract(value,'$.checks.answer.confidence'),'threshold',json_extract(value,'$.criteria.confidenceThreshold')) AS value FROM records WHERE kind='jevAssessment' AND run_id=? AND json_extract(value,'$.kind')='original' ORDER BY ordinal",
-      )
-      .all(runId)
-      .map((row) => JSON.parse(String(row.value)));
   }
   legacyScoreSummaryInputs(runId: string): ScoreSummaryInput[] {
     return this.db
@@ -946,6 +1032,18 @@ export class Database {
         event.data === undefined ? null : JSON.stringify(event.data),
       );
     return { ...event, createdAt, sequence: Number(result.lastInsertRowid) };
+  }
+  controlSequence(scope: { runId: string } | { sessionId: string }): number {
+    const [column, ownerId, eventType] =
+      "runId" in scope
+        ? ["run_id", scope.runId, "run.control.requested"]
+        : ["session_id", scope.sessionId, "research.control.requested"];
+    const row = this.db
+      .prepare(
+        `SELECT sequence FROM events WHERE ${column}=? AND type='${eventType}' ORDER BY sequence DESC LIMIT 1`,
+      )
+      .get(ownerId);
+    return Number(row?.sequence ?? 0);
   }
   events(
     scope: { runId?: string; sessionId?: string; attemptId?: string },

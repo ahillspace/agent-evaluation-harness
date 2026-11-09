@@ -43,9 +43,12 @@ export class TargetRegistry {
     return adapter;
   }
   async resolve(target: TargetConfig) {
+    this.requireSafe();
     const adapter = this.adapter(target);
+    const resolved = await adapter.resolve(target);
+    this.requireSafe();
     return {
-      target: await adapter.resolve(target),
+      target: resolved,
       capabilities: { ...adapter.capabilities },
     };
   }

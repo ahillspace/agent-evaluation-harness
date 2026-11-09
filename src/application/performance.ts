@@ -65,7 +65,7 @@ export function runPerformance(
   runId: string,
   projection?: UsageProjection,
 ): RunPerformance {
-  const run = db.require("run", runId);
+  const run = db.runState(runId);
   const answers = new AnswerSources(db);
   const physical = answers.physicalAttempts(runId);
   const sourceRuns = [...new Set(physical.values())];
@@ -81,21 +81,26 @@ export function runPerformance(
       .filter((attempt) => physical.has(attempt.id)),
   ];
   const results = answers.results(runId);
+  const firstAttempts = new Map(
+    ownAttempts
+      .filter((attempt) => (attempt.executionId ?? run.id) === run.id)
+      .map((attempt) => [attempt.resultId, attempt]),
+  );
+  const originalFailures = new Set(
+    results
+      .filter((result) => firstAttempts.get(result.id)?.status === "failed")
+      .map((result) => result.id),
+  );
   const latencies = attempts
     .filter((a) => a.status === "completed" && a.finishedAt)
     .map((a) => Date.parse(a.finishedAt!) - Date.parse(a.startedAt));
-  const start = ownAttempts.length
-    ? Math.min(...ownAttempts.map((a) => Date.parse(a.startedAt)))
-    : null;
-  const settled = [
-    "completed",
-    "failed",
-    "cancelled",
-    "paused",
-    "halted",
-    "interrupted",
-  ].includes(run.status);
-  const end = settled ? Date.parse(run.updatedAt) : Date.now();
+  const durationIncomplete =
+    run.activeDurationIncomplete === true || run.activeDurationMs === undefined;
+  const activeSegment = run.execution?.activeSegmentStartedAt;
+  const durationMs = durationIncomplete
+    ? null
+    : run.activeDurationMs! +
+      (activeSegment ? Math.max(0, Date.now() - Date.parse(activeSegment)) : 0);
   const events = db.eventCounts(runId);
   for (const sourceRunId of sourceRuns.filter((value) => value !== runId)) {
     const counts = db.eventCounts(
@@ -196,7 +201,8 @@ export function runPerformance(
   ];
   const judgeUsage = [...originalJudges, ...jev, ...llm];
   return {
-    durationMs: start === null ? null : Math.max(0, end - start),
+    durationMs,
+    durationIncomplete,
     answerLatencyMs: {
       average: latencies.length
         ? latencies.reduce((a, b) => a + b, 0) / latencies.length
@@ -209,9 +215,10 @@ export function runPerformance(
     answered: results.filter((r) => r.answerSource).length,
     failures: results.filter((r) => r.status === "failed" && !r.answerSource)
       .length,
-    recoveredResults: results.filter((r) => r.answerSource?.applicationId)
-      .length,
-    originalFailures: results.filter((r) => r.status === "failed").length,
+    recoveredResults: results.filter(
+      (r) => r.answerSource && originalFailures.has(r.id),
+    ).length,
+    originalFailures: originalFailures.size,
     target: {
       ...aggregateUsage(
         attempts.map((a) => ({

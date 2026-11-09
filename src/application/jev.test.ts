@@ -14,6 +14,7 @@ import {
 } from "../contracts.js";
 import { createApplication } from "./application.js";
 import { Database } from "../storage/database.js";
+import { recordHistoricalRetry } from "../../tests/fixtures/historical-retry.js";
 import { digest } from "../domain/identity.js";
 import { JevClassifier } from "../runtime/jev.js";
 import { measurePass } from "./assessment-passes.js";
@@ -608,7 +609,15 @@ it("recovers an explicit unavailable Jev assessment when an answer was sealed be
   });
   await app.close();
   const db = new Database(join(directory, "workspace.sqlite"));
-  db.insert("run", { ...view.run, id: "interrupted-run" });
+  db.insert("run", {
+    ...view.run,
+    id: "interrupted-run",
+    execution: {
+      ...view.run.execution!,
+      id: "interrupted-run",
+      resultIds: ["interrupted-result"],
+    },
+  });
   db.insert("result", {
     ...view.results[0]!,
     id: "interrupted-result",
@@ -621,6 +630,7 @@ it("recovers an explicit unavailable Jev assessment when an answer was sealed be
     id: "interrupted-attempt",
     runId: "interrupted-run",
     resultId: "interrupted-result",
+    executionId: "interrupted-run",
   });
   db.close();
   const restarted = await createApplication({
@@ -744,9 +754,9 @@ it("persists Jev error provenance without converting it into an incorrect determ
 });
 
 it.each(["original", "retry"])(
-  "inspects copied and fresh adopted-answer Jev evidence on a %s Run after review and replacement",
+  "inspects copied and fresh historical adopted-answer Jev evidence on a %s Run after review",
   async (owner) => {
-    const { app, bank, agent, runtime, counts } = await setup();
+    const { app, bank, agent, runtime, counts, directory } = await setup();
     const execute = runtime.execute;
     let fail = true;
     let targetCalls = 0;
@@ -763,33 +773,67 @@ it.each(["original", "retry"])(
     await app.waitForIdle();
     let runId = launched.run.id;
     if (owner === "retry") {
-      const nested = await app.execute("runs.retry-failed", {
-        runId,
-        acknowledgeDuplicateWork: true,
-        idempotencyKey: "failed-nested-jev-retry",
+      const nested = await app.execute("runs.launch", {
+        bankRevisionId: bank.id,
+        agent,
+        jevJudge: { connectionId: "typesafe" },
       });
       await app.waitForIdle();
+      const db = new Database(join(directory, "workspace.sqlite"));
+      try {
+        db.update("run", {
+          ...db.require("run", nested.run.id),
+          retryOf: { runId, resultIds: [launched.results[0]!.id] },
+        });
+      } finally {
+        db.close();
+      }
       runId = nested.run.id;
     }
     const failed = await app.execute("runs.get", { runId });
     const resultId = failed.results[0]!.id;
     expect(failed.results[0]!.status).toBe("failed");
     fail = false;
-    const retry = await app.execute("runs.retry-failed", {
-      runId,
-      acknowledgeDuplicateWork: true,
-      idempotencyKey: "adopted-jev-retry",
+    const retry = await app.execute("runs.launch", {
+      bankRevisionId: bank.id,
+      agent,
+      jevJudge: { connectionId: "typesafe" },
     });
     await app.waitForIdle();
-    const applied = await app.execute("runs.apply-retry", {
-      runId,
-      retryRunId: retry.run.id,
-      idempotencyKey: "adopted-jev-apply",
+    const retryView = await app.execute("runs.get", { runId: retry.run.id });
+    const sourcePass = await app.execute("runs.export-assessment", {
+      runId: retry.run.id,
+      passId: retryView.assessmentPasses!.find((pass) => pass.source === "jev")!
+        .id,
     });
+    const copiedId = `historical_jev_${runId}`;
+    const db = new Database(join(directory, "workspace.sqlite"));
+    try {
+      const application = recordHistoricalRetry(db, runId, retry.run.id, [
+        resultId,
+      ]);
+      db.insert("assessmentPass", {
+        ...sourcePass,
+        id: copiedId,
+        runId,
+        retryApplicationId: application.id,
+        basis: {
+          ...sourcePass.basis,
+          eligibleResultIds: [resultId],
+          excludedResultIds: [],
+        },
+        judgments: sourcePass.judgments.map((judgment) => ({
+          ...judgment,
+          resultId,
+          source: { runId: retry.run.id, resultId: retryView.results[0]!.id },
+        })),
+      });
+    } finally {
+      db.close();
+    }
     const recovered = await app.execute("runs.get", { runId });
     const copied = recovered.assessmentPasses!.find(
-      (pass) =>
-        applied.assessmentPassIds.includes(pass.id) && pass.source === "jev",
+      (pass) => pass.id === copiedId,
     )!;
     const fresh = await app.execute("runs.assess", {
       runId,
@@ -840,19 +884,14 @@ it.each(["original", "retry"])(
     expect(counts()).toEqual({ targetCalls: 1, judgeCalls: 2, llmCalls: 0 });
     expect(targetCalls).toBe(owner === "retry" ? 3 : 2);
 
-    const replacement = await app.execute("runs.retry-failed", {
-      runId,
-      resultIds: [resultId],
-      acknowledgeDuplicateWork: true,
-      idempotencyKey: "replacement-jev-retry",
-    });
-    await app.waitForIdle();
-    await app.execute("runs.apply-retry", {
-      runId,
-      retryRunId: replacement.run.id,
-      replaceApplied: true,
-      idempotencyKey: "replacement-jev-apply",
-    });
+    await expect(
+      app.execute("runs.retry-failed", {
+        runId,
+        resultIds: [resultId],
+        acknowledgeDuplicateWork: true,
+        idempotencyKey: "replacement-jev-retry",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
     const callsAfterReplacement = counts();
     const targetsAfterReplacement = targetCalls;
     for (const { context, record, judgments } of contexts) {

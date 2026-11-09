@@ -22,7 +22,6 @@ import { ResearchService } from "./research.js";
 import { RunService } from "./runs.js";
 import { JevService } from "./jev.js";
 import { AnswerSources } from "./answer-sources.js";
-import { RetryApplicationService } from "./retry-applications.js";
 
 export interface Application {
   execute<K extends CommandName>(
@@ -88,11 +87,6 @@ export async function createApplication(options: {
   );
   const findings = new BankFindingService(db, catalog, passes);
   const answers = new AnswerSources(db);
-  const retryApplications = new RetryApplicationService(
-    db,
-    passes,
-    evaluations,
-  );
   const usage = new UsageProjection(
     db,
     runtime.normalizeRecordedUsage?.bind(runtime),
@@ -116,8 +110,9 @@ export async function createApplication(options: {
   );
   try {
     await jev.recover();
-    await runs.recover();
+    const recoveredRunIds = await runs.recover();
     await evaluations.recover();
+    runs.completeRecovery(recoveredRunIds);
     passes.recover();
     research.recover();
   } catch (error) {
@@ -297,10 +292,7 @@ export async function createApplication(options: {
         return evaluations.previewDraft(
           value,
           new Map(
-            value.runIds.map((runId) => [
-              runId,
-              passes.originalDeterministicVerdicts(runId),
-            ]),
+            value.runIds.map((runId) => [runId, passes.previewSnapshot(runId)]),
           ),
         );
       }
@@ -343,10 +335,7 @@ export async function createApplication(options: {
           value.runIds,
           value.bankRevisionId,
           new Map(
-            value.runIds.map((runId) => [
-              runId,
-              passes.originalDeterministicVerdicts(runId),
-            ]),
+            value.runIds.map((runId) => [runId, passes.previewSnapshot(runId)]),
           ),
         );
       }
@@ -363,18 +352,16 @@ export async function createApplication(options: {
       case "runs.get": {
         const value = commandSchemas["runs.get"].parse(input);
         return {
-          ...retryApplications.enrich(
-            passes.enrich(runs.view(value.runId, value.cursor)),
-          ),
+          ...passes.enrich(runs.view(value.runId, value.cursor)),
+          ...answers.history(value.runId),
           performance: runPerformance(db, value.runId, usage),
         };
       }
       case "runs.observe": {
         const value = commandSchemas["runs.observe"].parse(input);
         return {
-          ...retryApplications.enrich(
-            passes.enrich(runs.observe(value.runId, value.cursor)),
-          ),
+          ...passes.enrich(runs.observe(value.runId, value.cursor)),
+          ...answers.history(value.runId),
           performance: runPerformance(db, value.runId, usage),
         };
       }
@@ -409,22 +396,14 @@ export async function createApplication(options: {
         return runs.retryFailed(
           commandSchemas["runs.retry-failed"].parse(input),
         );
-      case "runs.apply-retry":
-        return retryApplications.apply(
-          commandSchemas["runs.apply-retry"].parse(input),
-        );
       case "runs.control": {
         const value = commandSchemas["runs.control"].parse(input);
-        const run = db.require("run", value.runId);
-        if (run.researchSessionId) {
-          research.control(run.researchSessionId, value.action);
-          return runs.view(value.runId);
-        }
-        return runs.control(
-          value.runId,
-          value.action,
-          value.acknowledgeDuplicateWork,
-        );
+        return runs.control(value, () => {
+          const owner = runs.controlOwner(value.runId);
+          return owner.kind === "research"
+            ? research.prepareControl(owner.id, value.action)
+            : undefined;
+        });
       }
       case "runs.export-agent":
         return runs.exportAgent(

@@ -33,6 +33,8 @@ describe("evaluator preview presentation", () => {
     expect(html).toContain("Pass");
     expect(html).toContain("Submitted answer");
     expect(html).toContain("49.1");
+    expect(html).toContain("<th>Current score</th>");
+    expect(html).not.toContain("<th>Original</th>");
     expect(html).not.toContain("<details open");
   });
   it("labels inline reference drafts without inventing a published revision", () => {

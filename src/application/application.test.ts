@@ -230,13 +230,13 @@ describe("shared application", () => {
     });
     await app.waitForIdle();
     const observed = await app.execute("runs.observe", { runId: run.run.id });
-    expect(observed.scoreSets[0]?.evaluator.calibration).toEqual({
-      bankRevisionId: bank.id,
-      total: 2,
-      passed: 2,
+    expect(observed.assessmentPasses![0]).not.toHaveProperty("configuration");
+    const assessment = await app.execute("runs.assessment", {
+      runId: run.run.id,
+      passId: observed.assessmentPasses![0]!.id,
     });
-    expect(observed.scoreSets[0]?.evaluator.calibration).not.toHaveProperty(
-      "results",
+    expect(assessment.configuration.evaluator?.calibration).toEqual(
+      published.calibration,
     );
   });
   it("checks calibration against the latest bank and rejects unknown example questions", async () => {
@@ -396,24 +396,27 @@ describe("shared application", () => {
       questions: bank.questions.map((q) => ({ ...q, expected: 43 })),
     });
     const evaluatorId = before.run.manifest.evaluator.id;
-    const frozen = await app.execute("runs.rescore", {
+    const frozen = await app.execute("runs.assess", {
+      source: "deterministic",
+      name: "Saved answer rules",
       runId: launched.run.id,
       evaluatorRevisionId: evaluatorId,
     });
-    expect(frozen.assessments[0]?.deterministic.status).toBe("incorrect");
-    const scores = await app.execute("runs.rescore", {
+    expect(frozen.judgments[0]?.status).toBe("incorrect");
+    const scores = await app.execute("runs.assess", {
+      source: "deterministic",
+      name: "Saved answer rules",
       runId: launched.run.id,
       evaluatorRevisionId: evaluatorId,
       bankRevisionId: corrected.id,
-      publish: true,
     });
-    expect(scores.assessments[0]?.deterministic.status).toBe("correct");
-    expect(scores.referenceBank).toEqual(corrected);
+    expect(scores.judgments[0]?.status).toBe("correct");
+    expect(scores.configuration.referenceBank).toEqual(corrected);
     const after = await app.execute("runs.get", { runId: launched.run.id });
     expect(after.run.manifest).toEqual(before.run.manifest);
     expect(after.attempts).toEqual(before.attempts);
     expect(
-      after.scoreSets.find((s) => s.id === scores.id)?.referenceBank,
+      after.assessmentPasses!.find((s) => s.id === scores.id),
     ).not.toHaveProperty("questions");
     const second = await app.execute("runs.launch", {
       bankRevisionId: bank.id,
@@ -447,12 +450,14 @@ describe("shared application", () => {
       questions: corrected.questions,
     });
     await expect(
-      app.execute("runs.rescore", {
+      app.execute("runs.assess", {
+        source: "deterministic",
+        name: "Saved answer rules",
         runId: launched.run.id,
         evaluatorRevisionId: evaluatorId,
         bankRevisionId: other.id,
       }),
-    ).rejects.toThrow(/different question bank/i);
+    ).rejects.toThrow(/another bank/i);
     const changed = await app.execute("banks.revise", {
       bankId: bank.bankId,
       baseRevisionId: (await app.execute("banks.get", { bankId: bank.bankId }))
@@ -467,7 +472,9 @@ describe("shared application", () => {
       })),
     });
     await expect(
-      app.execute("runs.rescore", {
+      app.execute("runs.assess", {
+        source: "deterministic",
+        name: "Saved answer rules",
         runId: launched.run.id,
         evaluatorRevisionId: evaluatorId,
         bankRevisionId: changed.id,
@@ -922,7 +929,7 @@ describe("shared application", () => {
       "pending",
       "pending",
     ]);
-    expect(view.scoreSets[0]?.assessments).toHaveLength(1);
+    expect(view.assessmentPasses![0]?.coverage.judged).toBe(1);
     const listed = await app.execute("runs.list", {});
     expect(listed.runs.find((item) => item.id === run.run.id)).toMatchObject({
       completed: 1,
@@ -1056,9 +1063,7 @@ describe("shared application", () => {
     expect(inputs).toHaveLength(2);
     expect(inputs[0]).not.toHaveProperty("expected");
     expect(
-      view.scoreSets[0]?.assessments.every(
-        (a) => a.deterministic.status === "correct",
-      ),
+      view.assessmentPasses![0]?.judgments.every((a) => a.status === "correct"),
     ).toBe(true);
     const exported = await app.execute("runs.export-agent", {
       runId: first.run.id,
@@ -1119,9 +1124,7 @@ describe("shared application", () => {
     const before = (await app.execute("runs.get", {
       runId: run.run.id,
     })) as RunView;
-    expect(before.scoreSets[0]?.assessments[0]?.deterministic.status).toBe(
-      "incorrect",
-    );
+    expect(before.assessmentPasses![0]?.judgments[0]?.status).toBe("incorrect");
     const draft = (await app.execute("evaluators.draft", {
       bankId: bank.bankId,
       name: "Tolerance",
@@ -1134,17 +1137,17 @@ describe("shared application", () => {
     const revision = (await app.execute("evaluators.publish", {
       draftId: draft.id,
     })) as EvaluatorRevision;
-    await app.execute("runs.rescore", {
+    await app.execute("runs.assess", {
+      source: "deterministic",
+      name: "Saved answer rules",
       runId: run.run.id,
       evaluatorRevisionId: revision.id,
     });
     const after = (await app.execute("runs.get", {
       runId: run.run.id,
     })) as RunView;
-    expect(after.scoreSets).toHaveLength(2);
-    expect(after.scoreSets[1]?.assessments[0]?.deterministic.status).toBe(
-      "correct",
-    );
+    expect(after.assessmentPasses).toHaveLength(2);
+    expect(after.assessmentPasses![1]?.judgments[0]?.status).toBe("correct");
     expect(after.attempts).toEqual(before.attempts);
     expect(after.run.manifest).toEqual(before.run.manifest);
   });
@@ -1311,9 +1314,7 @@ it("retains safe transient attempts and does not retry a wrong answer", async ()
   const view = await app.execute("runs.get", { runId: run.run.id });
   expect(calls).toBe(2);
   expect(view.attempts.map((a) => a.status)).toEqual(["failed", "completed"]);
-  expect(view.scoreSets[0]?.assessments[0]?.deterministic.status).toBe(
-    "incorrect",
-  );
+  expect(view.assessmentPasses![0]?.judgments[0]?.status).toBe("incorrect");
 });
 it("creates an acknowledged linked retry of failed slots without changing the original", async () => {
   let fail = true;

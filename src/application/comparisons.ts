@@ -24,19 +24,13 @@ export class ComparisonService {
       const target = savedTarget(run.manifest);
       const results = answers.results(runId);
       const scores = evaluatorRevisionId
-        ? this.db
-            .list("scoreSet", { runId })
-            .filter(
-              (item) =>
-                item.published && item.evaluator.id === evaluatorRevisionId,
-            )
-            .at(-1)
+        ? this.passes.latestDeterministic(runId, evaluatorRevisionId)
         : undefined;
       const selectedId = evaluatorRevisionId
         ? undefined
         : (run.selectedAssessmentPassId ?? this.passes.list(runId)[0]?.id);
       const pass = scores
-        ? this.passes.snapshotScores(runId, scores.id)
+        ? scores
         : selectedId
           ? this.passes.get(runId, selectedId)
           : undefined;
@@ -110,7 +104,7 @@ export class ComparisonService {
         bankRevisionId: pass?.basis.bankRevisionId ?? run.manifest.bank.id,
         questionDigest: digest(questionBasis),
         evaluatorRevisionId: pass?.basis.evaluatorRevisionId ?? null,
-        scoreSetId: scores?.id ?? pass?.id ?? null,
+        assessmentPassId: pass?.id ?? null,
         accuracy: pass?.accuracy ?? null,
         graded: pass?.coverage.judged ?? 0,
         unscorable: pass?.coverage.excluded ?? 0,

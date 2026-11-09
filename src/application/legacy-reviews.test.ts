@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { expect, it, vi } from "vitest";
 import { createApplication } from "./application.js";
 import { agentSchema, commandSchemas, type RuntimePort } from "../contracts.js";
@@ -67,11 +68,7 @@ it.each(["normal", "selection-gap"])(
       await app.waitForIdle();
       const runId = launched.run.id;
       const original = await app.execute("runs.get", { runId });
-      const scores = await app.execute("runs.rescore", {
-        runId,
-        evaluatorRevisionId: launched.run.manifest.evaluator.id,
-        publish: false,
-      });
+      const scores = { id: "historical-unpublished-scores" };
       const [first, second] = original.results;
       const reviews = [
         {
@@ -106,10 +103,43 @@ it.each(["normal", "selection-gap"])(
       ];
       await app.close();
       const db = new Database(join(directory, "workspace.sqlite"));
+      const historical = db.insert("scoreSet", {
+        id: scores.id,
+        runId,
+        evaluator: launched.run.manifest.evaluator,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        kind: "rescore",
+        assessments: db.list("assessment", { runId }),
+        published: false,
+      });
       for (const review of reviews) db.insert("review", review);
       db.close();
+      const beforeReader = new DatabaseSync(
+        join(directory, "workspace.sqlite"),
+        { readOnly: true },
+      );
+      const preservedRecords = beforeReader
+        .prepare(
+          "SELECT kind,id,value FROM records WHERE kind IN ('attempt','assessment','scoreSet') ORDER BY kind,id",
+        )
+        .all();
+      beforeReader.close();
       app = await createApplication({ dataDirectory: directory, runtime });
       const restored = await app.execute("runs.get", { runId });
+      const reader = new DatabaseSync(join(directory, "workspace.sqlite"), {
+        readOnly: true,
+      });
+      const restoredScore = reader
+        .prepare("SELECT value FROM records WHERE kind='scoreSet' AND id=?")
+        .get(scores.id)!.value;
+      const restoredRecords = reader
+        .prepare(
+          "SELECT kind,id,value FROM records WHERE kind IN ('attempt','assessment','scoreSet') ORDER BY kind,id",
+        )
+        .all();
+      reader.close();
+      expect(JSON.parse(String(restoredScore))).toEqual(historical);
+      expect(restoredRecords).toEqual(preservedRecords);
       const humans = restored.assessmentPasses!.filter(
         (pass) => pass.source === "human",
       );
@@ -177,7 +207,7 @@ it.each(["normal", "selection-gap"])(
       saved.close();
     } finally {
       await app.close();
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 3 });
     }
   },
 );
@@ -261,6 +291,6 @@ it("preserves an ambiguous applied-answer legacy review without blocking startup
     expect(execute).toHaveBeenCalledTimes(2);
   } finally {
     await app.close();
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 3 });
   }
 });

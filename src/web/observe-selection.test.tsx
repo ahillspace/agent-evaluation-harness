@@ -90,7 +90,6 @@ const baseView = {
   selectedAssessmentPassId: "human",
   progress: { completed: 1, total: 1, failed: 0 },
   allowedActions: [],
-  scoreSets: [],
   jevAssessments: [],
   reviews: [],
   events: [],

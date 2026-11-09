@@ -7,6 +7,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   agentSchema,
   jevProfileSettingsSchema,
+  researchSchema,
   type RuntimePort,
   type JudgeEvidence,
   type Question,
@@ -153,6 +154,166 @@ async function setup(
     counts: () => ({ targetCalls, judgeCalls, llmCalls }),
   };
 }
+
+it.each([
+  { captured: "pending", reviewRequired: false, judged: 0 },
+  { captured: "unknown", reviewRequired: false, judged: 0 },
+  { captured: "completed", reviewRequired: false, judged: 1 },
+  { captured: "completed", reviewRequired: true, judged: 0 },
+] as const)(
+  "keeps research scoring bound to captured Jev state $captured with review=$reviewRequired",
+  async ({ captured, reviewRequired, judged }) => {
+    const { app, bank, agent, runtime, directory, counts } = await setup();
+    const launched = await app.execute("runs.launch", {
+      bankRevisionId: bank.id,
+      agent,
+      jevJudge: { connectionId: "typesafe" },
+    });
+    await app.waitForIdle();
+    const original = await app.execute("runs.get", { runId: launched.run.id });
+    const originalPass = await app.execute("runs.export-assessment", {
+      runId: launched.run.id,
+      passId: `original_jev_${launched.run.id}`,
+    });
+    const record = await app.execute("jev.get", {
+      assessmentId: originalPass.judgments[0]!.jevAssessmentId!,
+    });
+    const detail = await app.execute("runs.attempt", {
+      runId: launched.run.id,
+      attemptId: original.results[0]!.completedAttemptId!,
+    });
+    await app.close();
+
+    // Seed a distinct historical Run whose frozen score precedes judge settlement.
+    const runId = "frozen-research-run",
+      resultId = "frozen-result",
+      attemptId = "frozen-attempt",
+      assessmentId = "frozen-jev",
+      sessionId = "frozen-research";
+    const db = new Database(join(directory, "workspace.sqlite"));
+    db.insert("run", {
+      ...original.run,
+      id: runId,
+      researchSessionId: sessionId,
+    });
+    db.insert("result", {
+      ...original.results[0]!,
+      id: resultId,
+      runId,
+      attemptIds: [attemptId],
+      completedAttemptId: attemptId,
+    });
+    db.insert("attempt", { ...detail.attempt, id: attemptId, runId, resultId });
+    const evidence = { ...record.evidence, runId, resultId, attemptId };
+    const pending = {
+      ...record,
+      id: assessmentId,
+      runId,
+      resultId,
+      attemptId,
+      evidence,
+      evidenceHash: digest(evidence),
+      status: "pending" as const,
+      checks: undefined,
+      response: undefined,
+      reviewRequired: undefined,
+    };
+    db.insert("jevAssessment", pending);
+    const settled = {
+      ...pending,
+      status: "completed" as const,
+      checks: record.checks,
+      response: record.response,
+      reviewRequired,
+    };
+    if (captured === "completed") db.update("jevAssessment", settled);
+    const judgment = originalPass.judgments[0]!;
+    const frozen = measurePass({
+      ...originalPass,
+      id: `original_jev_${runId}`,
+      runId,
+      basis: {
+        ...originalPass.basis,
+        eligibleResultIds: [resultId],
+        excludedResultIds: [],
+      },
+      judgments: [
+        {
+          ...judgment,
+          resultId,
+          attemptId,
+          jevAssessmentId: assessmentId,
+          status: captured === "completed" ? "correct" : "unjudged",
+          jevAssessmentStatus: captured === "unknown" ? undefined : captured,
+        },
+      ],
+    });
+    db.insert("assessmentPass", frozen);
+    if (captured !== "completed") db.update("jevAssessment", settled);
+    const configuration = researchSchema.parse({
+      baseline: {
+        bankRevisionId: bank.id,
+        agent,
+        jevJudge: { connectionId: "typesafe" },
+      },
+      researcher: agent,
+      objective: "Frozen Jev scoring",
+      selectionMetric: "jev",
+      maxCandidates: 1,
+    });
+    db.insert("research", {
+      id: sessionId,
+      name: "Frozen research",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      status: "halted",
+      intent: "halt",
+      configuration,
+      baselineRunId: runId,
+      currentRunId: runId,
+      bestRunId: runId,
+      runIds: [runId],
+      phase: "evaluating",
+      turns: [],
+    });
+    db.close();
+    const summaries: unknown[] = [];
+    runtime.researcher = async (input) => {
+      summaries.push(JSON.parse(input.message).baselineRun);
+      return {
+        conversationId: "fixture-frozen-research",
+        message: "Saved evidence inspected.",
+        disposition: "keep",
+        control: "stop",
+      };
+    };
+    const restarted = await createApplication({
+      dataDirectory: directory,
+      runtime,
+    });
+    cleanups.push(() => restarted.close());
+    await restarted.execute("research.control", {
+      sessionId,
+      action: "resume",
+    });
+    await restarted.waitForIdle();
+    expect(summaries).toMatchObject([
+      {
+        judged,
+        correct: judged,
+        eligible: 1,
+        eligibleOutcome: judged,
+        coverage: judged,
+      },
+    ]);
+    expect(counts()).toEqual({ targetCalls: 1, judgeCalls: 1, llmCalls: 0 });
+    const after = await restarted.execute("runs.export-assessment", {
+      runId,
+      passId: frozen.id,
+    });
+    expect(after).toEqual(frozen);
+  },
+);
 
 it("rejects Jev launch when its saved connection has no bank profile", async () => {
   const { app, bank, agent, counts } = await setup();
@@ -316,7 +477,7 @@ it("freezes independent Jev and LLM judges and publishes saved-evidence previews
   expect(published.request).toEqual(preview.request);
   expect(counts()).toEqual({ targetCalls: 1, judgeCalls: 2, llmCalls: 1 });
   const after = await app.execute("runs.get", { runId: run.run.id });
-  expect(after.scoreSets).toEqual(run.scoreSets);
+  expect(after.assessmentPasses).toEqual(run.assessmentPasses);
   expect(JSON.stringify(after.jevAssessments)).not.toContain('"request"');
   expect(after.jevAssessments).toHaveLength(2);
 });
@@ -506,9 +667,7 @@ it("requests review when confident Jev checks contradict one another", async () 
   expect(view.jevAssessments[0]?.checks?.answer?.choice).toBe("acceptable");
   expect(view.jevAssessments[0]?.checks?.evidence?.choice).toBe("contradicted");
   expect(view.jevAssessments[0]?.reviewRequired).toBe(true);
-  expect(view.scoreSets[0]?.assessments[0]?.deterministic.status).toBe(
-    "correct",
-  );
+  expect(view.assessmentPasses![0]?.judgments[0]?.status).toBe("correct");
 });
 
 it("persists Jev error provenance without converting it into an incorrect deterministic score", async () => {
@@ -531,9 +690,7 @@ it("persists Jev error provenance without converting it into an incorrect determ
   await app.waitForIdle();
   const run = await app.execute("runs.get", { runId: launched.run.id });
   expect(run.jevAssessments[0]?.status).toBe("error");
-  expect(run.scoreSets[0]?.assessments[0]?.deterministic.status).toBe(
-    "correct",
-  );
+  expect(run.assessmentPasses![0]?.judgments[0]?.status).toBe("correct");
   const record = await app.execute("jev.get", {
     assessmentId: run.jevAssessments[0]!.id,
   });

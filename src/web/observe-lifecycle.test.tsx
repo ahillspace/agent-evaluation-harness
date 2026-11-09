@@ -172,7 +172,6 @@ it.each([
           failed: phase === "interrupted" ? 1 : 0,
         },
         allowedActions: [],
-        scoreSets: [],
         jevAssessments: [],
         reviews: [],
         events: [],

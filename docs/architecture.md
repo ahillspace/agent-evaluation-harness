@@ -141,11 +141,17 @@ Original attempts remain historical evidence.
 
 [EvaluationService](../src/application/evaluations.ts) grades saved answers without invoking targets.
 [AssessmentPassService](../src/application/assessment-passes.ts) creates deterministic, LLM, Jev, and attributed human passes.
+It owns every new aggregate score, including automatic scores saved at terminal Run settlement.
+EvaluationService owns grading calculations and recovery of raw per-attempt assessments.
+Existing ScoreSets remain readable as historical passes; new Runs and saved-answer assessments never write ScoreSets.
+Unpublished historical scores remain inspectable and explicitly labeled; explicit-evaluator comparisons exclude them.
+Explicit-evaluator comparisons select the newest completed deterministic pass for that evaluator.
+Research reads the first execution's frozen automatic pass, independently of later assessments and display selection.
 [Judge evidence](../src/application/judge-evidence.ts) verifies physical sources and assembles sealed evidence.
 Judge requests are checkpointed before admission; interrupted requests are explicit rather than automatically replayed.
 Human review derives a pass while retaining untouched judgments.
 Retry validates eligibility and freezes a virtual parent before atomically creating its child.
-Legacy published scores derive answer bindings and missing judgments only from their frozen ScoreSet, even after the Run resumes.
+Historical scores derive answer bindings and missing judgments only from their frozen ScoreSet, even after the Run resumes.
 Run settlement seals original passes transactionally for completed, cancelled, and failed Runs.
 Startup recovery seals missing terminal originals after recovering deterministic grading.
 Observation and assessment detail reads do not materialize records.

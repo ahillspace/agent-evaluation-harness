@@ -298,7 +298,7 @@ it("comparison reports partial logical recovery while retaining historical pass 
     failed: 1,
     accuracy: null,
     graded: 0,
-    scoreSetId: historicalId,
+    assessmentPassId: historicalId,
   });
   expect(
     await app.execute("runs.assessment", {
@@ -306,14 +306,15 @@ it("comparison reports partial logical recovery while retaining historical pass 
       passId: historicalId,
     }),
   ).toEqual(historical);
-  const rescored = await app.execute("runs.rescore", {
+  const rescored = await app.execute("runs.assess", {
+    source: "deterministic",
+    name: "Saved answer rules",
     runId: original.run.id,
     evaluatorRevisionId: before.run.manifest.evaluator.id,
-    publish: true,
   });
   const explicit = await app.execute("runs.compare", {
     runIds: [original.run.id, retry.run.id],
-    evaluatorRevisionId: rescored.evaluator.id,
+    evaluatorRevisionId: rescored.configuration.evaluator!.id,
   });
   expect(explicit.rows[0]).toMatchObject({
     completed: 1,

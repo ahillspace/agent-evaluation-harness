@@ -229,9 +229,7 @@ describe("agent and browser application parity", () => {
     const runId = (launched.body as RunView).run.id;
     await app.application.waitForIdle();
     const finished = (await app.request("runs.get", { runId })).body as RunView;
-    expect(finished.scoreSets[0]?.assessments[0]?.deterministic.status).toBe(
-      "correct",
-    );
+    expect(finished.assessmentPasses![0]?.judgments[0]?.status).toBe("correct");
     expect(app.executions()).toBe(1);
   });
   it("launches once across HTTP and CLI and exports the exact frozen agent", async () => {

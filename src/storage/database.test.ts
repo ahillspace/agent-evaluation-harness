@@ -249,6 +249,7 @@ describe("typed durable records", () => {
   });
   it("projects score and researcher summaries without returning raw evidence", async () => {
     const db = await setup();
+    db.insert("run", run("run1"));
     const payload = "private-evidence-" + "x".repeat(100_000);
     const assessment = {
       resultId: "result1",
@@ -274,19 +275,15 @@ describe("typed durable records", () => {
       runId: "run1",
       evaluator,
       createdAt: bank.createdAt,
-      kind: "original",
+      kind: "rescore",
       published: true,
       assessments: [assessment],
     });
-    const summaries = db.scoreSetSummaries("run1");
+    const summaries = db.legacyScoreSummaryInputs("run1");
     expect(JSON.stringify(summaries)).not.toContain("private-evidence-");
-    expect(
-      summaries[0]?.assessments[0]?.deterministic.explanation,
-    ).toHaveLength(300);
-    expect(summaries[0]?.evaluator).not.toHaveProperty("settings");
-    expect(db.assessmentSummaries("run1")[0]?.judge?.explanation).toHaveLength(
-      300,
-    );
+    expect(summaries[0]?.assessments[0]?.deterministic).toBe("correct");
+    expect(summaries[0]).not.toHaveProperty("evaluator");
+    expect(db.originalAssessmentMetadata("run1")[0]?.judgeVerdict).toBe(true);
     expect(
       db.attemptAssessments("run1", "attempt1")[0]?.assessment.deterministic
         .details,

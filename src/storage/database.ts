@@ -21,8 +21,6 @@ import type {
   ResultRecord,
   RunRecord,
   ScoreSet,
-  ScoreSetSummary,
-  AssessmentSummary,
   ResearchSummary,
   AttemptDetail,
   JevProfileRevision,
@@ -197,11 +195,6 @@ const queryColumns = {
   parentRunId: "parent_run_id",
 } as const;
 
-function assessmentProjection(value: string): string {
-  const base = `json_set(json_remove(${value},'$.deterministic.details','$.judge.custom','$.judge.usage','$.judgeRequest','$.judgeResponse'),'$.deterministic.explanation',substr(json_extract(${value},'$.deterministic.explanation'),1,300))`;
-  const judge = `CASE WHEN json_type(${value},'$.judge.explanation')='text' THEN json_set(${base},'$.judge.explanation',substr(json_extract(${value},'$.judge.explanation'),1,300)) ELSE ${base} END`;
-  return `CASE WHEN json_type(${value},'$.judgeError')='text' THEN json_set(${judge},'$.judgeError',substr(json_extract(${value},'$.judgeError'),1,300)) ELSE ${judge} END`;
-}
 type RecordFilter = Omit<RecordQuery, "limit" | "offset" | "descending">;
 function recordFilter(
   kind: RecordKind,
@@ -714,7 +707,7 @@ export class Database {
   legacyScoreSummaryInputs(runId: string): ScoreSummaryInput[] {
     return this.db
       .prepare(
-        `SELECT json_object('id','scores_' || scores.id,'name',json_extract(scores.value,'$.evaluator.name') || ' (revision ' || json_extract(scores.value,'$.evaluator.number') || ')','createdAt',json_extract(scores.value,'$.createdAt'),'basis',json_patch(${comparisonDisposition("json_extract(scores.value,'$.evaluator.settings')")},json_object('bankRevisionId',COALESCE(json_extract(scores.value,'$.referenceBank.id'),json_extract(run.value,'$.manifest.bank.id')),'evaluatorRevisionId',json_extract(scores.value,'$.evaluator.id'),'referenceHash',${referenceHash("COALESCE(json_extract(scores.value,'$.referenceBank.questions'),json_extract(run.value,'$.manifest.questions'))", "json_extract(run.value,'$.manifest.questions')")})),'assessments',json(COALESCE((SELECT json_group_array(json(${compactAssessment("item.value")})) FROM json_each(scores.value,'$.assessments') item),'[]'))) AS value FROM records scores JOIN records run ON run.kind='run' AND run.id=scores.run_id WHERE scores.kind='scoreSet' AND scores.run_id=? AND json_extract(scores.value,'$.kind')!='original' AND json_extract(scores.value,'$.published')=1 AND NOT EXISTS(SELECT 1 FROM records pass WHERE pass.kind='assessmentPass' AND pass.id='scores_' || scores.id) ORDER BY scores.ordinal`,
+        `SELECT json_object('id','scores_' || scores.id,'name',json_extract(scores.value,'$.evaluator.name') || ' (revision ' || json_extract(scores.value,'$.evaluator.number') || ')' || CASE WHEN json_extract(scores.value,'$.published')=1 THEN '' ELSE ' (unpublished historical score)' END,'createdAt',json_extract(scores.value,'$.createdAt'),'basis',json_patch(${comparisonDisposition("json_extract(scores.value,'$.evaluator.settings')")},json_object('bankRevisionId',COALESCE(json_extract(scores.value,'$.referenceBank.id'),json_extract(run.value,'$.manifest.bank.id')),'evaluatorRevisionId',json_extract(scores.value,'$.evaluator.id'),'referenceHash',${referenceHash("COALESCE(json_extract(scores.value,'$.referenceBank.questions'),json_extract(run.value,'$.manifest.questions'))", "json_extract(run.value,'$.manifest.questions')")})),'assessments',json(COALESCE((SELECT json_group_array(json(${compactAssessment("item.value")})) FROM json_each(scores.value,'$.assessments') item),'[]'))) AS value FROM records scores JOIN records run ON run.kind='run' AND run.id=scores.run_id WHERE scores.kind='scoreSet' AND scores.run_id=? AND json_extract(scores.value,'$.kind')!='original' AND NOT EXISTS(SELECT 1 FROM records pass WHERE pass.kind='assessmentPass' AND pass.id='scores_' || scores.id) ORDER BY scores.ordinal`,
       )
       .all(runId)
       .map((row) => JSON.parse(String(row.value)));
@@ -776,32 +769,6 @@ export class Database {
               usage: JSON.parse(row.usage as string) as AttemptSummary["usage"],
             }
           : {}),
-      }));
-  }
-  assessmentSummaries(runId: string): AssessmentSummary[] {
-    return this.db
-      .prepare(
-        `SELECT ${assessmentProjection("value")} AS summary FROM records WHERE kind='assessment' AND run_id=? ORDER BY ordinal`,
-      )
-      .all(runId)
-      .map((row) => JSON.parse(row.summary as string) as AssessmentSummary);
-  }
-  scoreSetSummaries(runId: string): ScoreSetSummary[] {
-    return this.db
-      .prepare(
-        `SELECT json_remove(value,'$.assessments','$.evaluator.settings','$.evaluator.calibration.results','$.referenceBank.questions') AS metadata,
-      (SELECT json_group_array(json(${assessmentProjection("item.value")})) FROM json_each(records.value,'$.assessments') item) AS assessments
-      FROM records WHERE kind='scoreSet' AND run_id=? ORDER BY ordinal`,
-      )
-      .all(runId)
-      .map((row) => ({
-        ...(JSON.parse(row.metadata as string) as Omit<
-          ScoreSetSummary,
-          "assessments"
-        >),
-        assessments: JSON.parse(
-          row.assessments as string,
-        ) as AssessmentSummary[],
       }));
   }
   attemptAssessments(

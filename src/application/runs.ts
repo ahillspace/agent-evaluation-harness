@@ -290,7 +290,6 @@ export class RunService {
       summary: true,
       limit: 200,
     });
-    const scoreSets = this.evaluation.summaries(runId);
     const parent = run.researchSessionId
       ? this.db.get("research", run.researchSessionId)
       : undefined;
@@ -303,7 +302,6 @@ export class RunService {
       attempts: sourceRuns
         .flatMap((sourceRunId) => this.usage.attempts(sourceRunId))
         .filter((attempt) => physicalAttempts.has(attempt.id)),
-      scoreSets,
       jevAssessments: sourceRuns
         .flatMap((sourceRunId) => this.db.jevSummaries(sourceRunId))
         .filter((assessment) => physicalAttempts.has(assessment.attemptId)),
@@ -425,7 +423,6 @@ export class RunService {
             error: errorMessage(error),
             updatedAt: now(),
           });
-          this.evaluation.sealOriginal(runId);
           this.passes.sealOriginal(runId);
           this.db.append({
             runId,
@@ -525,7 +522,6 @@ export class RunService {
     this.db.transaction(() => {
       this.db.update("run", { ...run, status, updatedAt: now() });
       if (status === "completed" || status === "cancelled") {
-        this.evaluation.sealOriginal(runId);
         this.passes.sealOriginal(runId);
       }
       this.db.append({

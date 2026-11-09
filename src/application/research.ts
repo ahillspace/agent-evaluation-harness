@@ -18,7 +18,7 @@ import {
   isTerminal,
 } from "../domain/lifecycle.js";
 import { Database } from "../storage/database.js";
-import { EvaluationService } from "./evaluations.js";
+import { AssessmentPassService } from "./assessment-passes.js";
 import { RunService } from "./runs.js";
 import { checkResearchBudget } from "./research-budget.js";
 import { validateResearchProposal } from "../domain/research-proposal.js";
@@ -53,7 +53,7 @@ export class ResearchService {
     private readonly db: Database,
     private readonly runtime: RuntimePort,
     private readonly runs: RunService,
-    private readonly evaluations: EvaluationService,
+    private readonly passes: AssessmentPassService,
     private readonly directory: string,
   ) {}
   recover(): void {
@@ -471,23 +471,17 @@ export class ResearchService {
     const results = this.db
       .list("result", { runId })
       .filter((result) => eligibleQuestions.has(result.questionId));
-    const assessments = this.evaluations.original(runId).assessments;
     const metric = session.configuration.selectionMetric ?? "deterministic";
-    const jev =
-      metric === "jev"
-        ? this.db
-            .list("jevAssessment", { runId })
-            .filter((item) => item.kind === "original")
-        : [];
+    const pass = this.passes.original(runId, metric);
     let correct = 0,
       judged = 0;
     for (const result of results) {
-      const assessment = assessments.find(
+      const assessment = pass.judgments.find(
         (item) => item.resultId === result.id,
       );
       let verdict: boolean | undefined;
       if (metric === "deterministic") {
-        const status = assessment?.deterministic.status;
+        const status = assessment?.status;
         verdict =
           status === "correct"
             ? true
@@ -495,13 +489,16 @@ export class ResearchService {
               ? false
               : undefined;
       } else if (metric === "llm")
-        verdict = assessment?.judge?.verdict ?? undefined;
+        verdict =
+          assessment?.status === "correct"
+            ? true
+            : assessment?.status === "incorrect"
+              ? false
+              : undefined;
       else {
-        const saved = jev.find(
-          (item) =>
-            item.resultId === result.id &&
-            item.attemptId === result.completedAttemptId,
-        );
+        const saved = assessment
+          ? this.passes.boundJev(pass, assessment)
+          : undefined;
         const choice = researchJevChoice(saved);
         verdict =
           choice === "acceptable"

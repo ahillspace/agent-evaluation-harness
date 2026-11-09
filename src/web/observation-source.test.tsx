@@ -2,12 +2,16 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { AssessmentPass, RunView } from "../contracts.js";
+import type { AssessmentPassDetail, RunView } from "../contracts.js";
 import { RunQuestions } from "./observation-questions.js";
 import { ReviewDialog } from "./human-review.js";
 
 const { resource } = vi.hoisted(() => ({ resource: vi.fn() }));
-vi.mock("./api.js", () => ({ command: vi.fn(), useResource: resource }));
+vi.mock("./api.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api.js")>()),
+  command: vi.fn(),
+  useResource: resource,
+}));
 vi.mock("./observation-stream.js", () => ({
   useObservation: () => ({ data: { events: [] }, error: null }),
   mergeEvents: (left: unknown[], right: unknown[]) => [...left, ...right],
@@ -65,6 +69,7 @@ const view = {
 const pass = (recovered: boolean) =>
   ({
     id: recovered ? "updated-score" : "original-score",
+    observationRevision: recovered ? "updated-revision" : "original-revision",
     name: recovered ? "Updated deterministic" : "Original deterministic",
     source: "deterministic",
     basis: { bankRevisionId: "bank", evaluatorRevisionId: "eval" },
@@ -88,7 +93,7 @@ const pass = (recovered: boolean) =>
           : {}),
       },
     ],
-  }) as AssessmentPass;
+  }) as AssessmentPassDetail;
 let root: Root;
 let container: HTMLDivElement;
 beforeEach(() => {
@@ -208,4 +213,38 @@ it("permits human review of the applied answer without rewriting the original fa
     document.querySelector<HTMLOptionElement>('option[value="correct"]')
       ?.disabled,
   ).toBe(true);
+});
+it("does not enable verdict overrides for an old no-answer score after its result completes", async () => {
+  const resumed = structuredClone(view);
+  resumed.results[0] = {
+    ...resumed.results[0]!,
+    status: "completed",
+    completedAttemptId: "later-attempt",
+    answerSource: undefined,
+  };
+  resumed.attempts.push({
+    ...resumed.attempts[0]!,
+    id: "later-attempt",
+    status: "completed",
+    hasOutput: true,
+  });
+  await act(async () =>
+    root.render(
+      <ReviewDialog
+        view={resumed}
+        pass={pass(false)}
+        onClose={() => {}}
+        onSaved={() => {}}
+      />,
+    ),
+  );
+  expect(
+    document.querySelector<HTMLOptionElement>('option[value="correct"]')
+      ?.disabled,
+  ).toBe(true);
+  expect(
+    document.querySelector<HTMLOptionElement>('option[value="incorrect"]')
+      ?.disabled,
+  ).toBe(true);
+  expect(document.body.textContent).toContain("No answer recorded.");
 });

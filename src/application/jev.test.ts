@@ -15,6 +15,7 @@ import { createApplication } from "./application.js";
 import { Database } from "../storage/database.js";
 import { digest } from "../domain/identity.js";
 import { JevClassifier } from "../runtime/jev.js";
+import { measurePass } from "./assessment-passes.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -219,7 +220,9 @@ it("keeps confident answer verdicts despite secondary Jev review flags", async (
   const pass = await app.execute("runs.assessment", {
     runId: launched.run.id,
     passId: summary!.id,
+    expectedObservationRevision: summary!.observationRevision,
   });
+  expect(pass.observationRevision).toBe(summary!.observationRevision);
   const statuses = Object.fromEntries(
     pass.judgments.map((judgment) => {
       const question = questions.find(
@@ -536,6 +539,573 @@ it("persists Jev error provenance without converting it into an incorrect determ
   });
   expect(record.response).toEqual({ error: "too long" });
   expect(record.httpStatus).toBe(422);
+  const observed = run.assessmentPasses!.find((pass) => pass.source === "jev")!;
+  const detail = await app.execute("runs.assessment", {
+    runId: run.run.id,
+    passId: observed.id,
+    expectedObservationRevision: observed.observationRevision,
+  });
+  expect(detail.observationRevision).toBe(observed.observationRevision);
+  expect(observed.judgments[0]).not.toHaveProperty("error");
+  expect(detail.judgments[0]).toMatchObject({
+    response: { error: "too long" },
+    error: { httpStatus: 422 },
+  });
+  const assessmentContext = {
+    runId: run.run.id,
+    passId: observed.id,
+    expectedObservationRevision: observed.observationRevision,
+  };
+  expect(
+    await app.execute("jev.get", {
+      assessmentId: record.id,
+      assessmentContext,
+    }),
+  ).toEqual(record);
+  await expect(
+    app.execute("jev.get", {
+      assessmentId: record.id,
+      assessmentContext: {
+        ...assessmentContext,
+        expectedObservationRevision: "stale",
+      },
+    }),
+  ).rejects.toMatchObject({ code: "conflict" });
+  const unrelated = run.assessmentPasses!.find(
+    (pass) => pass.source === "deterministic",
+  )!;
+  await expect(
+    app.execute("jev.get", {
+      assessmentId: record.id,
+      assessmentContext: {
+        ...assessmentContext,
+        passId: unrelated.id,
+        expectedObservationRevision: unrelated.observationRevision,
+      },
+    }),
+  ).rejects.toMatchObject({ code: "incompatible_basis" });
+});
+
+it.each(["original", "retry"])(
+  "inspects copied and fresh adopted-answer Jev evidence on a %s Run after review and replacement",
+  async (owner) => {
+    const { app, bank, agent, runtime, counts } = await setup();
+    const execute = runtime.execute;
+    let fail = true;
+    let targetCalls = 0;
+    runtime.execute = async (input) => {
+      targetCalls++;
+      if (fail) throw new Error("Fixture execution failure");
+      return execute(input);
+    };
+    const launched = await app.execute("runs.launch", {
+      bankRevisionId: bank.id,
+      agent,
+      jevJudge: { connectionId: "typesafe" },
+    });
+    await app.waitForIdle();
+    let runId = launched.run.id;
+    if (owner === "retry") {
+      const nested = await app.execute("runs.retry-failed", {
+        runId,
+        acknowledgeDuplicateWork: true,
+        idempotencyKey: "failed-nested-jev-retry",
+      });
+      await app.waitForIdle();
+      runId = nested.run.id;
+    }
+    const failed = await app.execute("runs.get", { runId });
+    const resultId = failed.results[0]!.id;
+    expect(failed.results[0]!.status).toBe("failed");
+    fail = false;
+    const retry = await app.execute("runs.retry-failed", {
+      runId,
+      acknowledgeDuplicateWork: true,
+      idempotencyKey: "adopted-jev-retry",
+    });
+    await app.waitForIdle();
+    const applied = await app.execute("runs.apply-retry", {
+      runId,
+      retryRunId: retry.run.id,
+      idempotencyKey: "adopted-jev-apply",
+    });
+    const recovered = await app.execute("runs.get", { runId });
+    const copied = recovered.assessmentPasses!.find(
+      (pass) =>
+        applied.assessmentPassIds.includes(pass.id) && pass.source === "jev",
+    )!;
+    const fresh = await app.execute("runs.assess", {
+      runId,
+      name: "Fresh adopted answer",
+      source: "jev",
+    });
+    const human = await app.execute("runs.review-assessment", {
+      runId,
+      parentPassId: fresh.id,
+      name: "Reviewed adopted classification",
+      overrides: [{ resultId, verdict: false, note: "Fixture override" }],
+    });
+    const contexts = [];
+    for (const passId of [copied.id, fresh.id, human.id]) {
+      const view = await app.execute("runs.get", { runId });
+      const observed = view.assessmentPasses!.find(
+        (pass) => pass.id === passId,
+      )!;
+      const context = {
+        runId,
+        passId,
+        expectedObservationRevision: observed.observationRevision,
+      };
+      const judgment = observed.judgments[0]!;
+      const record = await app.execute("jev.get", {
+        assessmentId: judgment.jevAssessmentId!,
+      });
+      expect(record.runId).toBe(passId === copied.id ? retry.run.id : runId);
+      expect(judgment.source?.runId).toBe(retry.run.id);
+      expect(record.request).toBeDefined();
+      expect(record.response).toBeDefined();
+      const detail = await app.execute("runs.assessment", context);
+      expect.soft(detail.judgments[0]).toMatchObject({
+        request: record.request,
+        response: record.response,
+        evidenceHash: record.attemptEvidenceHash,
+      });
+      await expect
+        .soft(
+          app.execute("jev.get", {
+            assessmentId: record.id,
+            assessmentContext: context,
+          }),
+        )
+        .resolves.toEqual(record);
+      contexts.push({ context, record, judgments: detail.judgments });
+    }
+    expect(counts()).toEqual({ targetCalls: 1, judgeCalls: 2, llmCalls: 0 });
+    expect(targetCalls).toBe(owner === "retry" ? 3 : 2);
+
+    const replacement = await app.execute("runs.retry-failed", {
+      runId,
+      resultIds: [resultId],
+      acknowledgeDuplicateWork: true,
+      idempotencyKey: "replacement-jev-retry",
+    });
+    await app.waitForIdle();
+    await app.execute("runs.apply-retry", {
+      runId,
+      retryRunId: replacement.run.id,
+      replaceApplied: true,
+      idempotencyKey: "replacement-jev-apply",
+    });
+    const callsAfterReplacement = counts();
+    const targetsAfterReplacement = targetCalls;
+    for (const { context, record, judgments } of contexts) {
+      expect((await app.execute("runs.assessment", context)).judgments).toEqual(
+        judgments,
+      );
+      await expect(
+        app.execute("jev.get", {
+          assessmentId: record.id,
+          assessmentContext: context,
+        }),
+      ).resolves.toEqual(record);
+    }
+    expect(counts()).toEqual(callsAfterReplacement);
+    expect(targetCalls).toBe(targetsAfterReplacement);
+  },
+);
+
+it("rejects Jev inspection and enrichment with mismatched captured evidence or owners", async () => {
+  const { app, bank, agent, directory, counts } = await setup([
+    { id: "q1", text: "First answer?", expected: 42, tags: [] },
+    { id: "q2", text: "Second answer?", expected: 42, tags: [] },
+  ]);
+  const launched = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+    jevJudge: { connectionId: "typesafe" },
+  });
+  await app.waitForIdle();
+  const runId = launched.run.id;
+  const { observationRevision: _revision, ...seed } = await app.execute(
+    "runs.assessment",
+    { runId, passId: `original_jev_${runId}` },
+  );
+  const first = seed.judgments[0]!;
+  const second = seed.judgments[1]!;
+  const { request: _request, response: _response, ...captured } = first;
+  const originalRecord = await app.execute("jev.get", {
+    assessmentId: first.jevAssessmentId!,
+  });
+  const db = new Database(join(directory, "workspace.sqlite"));
+  try {
+    const wrongRun = db.insert("run", {
+      ...db.require("run", runId),
+      id: "unrelated-run",
+    });
+    const cases = [
+      {
+        name: "attempt",
+        judgment: { ...captured, attemptId: second.attemptId },
+      },
+      { name: "hash", judgment: { ...captured, evidenceHash: "wrong-hash" } },
+      {
+        name: "state",
+        judgment: { ...captured, jevAssessmentStatus: "error" as const },
+      },
+      {
+        name: "physical-run",
+        judgment: {
+          ...captured,
+          source: { runId: wrongRun.id, resultId: first.resultId },
+        },
+      },
+      {
+        name: "physical-result",
+        judgment: { ...captured, source: { runId, resultId: second.resultId } },
+      },
+      {
+        name: "logical-result",
+        judgment: { ...captured, resultId: second.resultId },
+      },
+      { name: "record-run", record: { ...originalRecord, runId: wrongRun.id } },
+      {
+        name: "record-result",
+        record: { ...originalRecord, resultId: second.resultId },
+      },
+    ];
+    for (const testCase of cases) {
+      const record = testCase.record
+        ? db.insert("jevAssessment", {
+            ...testCase.record,
+            id: `wrong-${testCase.name}`,
+          })
+        : originalRecord;
+      const pass = db.insert(
+        "assessmentPass",
+        measurePass({
+          ...seed,
+          id: `mismatch-${testCase.name}`,
+          judgments: [
+            { ...(testCase.judgment ?? captured), jevAssessmentId: record.id },
+          ],
+        }),
+      );
+      const detail = await app.execute("runs.assessment", {
+        runId,
+        passId: pass.id,
+      });
+      expect(detail.judgments[0], testCase.name).not.toHaveProperty("request");
+      expect(detail.judgments[0], testCase.name).not.toHaveProperty("response");
+      await expect(
+        app.execute("jev.get", {
+          assessmentId: record.id,
+          assessmentContext: {
+            runId,
+            passId: pass.id,
+            expectedObservationRevision: detail.observationRevision,
+          },
+        }),
+        testCase.name,
+      ).rejects.toMatchObject({ code: "conflict" });
+    }
+    const detail = await app.execute("runs.assessment", {
+      runId,
+      passId: seed.id,
+    });
+    await expect(
+      app.execute("jev.get", {
+        assessmentId: "not-in-pass",
+        assessmentContext: {
+          runId,
+          passId: seed.id,
+          expectedObservationRevision: detail.observationRevision,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "incompatible_basis" });
+    expect(counts()).toEqual({ targetCalls: 2, judgeCalls: 2, llmCalls: 0 });
+  } finally {
+    db.close();
+  }
+});
+
+it("does not inspect a later Jev completion through a frozen finding snapshot of its pending state", async () => {
+  const { app, bank, agent, runtime } = await setup();
+  const evaluate = runtime.classifier!.evaluate;
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  runtime.classifier!.evaluate = async (input) => {
+    input.onRequest({ marker: "pending-request" });
+    entered();
+    await gate;
+    return evaluate(input);
+  };
+  try {
+    const launched = await app.execute("runs.launch", {
+      bankRevisionId: bank.id,
+      agent,
+      jevJudge: { connectionId: "typesafe" },
+    });
+    await started;
+    const runId = launched.run.id;
+    const running = await app.execute("runs.get", { runId });
+    const original = running.assessmentPasses!.find(
+      (pass) => pass.source === "jev",
+    )!;
+    const finding = await app.execute("banks.report-finding", {
+      bankId: bank.bankId,
+      bankRevisionId: bank.id,
+      questionId: "q1",
+      runId,
+      resultId: running.results[0]!.id,
+      passId: original.id,
+      kind: "reference",
+      title: "Inspect pending evidence",
+    });
+    const frozen = (
+      await app.execute("runs.get", { runId })
+    ).assessmentPasses!.find((pass) => pass.id === finding.passId)!;
+    const assessmentId = running.jevAssessments[0]!.id;
+    const assessmentContext = {
+      runId,
+      passId: frozen.id,
+      expectedObservationRevision: frozen.observationRevision,
+    };
+    const captured = await app.execute("runs.assessment", {
+      runId,
+      passId: frozen.id,
+      expectedObservationRevision: frozen.observationRevision,
+    });
+    expect(captured.judgments[0]).toMatchObject({
+      jevAssessmentStatus: "pending",
+      request: { marker: "pending-request" },
+    });
+    expect(
+      await app.execute("jev.get", { assessmentId, assessmentContext }),
+    ).toHaveProperty("status", "pending");
+    const firstReview = await app.execute("runs.review-assessment", {
+      runId,
+      parentPassId: frozen.id,
+      expectedObservationRevision: frozen.observationRevision,
+      name: "First pending review",
+      overrides: [
+        {
+          resultId: running.results[0]!.id,
+          verdict: true,
+          note: "Human decision while Jev is pending",
+        },
+      ],
+    });
+    const firstRead = await app.execute("runs.assessment", {
+      runId,
+      passId: firstReview.id,
+    });
+    const nestedReview = await app.execute("runs.review-assessment", {
+      runId,
+      parentPassId: firstRead.id,
+      expectedObservationRevision: firstRead.observationRevision,
+      name: "Nested pending review",
+      overrides: [
+        {
+          resultId: running.results[0]!.id,
+          verdict: false,
+          note: "Second human decision",
+        },
+      ],
+    });
+    const nestedRead = await app.execute("runs.assessment", {
+      runId,
+      passId: nestedReview.id,
+    });
+    expect(nestedRead.judgments[0]).toMatchObject({
+      jevAssessmentStatus: "pending",
+      review: { previousStatus: "correct" },
+    });
+    release();
+    await app.waitForIdle();
+    expect(
+      (await app.execute("runs.get", { runId })).assessmentPasses!.find(
+        (pass) => pass.id === frozen.id,
+      ),
+    ).toEqual(frozen);
+    const laterDetail = await app.execute("runs.assessment", {
+      runId,
+      passId: frozen.id,
+      expectedObservationRevision: frozen.observationRevision,
+    });
+    expect(laterDetail.judgments).toEqual(captured.judgments);
+    expect(laterDetail.judgments[0]).not.toHaveProperty("response");
+    await expect(
+      app.execute("jev.get", { assessmentId, assessmentContext }),
+    ).rejects.toMatchObject({ code: "conflict" });
+    expect(
+      (await app.execute("runs.assessment", { runId, passId: nestedRead.id }))
+        .judgments,
+    ).toEqual(nestedRead.judgments);
+    await expect(
+      app.execute("jev.get", {
+        assessmentId,
+        assessmentContext: {
+          runId,
+          passId: nestedRead.id,
+          expectedObservationRevision: nestedRead.observationRevision,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "conflict" });
+    const current = (
+      await app.execute("runs.get", { runId })
+    ).assessmentPasses!.find((pass) => pass.id === original.id)!;
+    expect(
+      await app.execute("jev.get", {
+        assessmentId,
+        assessmentContext: {
+          runId,
+          passId: current.id,
+          expectedObservationRevision: current.observationRevision,
+        },
+      }),
+    ).toMatchObject({
+      status: "completed",
+      checks: { answer: { choice: "acceptable" } },
+    });
+  } finally {
+    release();
+  }
+});
+
+it("normalizes proven legacy computed Jev states without mistaking nested human overrides for classification", async () => {
+  const { app, bank, agent, directory, counts } = await setup();
+  const launched = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+    jevJudge: { connectionId: "typesafe" },
+  });
+  await app.waitForIdle();
+  const runId = launched.run.id;
+  const { observationRevision: _revision, ...seed } = await app.execute(
+    "runs.assessment",
+    { runId, passId: `original_jev_${runId}` },
+  );
+  const { jevAssessmentStatus: _binding, ...legacyJudgment } =
+    seed.judgments[0]!;
+  const computed = measurePass({
+    ...seed,
+    id: "legacy-computed",
+    judgments: [legacyJudgment],
+  });
+  const pending = measurePass({
+    ...seed,
+    id: "legacy-pending",
+    status: "interrupted",
+    judgments: [
+      {
+        ...legacyJudgment,
+        status: "unjudged",
+        request: { marker: "captured-pending-request" },
+        response: undefined,
+      },
+    ],
+  });
+  const first = measurePass({
+    ...pending,
+    id: "legacy-human-one",
+    source: "human",
+    status: "completed",
+    parentPassId: pending.id,
+    judgments: [
+      {
+        ...pending.judgments[0]!,
+        status: "correct",
+        review: {
+          reviewer: "Fixture reviewer",
+          note: "First override",
+          previousStatus: "unjudged",
+          createdAt: seed.createdAt,
+        },
+      },
+    ],
+  });
+  const second = measurePass({
+    ...first,
+    id: "legacy-human-two",
+    parentPassId: first.id,
+    judgments: [
+      {
+        ...first.judgments[0]!,
+        status: "incorrect",
+        review: {
+          reviewer: "Fixture reviewer",
+          note: "Nested override",
+          previousStatus: "correct",
+          createdAt: seed.createdAt,
+        },
+      },
+    ],
+  });
+  const db = new Database(join(directory, "workspace.sqlite"));
+  for (const pass of [computed, pending, first, second])
+    db.insert("assessmentPass", pass);
+  const before = JSON.stringify(
+    [computed, pending, first, second].map((pass) =>
+      db.require("assessmentPass", pass.id),
+    ),
+  );
+  db.close();
+  const view = await app.execute("runs.get", { runId });
+  const observed = view.assessmentPasses!.find(
+    (pass) => pass.id === computed.id,
+  )!;
+  expect(observed.judgments[0]).toHaveProperty(
+    "jevAssessmentStatus",
+    "completed",
+  );
+  expect(
+    await app.execute("jev.get", {
+      assessmentId: legacyJudgment.jevAssessmentId!,
+      assessmentContext: {
+        runId,
+        passId: computed.id,
+        expectedObservationRevision: observed.observationRevision,
+      },
+    }),
+  ).toHaveProperty("status", "completed");
+  for (const id of [pending.id, first.id, second.id]) {
+    const snapshot = view.assessmentPasses!.find((pass) => pass.id === id)!;
+    const detail = await app.execute("runs.assessment", {
+      runId,
+      passId: id,
+      expectedObservationRevision: snapshot.observationRevision,
+    });
+    expect(detail.judgments[0]).toHaveProperty(
+      "request.marker",
+      "captured-pending-request",
+    );
+    expect(detail.judgments[0]).not.toHaveProperty("response");
+    await expect(
+      app.execute("jev.get", {
+        assessmentId: legacyJudgment.jevAssessmentId!,
+        assessmentContext: {
+          runId,
+          passId: id,
+          expectedObservationRevision: snapshot.observationRevision,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "conflict" });
+  }
+  const reader = new Database(join(directory, "workspace.sqlite"));
+  expect(
+    JSON.stringify(
+      [computed, pending, first, second].map((pass) =>
+        reader.require("assessmentPass", pass.id),
+      ),
+    ),
+  ).toBe(before);
+  reader.close();
+  expect(counts()).toEqual({ targetCalls: 1, judgeCalls: 1, llmCalls: 0 });
 });
 
 it("falls back to recorded activity when a provider supplies an empty transcript", async () => {

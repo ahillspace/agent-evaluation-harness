@@ -234,6 +234,12 @@ Pause, Halt, Resume, and Cancel affect engine work; leaving the page does not se
 See [launch and control](architecture.md#launch-observe-and-control) for admission, interruption, and startup recovery behavior.
 
 Choose a named saved score to inspect its judgments and coverage.
+The summary beside **Saved score** shows the selected pass, including its full name, source, and assessment status.
+Questions and Summary use the same observed score while its detailed evidence loads.
+Use **Attempts** to browse an answer recorded after the selected score; that score's missing judgment remains unjudged.
+Pending Jev provenance is live until the assessment settles.
+If a historical pending score cannot inspect the later settled record, choose a current Jev score; its captured request remains available.
+If the score changes during a human review, saving rejects the outdated basis and preserves your edits.
 Accuracy is `correct / judged`, where judged means a completed correct-or-incorrect decision.
 Coverage shows how many eligible questions received those judgments.
 Excluded questions, unanswered questions, errors, and abstentions are reported separately.

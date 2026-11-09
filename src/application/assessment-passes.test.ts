@@ -389,8 +389,8 @@ it("retries only failed LLM judgments and preserves the original pass and refere
       pending: 0,
     });
     expect(
-      view.assessmentPasses?.find((p) => p.id === retried.id)?.configuration,
-    ).toEqual({});
+      view.assessmentPasses?.find((p) => p.id === retried.id),
+    ).not.toHaveProperty("configuration");
     const finding = await app.execute("banks.report-finding", {
       bankId: bank.bankId,
       bankRevisionId: bank.id,

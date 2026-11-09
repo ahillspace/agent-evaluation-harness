@@ -114,7 +114,8 @@ Large evidence payloads stay out of observation and Runs summaries.
 ## Read progress and usage
 
 Runs open on **Questions**, with **Summary**, optional **Research**, and **Configuration** available beside it.
-The shared score strip shows all saved scores and their judgment coverage.
+The saved score selector opens any assessment pass, with one summary showing the selected pass and its judgment coverage.
+The same selection supplies question judgments, human review, and score exports.
 Usage keeps target, researcher, and judge totals separate.
 Reported subtotals remain visible while other calls are pending or have unreported usage.
 **Input** shows uncached tokens, **Output** shows generated tokens, and **Cache** shows reused input tokens.

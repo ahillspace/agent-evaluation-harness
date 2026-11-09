@@ -104,6 +104,7 @@ export async function createApplication(options: {
     evaluations,
     options.dataDirectory,
     jev,
+    passes,
     usage,
   );
   const research = new ResearchService(
@@ -212,10 +213,21 @@ export async function createApplication(options: {
           commandSchemas["runs.assess"].parse(input),
           shutdownController.signal,
         );
-      case "runs.assessment":
+      case "runs.assessment": {
+        const value = commandSchemas[command].parse(input);
+        return passes.read(
+          value.runId,
+          value.passId,
+          value.expectedObservationRevision,
+        );
+      }
       case "runs.export-assessment": {
         const value = commandSchemas[command].parse(input);
-        return passes.get(value.runId, value.passId);
+        return passes.get(
+          value.runId,
+          value.passId,
+          value.expectedObservationRevision,
+        );
       }
       case "runs.select-assessment": {
         const value = commandSchemas[command].parse(input);
@@ -248,11 +260,18 @@ export async function createApplication(options: {
         return jev.publish(
           commandSchemas["jev.publish"].parse(input).assessmentId,
         );
-      case "jev.get":
-        return db.require(
-          "jevAssessment",
-          commandSchemas["jev.get"].parse(input).assessmentId,
-        );
+      case "jev.get": {
+        const value = commandSchemas["jev.get"].parse(input);
+        const context = value.assessmentContext;
+        return context
+          ? passes.readJev(
+              context.runId,
+              context.passId,
+              value.assessmentId,
+              context.expectedObservationRevision,
+            )
+          : db.require("jevAssessment", value.assessmentId);
+      }
       case "workspace.get":
         commandSchemas["workspace.get"].parse(input);
         return workspace();
@@ -347,7 +366,11 @@ export async function createApplication(options: {
       }
       case "runs.attempt": {
         const value = commandSchemas["runs.attempt"].parse(input);
-        return runs.attempt(value.runId, value.attemptId);
+        return runs.attempt(
+          value.runId,
+          value.attemptId,
+          value.expectedEvidenceHash,
+        );
       }
       case "runs.attempt-events": {
         const value = commandSchemas["runs.attempt-events"].parse(input);

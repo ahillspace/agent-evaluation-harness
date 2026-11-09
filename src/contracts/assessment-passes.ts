@@ -22,6 +22,7 @@ export interface PassJudgment {
     costUsd?: number;
   };
   jevAssessmentId?: string;
+  jevAssessmentStatus?: "pending" | "completed" | "error";
   request?: Json;
   response?: Json;
   evidenceHash?: string;
@@ -77,6 +78,16 @@ export interface AssessmentPass {
   accuracy: number | null;
   judgedAccuracy: number | null;
 }
+export type AssessmentPassObservation = Omit<
+  AssessmentPass,
+  "configuration" | "judgments"
+> & {
+  judgments: Omit<PassJudgment, "request" | "response" | "details">[];
+  observationRevision: string;
+};
+export type AssessmentPassDetail = AssessmentPass & {
+  observationRevision: string;
+};
 export type AssessmentPassSummary = Omit<
   AssessmentPass,
   "configuration" | "judgments" | "basis"

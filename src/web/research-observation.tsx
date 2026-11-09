@@ -65,7 +65,7 @@ export function ResearchPanel({
               aria-label="Research candidate run"
               value={selectedRunId}
               onChange={(event) =>
-                navigate(`/observe/${event.target.value}?session=${sessionId}`)
+                navigate(`/runs/${event.target.value}?session=${sessionId}`)
               }
             >
               {session.runIds.map((id, index) => (
@@ -79,7 +79,7 @@ export function ResearchPanel({
           </Field>
           <a
             className="button secondary"
-            href={`#/observe/${session.bestRunId}?session=${sessionId}`}
+            href={`#/runs/${session.bestRunId}?session=${sessionId}`}
           >
             Open retained{" "}
             {session.bestRunId === session.baselineRunId

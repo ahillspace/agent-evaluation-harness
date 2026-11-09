@@ -48,10 +48,10 @@ See [platform support and remaining checks](docs/macos-support.md).
 
 1. Open **Settings** to inspect installed harnesses and configure any required connections.
 2. Open **Question banks** to create or import questions and expected answers.
-3. Open **Run** and choose your agent, bank, question selection, and tools.
+3. Open **Runs**, choose **New run**, and select your agent, bank, questions, and tools.
 4. Keep deterministic grading as the default, or enable independent judges under **Evaluation**.
-5. Start the run and inspect its questions, recorded answers, and scores in **Observe**.
-6. Open **Results** to compare runs, reuse a configuration, or export it.
+5. Start the run and inspect its questions, recorded answers, and scores in its details.
+6. Return to **Runs** to compare runs, reuse a configuration, or export it.
 
 For Tableau questions, select a saved Tableau connection and the tools the agent needs.
 An empty tool selection provides no Tableau tools.

@@ -85,7 +85,7 @@ export function RetryFailures({ view }: { view: RunView }) {
                   idempotencyKey: key.current,
                   acknowledgeDuplicateWork: acknowledge,
                 })
-                  .then((result) => navigate(`/observe/${result.run.id}`))
+                  .then((result) => navigate(`/runs/${result.run.id}`))
                   .catch(setError)
                   .finally(() => setPending(false));
               }}

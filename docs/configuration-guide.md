@@ -61,7 +61,7 @@ Connection discovery does not prove that a gateway accepts every model or invoca
 ### Connect Tableau tools
 
 Create a Tableau connection for the intended server and site, then test it from **Settings**.
-In **Run**, select the connection and allowed actions under **Tools**.
+In **Runs > New run**, select the connection and allowed actions under **Tools**.
 Choose a datasource by its name and project from **Datasource**.
 Open **Find another datasource** to browse pages or search for an exact name.
 The list contains published datasources visible to the saved Tableau account.
@@ -109,7 +109,7 @@ Do not put credentials in `mcpEnv`; use the protected credential field.
 For example, set `mcpEnv` to `{"INCLUDE_DATASOURCE_IDS":"id-1,id-2"}` to bound Tableau MCP tool requests and results to those datasource IDs.
 The PAT authenticates to Tableau, and the MCP datasource filter bounds the resources available through this connection.
 Tableau documents datasource scoping in its [self-hosted deployment guide](https://tableau.github.io/tableau-mcp/docs/enterprise/tableau-server).
-`INCLUDE_TOOLS` is controlled by the tool allowlist in **Run**.
+`INCLUDE_TOOLS` is controlled by the tool allowlist in **Runs > New run**.
 
 Use `mcpFeatures` for feature flags as a map of feature names to booleans.
 The harness overlays these values on the defaults shipped by the selected Tableau MCP package through Tableau MCP's custom feature gate provider interface.
@@ -121,7 +121,7 @@ See Tableau's [feature flag documentation](https://tableau.github.io/tableau-mcp
 For example, set `mcpFeatures` to `{"knowledge-tools":true}` to enable Tableau Knowledge tools in packages that support that flag.
 The site must have Tableau Knowledge enabled, and the feature is available on Tableau+ sites.
 Query and inspect require Viewer or higher; manage requires Creator or higher and can change shared Knowledge context.
-Select only the Knowledge tools the agent should use in **Run**.
+Select only the Knowledge tools the agent should use in **Runs > New run**.
 See Tableau's [Knowledge query](https://tableau.github.io/tableau-mcp/docs/tools/knowledge/query-knowledge-context), [inspect](https://tableau.github.io/tableau-mcp/docs/tools/knowledge/inspect-knowledge-context), and [manage](https://tableau.github.io/tableau-mcp/docs/tools/knowledge/manage-knowledge-context) documentation.
 
 Keep datasource references consistent across the question context, system prompt, and datasource setting.
@@ -181,7 +181,7 @@ Judge requests also contain the submitted answer, instructions, and evidence, so
 
 ## Configure and launch a run
 
-Use the setup sections in **Run**:
+Open **Runs**, choose **New run**, and use these setup sections:
 
 1. Choose **Agent under test**, then select a managed harness or saved external HTTP agent.
 2. Select the model, account or connection, and system prompt for a managed agent.
@@ -205,7 +205,7 @@ If the launch response is lost, **Retry launch** recovers the same Run or resear
 The form stays fixed while that request is unresolved.
 An acknowledged launch clears the saved request.
 If browser storage cannot save the complete pending request, the browser does not send the launch.
-**Reset setup** discards the draft and starts a separate request; an earlier accepted launch remains saved in Results.
+**Reset setup** discards the draft and starts a separate request; an earlier accepted launch remains saved in Runs.
 Unavailable saved dependencies stay visible so you can replace them deliberately.
 
 The form's authentication selection overrides `authSource` in advanced model settings.
@@ -220,7 +220,7 @@ See [external HTTP agents](http-targets.md) for configuration and evidence limit
 
 ## Inspect answers and scores
 
-**Observe** opens the question list.
+Run details open the question list for both live and saved Runs.
 Select a question to inspect its submitted answer, reference, attempts, recorded activity, and judgments.
 Use **Summary** for run-level outcomes and performance.
 Execution failures and judge errors remain distinct from incorrect answers.
@@ -357,7 +357,7 @@ Provider conversation continuity failure stops the session instead of opening an
 
 ## Compare, reuse, and export
 
-Open **Results**, select runs, and choose **Compare**.
+Open **Runs**, select runs, and choose **Compare**.
 Choose each run's saved score deliberately and inspect comparison warnings for different evaluation bases.
 Keep accuracy, coverage, and execution completion visible when choosing a configuration.
 

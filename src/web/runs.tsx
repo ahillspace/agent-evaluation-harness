@@ -22,7 +22,7 @@ import {
   date,
 } from "./ui.js";
 
-export function Results({
+export function Runs({
   workspace,
   refresh,
 }: {
@@ -54,9 +54,14 @@ export function Results({
   return (
     <>
       <PageHeading
-        title="Results"
-        description="Review evidence, compare runs, and reuse configurations."
-      />
+        title="Runs"
+        description="Start evaluations, review evidence, and compare runs."
+      >
+        <a href="#/runs/new" className="button primary">
+          New run
+          <Icon name="plus" />
+        </a>
+      </PageHeading>
       <ErrorNotice error={error ?? page.error} />
       {judgingRunId && (
         <JudgeSavedAnswers
@@ -155,7 +160,7 @@ export function Results({
                     <td>
                       <a
                         className="run-link"
-                        href={`#/observe/${run.id}${run.researchSessionId ? `?session=${run.researchSessionId}` : ""}`}
+                        href={`#/runs/${run.id}${run.researchSessionId ? `?session=${run.researchSessionId}` : ""}`}
                       >
                         {run.name}
                       </a>
@@ -210,7 +215,7 @@ export function Results({
                     <td>
                       <div className="row-actions">
                         <a
-                          href={`#/run?source=${run.id}`}
+                          href={`#/runs/new?source=${run.id}`}
                           title="Reuse frozen configuration"
                         >
                           Reuse
@@ -295,15 +300,7 @@ export function Results({
           </div>
         </section>
       ) : (
-        <Empty
-          title="Your evaluation evidence starts here"
-          action={
-            <a href="#/run" className="button primary">
-              Set up a run
-              <Icon name="arrow" />
-            </a>
-          }
-        >
+        <Empty title="Your evaluation evidence starts here">
           Saved runs include their frozen configuration, activity, answers, and
           assessments. Every saved run supports agent JSON export.
         </Empty>
@@ -328,7 +325,7 @@ export function Results({
                 <div className="actions">
                   <a
                     className="button secondary"
-                    href={`#/run?blueprint=${blueprint.id}`}
+                    href={`#/runs/new?blueprint=${blueprint.id}`}
                   >
                     Use blueprint
                   </a>
@@ -437,7 +434,7 @@ function Comparison({ value }: { value: RunComparison }) {
             {value.rows.map((row) => (
               <tr key={row.runId}>
                 <td>
-                  <a href={`#/observe/${row.runId}`}>{row.name}</a>
+                  <a href={`#/runs/${row.runId}`}>{row.name}</a>
                   <small>{row.status}</small>
                 </td>
                 <td>

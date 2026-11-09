@@ -124,7 +124,7 @@ function Finding({
           {finding.runId && (
             <a
               className="button secondary"
-              href={`#/observe/${finding.runId}${sourceQuery.size ? `?${sourceQuery.toString()}` : ""}`}
+              href={`#/runs/${finding.runId}${sourceQuery.size ? `?${sourceQuery.toString()}` : ""}`}
             >
               View source answer
             </a>

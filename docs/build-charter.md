@@ -7,8 +7,8 @@ The engine treats connections as provider bindings and contains no Tableau-speci
 ## Product workflow
 
 Question banks holds questions, expected answers, and versioned evaluators.
-Run contains Setup and Observe.
-Results compares saved executions, supports review and rescoring, and exports tested agent configurations.
+Runs contains the execution library, new-run setup, and live or saved Run details.
+The same workspace compares saved executions, supports review and rescoring, and exports tested agent configurations.
 Settings manages external agents, connections, and local runtime discovery.
 A Run evaluates one frozen target configuration against selected questions for one or more complete repetitions.
 A blueprint saves reusable launch settings.

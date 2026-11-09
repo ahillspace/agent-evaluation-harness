@@ -36,7 +36,7 @@ it("keeps findings reviewable without showing every resolution form upfront", ()
   expect(html).toContain("Review finding");
   expect(html).toContain("Edit question rules");
   expect(html).toContain("View source answer");
-  expect(html).toContain("#/observe/run-1?result=result-1");
+  expect(html).toContain("#/runs/run-1?result=result-1");
   expect(html).not.toContain("<details open");
   expect(html).toContain("About Findings");
 });

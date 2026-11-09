@@ -79,7 +79,7 @@ it("applies completed rerun answers without launching or judging again", async (
   );
   expect(command).toHaveBeenCalledTimes(1);
   expect(refresh).toHaveBeenCalledOnce();
-  expect(navigate).toHaveBeenCalledWith("/observe/original");
+  expect(navigate).toHaveBeenCalledWith("/runs/original");
 });
 it("does not navigate or refresh an abandoned page after applying finishes", async () => {
   let finish!: (value: unknown) => void;

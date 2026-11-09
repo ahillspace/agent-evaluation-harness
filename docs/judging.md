@@ -109,7 +109,7 @@ Comparisons use the selected passes and disclose differences in their effective 
 A deliberate pass read or export contains frozen references and available request, response, error, usage, and evidence-hash records.
 Jev records include the provider request and response; LLM records include the semantic request passed to its runtime and the returned verdict.
 Earlier records can lack request data that was not recorded at execution time.
-Large evidence payloads stay out of observation and Results summaries.
+Large evidence payloads stay out of observation and Runs summaries.
 
 ## Read progress and usage
 

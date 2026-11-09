@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { evaluatorSettingsSchema, type WorkspaceView } from "../contracts.js";
 import { Banks } from "./banks.js";
-import { Results } from "./results.js";
+import { Runs } from "./runs.js";
 import { BankEditor } from "./bank-editor.js";
 
 const { resource } = vi.hoisted(() => ({ resource: vi.fn() }));
@@ -62,10 +62,12 @@ describe("compact evaluation libraries", () => {
       };
     });
     const html = renderToStaticMarkup(
-      <Results workspace={workspace} refresh={() => {}} />,
+      <Runs workspace={workspace} refresh={() => {}} />,
     );
-    expect(html).toContain('href="#/run?source=r1"');
-    expect(html).not.toContain('href="#/run"');
+    expect(html).toContain('href="#/runs/new?source=r1"');
+    expect(html).toContain('href="#/runs/new"');
+    expect(html).toContain("New run");
+    expect(html).toContain('href="#/runs/r1"');
     expect(html).toContain('<details class="result-actions-menu">');
     expect(html).toContain('aria-label="More actions for Baseline"');
     for (const action of [

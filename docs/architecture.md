@@ -80,6 +80,16 @@ Retry applications create bindings and derived assessments without editing physi
 
 ## Operation traces
 
+### Navigate the workspace
+
+The [App](../src/web/app.tsx) selects Question banks, Runs, or Settings from the browser hash.
+Runs uses `#/runs` for the library, `#/runs/new` for setup, and `#/runs/<id>` for live or saved details.
+The existing `#/results`, `#/run`, and `#/observe/<id>` routes remain aliases with their query selections intact.
+Setup identity uses the workspace, source Run, and blueprint rather than the route spelling or query order.
+Navigation and reload read saved state without launching work.
+The [Runs library](../src/web/runs.tsx) owns comparison, blueprints, configuration reuse, and export entry points.
+[Observe](../src/web/observe.tsx) remains the shared live and saved Run view.
+
 ### Publish a question bank
 
 The [bank workspace](../src/web/bank-workspace.tsx) owns a draft with captured revision identifiers.

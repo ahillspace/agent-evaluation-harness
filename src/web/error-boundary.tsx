@@ -19,13 +19,13 @@ export function FatalError({ message }: { message: string }) {
       </button>
       <a
         className="button secondary"
-        href="#/results"
+        href="#/runs"
         onClick={() => {
-          window.location.hash = "/results";
+          window.location.hash = "/runs";
           window.location.reload();
         }}
       >
-        Open saved results
+        Open runs
       </a>
     </main>
   );

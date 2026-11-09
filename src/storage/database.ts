@@ -694,11 +694,11 @@ export class Database {
         SELECT json_extract(item.value,'$.resultId') AS result_id,json_extract(item.value,'$.source') AS source,
           ROW_NUMBER() OVER (PARTITION BY json_extract(item.value,'$.resultId') ORDER BY app.ordinal DESC,CAST(item.key AS INTEGER) DESC) AS rank
         FROM records app,json_each(app.value,'$.bindings') item WHERE app.kind='retryApplication' AND app.run_id=?1
-      ), selected AS (
+      ), selected AS MATERIALIZED (
         SELECT r.value AS result,r.ordinal,
           CASE WHEN ?2 THEN CASE WHEN EXISTS(SELECT 1 FROM original)
             THEN (SELECT json_extract(item.value,'$.attemptId') FROM original,json_each(original.value,'$.assessments') item WHERE json_extract(item.value,'$.resultId')=r.id LIMIT 1)
-            ELSE (SELECT a.id FROM json_each(r.value,'$.attemptIds') item JOIN records a ON a.kind='attempt' AND a.id=item.value WHERE a.status='completed' AND COALESCE(json_extract(a.value,'$.executionId'),?1)=?1 ORDER BY CAST(item.key AS INTEGER) DESC LIMIT 1) END
+            ELSE (SELECT a.id FROM json_each(r.value,'$.attemptIds') item CROSS JOIN records a ON a.kind='attempt' AND a.id=item.value WHERE a.status='completed' AND COALESCE(json_extract(a.value,'$.executionId'),?1)=?1 ORDER BY CAST(item.key AS INTEGER) DESC LIMIT 1) END
             ELSE COALESCE(json_extract(applied.source,'$.attemptId'),json_extract(r.value,'$.completedAttemptId')) END AS attempt_id,
           CASE WHEN NOT ?2 THEN applied.source END AS applied_source
         FROM records r LEFT JOIN applied ON applied.result_id=r.id AND applied.rank=1 WHERE r.kind='result' AND r.run_id=?1

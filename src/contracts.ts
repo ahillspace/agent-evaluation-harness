@@ -1,11 +1,15 @@
 import type {
   AssessmentPass,
   AssessmentPassSummary,
+  AssessmentPassObservation,
+  AssessmentPassDetail,
   RunPerformance,
   BankFinding,
 } from "./contracts/assessment-passes.js";
 export type {
   AssessmentPass,
+  AssessmentPassObservation,
+  AssessmentPassDetail,
   AssessmentPassSummary,
   RunPerformance,
   BankFinding,
@@ -1266,7 +1270,7 @@ export interface RunView {
       name: string;
     }
   >;
-  assessmentPasses?: AssessmentPass[];
+  assessmentPasses?: AssessmentPassObservation[];
   selectedAssessmentPassId?: string;
   performance?: RunPerformance;
   retryEligibility?: {
@@ -1364,7 +1368,19 @@ export const commandSchemas = {
     })
     .strict(),
   "jev.publish": z.object({ assessmentId: identifier }).strict(),
-  "jev.get": z.object({ assessmentId: identifier }).strict(),
+  "jev.get": z
+    .object({
+      assessmentId: identifier,
+      assessmentContext: z
+        .object({
+          runId: identifier,
+          passId: identifier,
+          expectedObservationRevision: identifier,
+        })
+        .strict()
+        .optional(),
+    })
+    .strict(),
   "workspace.get": z.object({}).strict(),
   "runtime.discover": z.object({}).strict(),
   "banks.create": z
@@ -1484,7 +1500,11 @@ export const commandSchemas = {
     })
     .strict(),
   "runs.attempt": z
-    .object({ runId: identifier, attemptId: identifier })
+    .object({
+      runId: identifier,
+      attemptId: identifier,
+      expectedEvidenceHash: identifier.optional(),
+    })
     .strict(),
   "runs.attempt-events": z
     .object({
@@ -1557,21 +1577,35 @@ export const commandSchemas = {
     })
     .strict(),
   "runs.assessment": z
-    .object({ runId: identifier, passId: identifier })
+    .object({
+      runId: identifier,
+      passId: identifier,
+      expectedObservationRevision: identifier.optional(),
+    })
     .strict(),
   "runs.export-assessment": z
-    .object({ runId: identifier, passId: identifier })
+    .object({
+      runId: identifier,
+      passId: identifier,
+      expectedObservationRevision: identifier.optional(),
+    })
     .strict(),
   "runs.select-assessment": z
     .object({ runId: identifier, passId: identifier })
     .strict(),
   "runs.retry-assessment": z
-    .object({ runId: identifier, passId: identifier, name: name.optional() })
+    .object({
+      runId: identifier,
+      passId: identifier,
+      name: name.optional(),
+      expectedObservationRevision: identifier.optional(),
+    })
     .strict(),
   "runs.review-assessment": z
     .object({
       runId: identifier,
       parentPassId: identifier,
+      expectedObservationRevision: identifier.optional(),
       name,
       reviewer: name.default("Local reviewer"),
       overrides: z
@@ -1766,7 +1800,7 @@ export interface RunComparison {
 }
 export interface CommandResultMap {
   "runs.assess": AssessmentPass;
-  "runs.assessment": AssessmentPass;
+  "runs.assessment": AssessmentPassDetail;
   "runs.export-assessment": AssessmentPass;
   "runs.select-assessment": { selectedAssessmentPassId: string };
   "runs.retry-assessment": AssessmentPass;

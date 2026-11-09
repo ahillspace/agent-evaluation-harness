@@ -103,39 +103,3 @@ export function AssessmentScore({
     </div>
   );
 }
-
-export function AssessmentScores({
-  passes,
-  selectedId,
-}: {
-  passes: AssessmentPassSummary[];
-  selectedId?: string;
-}) {
-  if (!passes.length) return <p className="subtle">Awaiting results</p>;
-  return (
-    <section
-      className="assessment-scores"
-      aria-label="All assessment scores"
-      tabIndex={0}
-    >
-      {passes.map((pass) => (
-        <article
-          key={pass.id}
-          className={`assessment-score-card${pass.id === selectedId ? " selected" : ""}`}
-          aria-label={pass.name}
-        >
-          <h2 title={pass.name}>
-            {pass.name === "Original deterministic"
-              ? "Deterministic"
-              : pass.name === "Original LLM judge"
-                ? "LLM judge"
-                : pass.name === "Original Jev"
-                  ? "Jev"
-                  : pass.name}
-          </h2>
-          <AssessmentScore pass={pass} />
-        </article>
-      ))}
-    </section>
-  );
-}

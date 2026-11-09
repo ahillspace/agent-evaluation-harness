@@ -42,6 +42,7 @@ import { RunRetries } from "./run-retries.js";
 import { TargetInvocations } from "./target-invocations.js";
 import { validateTargetEvidence } from "./evidence-requirements.js";
 import { AnswerSources } from "./answer-sources.js";
+import { AssessmentPassService } from "./assessment-passes.js";
 
 export class RunService {
   private readonly jobs = new Map<string, Promise<void>>();
@@ -61,6 +62,7 @@ export class RunService {
     private readonly evaluation: EvaluationService,
     private readonly directory: string,
     private readonly jev: JevService,
+    private readonly passes: AssessmentPassService,
     private readonly usage = new UsageProjection(
       db,
       runtime.normalizeRecordedUsage?.bind(runtime),
@@ -328,9 +330,24 @@ export class RunService {
     const { manifest: _manifest, ...run } = view.run;
     return { ...view, run };
   }
-  attempt(runId: string, attemptId: string): AttemptDetail {
+  attempt(
+    runId: string,
+    attemptId: string,
+    expectedEvidenceHash?: string,
+  ): AttemptDetail {
     this.db.require("run", runId);
     const { attempt } = new AnswerSources(this.db).authorize(runId, attemptId);
+    if (
+      expectedEvidenceHash !== undefined &&
+      (attempt.status !== "completed" ||
+        attempt.evidenceHash !== expectedEvidenceHash ||
+        !attempt.output ||
+        digest(attempt.output) !== expectedEvidenceHash)
+    )
+      throw new AppError(
+        "conflict",
+        "This attempt does not match the selected sealed answer.",
+      );
     const assessments = this.db.attemptAssessments(attempt.runId, attemptId);
     if (
       !assessments.some(
@@ -400,17 +417,21 @@ export class RunService {
     if (this.jobs.has(runId) || this.closing) return;
     const job = this.drive(runId)
       .catch((error: unknown) => {
-        const run = this.db.require("run", runId);
-        this.db.update("run", {
-          ...run,
-          status: "failed",
-          error: errorMessage(error),
-          updatedAt: now(),
-        });
-        this.db.append({
-          runId,
-          type: "run.failed",
-          message: errorMessage(error),
+        this.db.transaction(() => {
+          const run = this.db.require("run", runId);
+          this.db.update("run", {
+            ...run,
+            status: "failed",
+            error: errorMessage(error),
+            updatedAt: now(),
+          });
+          this.evaluation.sealOriginal(runId);
+          this.passes.sealOriginal(runId);
+          this.db.append({
+            runId,
+            type: "run.failed",
+            message: errorMessage(error),
+          });
         });
       })
       .finally(() => {
@@ -501,10 +522,18 @@ export class RunService {
             : unfinished
               ? "halted"
               : "completed";
-    this.db.update("run", { ...run, status, updatedAt: now() });
-    if (status === "completed" || status === "cancelled")
-      this.evaluation.sealOriginal(runId);
-    this.db.append({ runId, type: `run.${status}`, message: `Run ${status}.` });
+    this.db.transaction(() => {
+      this.db.update("run", { ...run, status, updatedAt: now() });
+      if (status === "completed" || status === "cancelled") {
+        this.evaluation.sealOriginal(runId);
+        this.passes.sealOriginal(runId);
+      }
+      this.db.append({
+        runId,
+        type: `run.${status}`,
+        message: `Run ${status}.`,
+      });
+    });
   }
   private async acquireExecution(
     runId: string,

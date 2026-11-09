@@ -21,6 +21,7 @@ vi.mock("./setup.js", () => ({
         <button onClick={() => setEdits(edits + 1)}>
           Draft edits: {edits}
         </button>
+        <button onClick={props.refresh as () => void}>Refresh workspace</button>
       </>
     );
   },
@@ -122,6 +123,41 @@ it("retains setup identity across legacy and canonical aliases, including reorde
   await open("/runs/new?source=another");
   expect(container.textContent).toContain("Draft edits: 0");
   expect(request).toHaveBeenCalledTimes(1);
+});
+it("keeps the current workspace and setup edits mounted while a refresh is pending or fails", async () => {
+  await open("/runs/new", true);
+  await act(async () => container.querySelector("button")!.click());
+  const setup = container.querySelector('[aria-label="Run setup"]');
+  let finish!: (response: Response) => void;
+  request.mockReturnValueOnce(
+    new Promise<Response>((resolve) => {
+      finish = resolve;
+    }),
+  );
+  const refresh = () =>
+    Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "Refresh workspace")!
+      .click();
+  await act(async () => refresh());
+  expect(container.querySelector('[aria-label="Run setup"]')).toBe(setup);
+  expect(container.textContent).toContain("Draft edits: 1");
+  expect(container.textContent).not.toContain("Opening your workspace...");
+  await act(async () =>
+    finish(
+      Response.json(
+        { error: { message: "Workspace refresh failed." } },
+        { status: 500 },
+      ),
+    ),
+  );
+  expect(container.textContent).toContain("Workspace refresh failed.");
+  expect(container.querySelector('[aria-label="Run setup"]')).toBe(setup);
+  expect(container.textContent).toContain("Draft edits: 1");
+  request.mockResolvedValueOnce(Response.json(workspace));
+  await act(async () => refresh());
+  expect(container.querySelector('[aria-label="Run setup"]')).toBe(setup);
+  expect(container.textContent).toContain("Draft edits: 1");
+  expect(container.textContent).not.toContain("Workspace refresh failed.");
 });
 it("follows navigation and history events without submitting a launch", async () => {
   await open("/runs/new", true);

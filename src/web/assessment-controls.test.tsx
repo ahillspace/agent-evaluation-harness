@@ -1,11 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AssessmentPassSummary } from "../contracts/assessment-passes.js";
-import {
-  AssessmentScore,
-  AssessmentSelector,
-  AssessmentScores,
-} from "./assessment-controls.js";
+import { AssessmentScore, AssessmentSelector } from "./assessment-controls.js";
 import { RunPerformanceSummary } from "./run-performance.js";
 
 vi.mock("./api.js", () => ({ command: vi.fn() }));
@@ -54,30 +50,6 @@ it("reads judged accuracy from an already running server with older outcome sema
   );
   expect(html).toContain("66.7%");
   expect(html).not.toContain("40.0%");
-});
-
-it("shows every named assessment with no invented zero before judgments", () => {
-  const html = renderToStaticMarkup(
-    <AssessmentScores
-      passes={[
-        pass,
-        {
-          ...pass,
-          id: "jev",
-          name: "Jev review",
-          source: "jev",
-          accuracy: null,
-          judgedAccuracy: null,
-          coverage: { ...pass.coverage, judged: 0, correct: 0, incorrect: 0 },
-        },
-      ]}
-      selectedId={pass.id}
-    />,
-  );
-  expect(html).toContain("Reviewed answers");
-  expect(html).toContain("Jev review");
-  expect(html).toContain("Awaiting results");
-  expect(html).not.toContain("0.0%");
 });
 
 it("offers named saved scores without adding score columns", () => {

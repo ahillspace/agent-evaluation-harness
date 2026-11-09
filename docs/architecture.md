@@ -123,6 +123,12 @@ Unknown external completion requires duplicate-work acknowledgment before potent
 Unconfirmed cleanup blocks unsafe admission.
 
 [Observe](../src/web/observe.tsx) reads summaries and merges cursor-based events.
+Current observations own the selected score, coverage, question verdicts, and answer identities.
+Each observed pass includes an `observationRevision` derived from its compact projection with the canonical digest.
+Detail requests include that revision and supply matching frozen configuration, corrected references, comparison bodies, and judge evidence.
+Pending, stale, or failed detail reads cannot replace current observation facts.
+Observed attempt metadata owns execution status; settled answer bodies load against their sealed evidence hash.
+Historical scores keep missing answer bindings empty, while Attempts exposes later physical answers as explicit history browsing.
 The engine owns control eligibility.
 See [configuration guidance](configuration-guide.md) for user recovery and [runtime](runtime.md) for cleanup limits.
 
@@ -138,6 +144,21 @@ Original attempts remain historical evidence.
 [Judge evidence](../src/application/judge-evidence.ts) verifies physical sources and assembles sealed evidence.
 Judge requests are checkpointed before admission; interrupted requests are explicit rather than automatically replayed.
 Human review derives a pass while retaining untouched judgments.
+Retry validates eligibility and freezes a virtual parent before atomically creating its child.
+Legacy published scores derive answer bindings and missing judgments only from their frozen ScoreSet, even after the Run resumes.
+Run settlement seals original passes transactionally for completed, cancelled, and failed Runs.
+Startup recovery seals missing terminal originals after recovering deterministic grading.
+Observation and assessment detail reads do not materialize records.
+Conditional detail, review, export, and retry requests reject a changed observation revision before writing records or invoking providers.
+Revision checks use the compact projection before Jev detail enrichment; revisions never enter stored passes or evidence artifacts.
+Omitting `expectedObservationRevision` explicitly requests the latest snapshot through CLI or HTTP.
+The UI supplies the displayed revision for these operations, retains an open review's original basis and edits, and keeps each export's identity.
+Jev inspection checks the captured pass revision, authorizes both logical Run/result owners, and verifies the exact physical attempt and evidence hash before returning recorded provenance.
+New Jev judgments capture their assessment's pending, completed, or error state; the same central binding check guards inspection and detail enrichment.
+Pending diagnostics remain explicitly live until settlement, while immutable pending snapshots retain their captured request data.
+Legacy computed Jev verdicts can prove settlement through machine states; human overrides and ambiguous missing bindings cannot.
+Ambiguous historical bindings preserve captured payloads and require a current score for later record inspection.
+Authoring previews inspect their supplied full record directly.
 [Legacy review migration](../src/application/legacy-reviews.ts) records unresolved provenance as unjudged.
 
 Summary and detail share assessment verdict and coverage rules.

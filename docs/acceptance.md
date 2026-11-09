@@ -111,7 +111,7 @@ Clearly distinguish implementation coverage from checks blocked by local authent
 - Saved-answer assessment and retry never rerun a target; retry carries successful judgments forward.
 - Failed and oversized judge requests remain unjudged errors with inspectable request and response evidence.
 - Human review preserves untouched judgments, records overrides, and supports notes on failed executions.
-- Runs remembers each Run's selected pass and shows correct / judged accuracy with separate coverage.
+- Runs remembers each Run's selected pass and shows one matching score summary, question judgments, and correct / judged accuracy with separate coverage.
 - Research selection retains a fixed eligible objective and coverage guard.
 - Unknown target, researcher, and judge usage appears as unknown instead of zero.
 - Question findings link saved evidence and require an explicit decision before publishing corrected references or exclusions.

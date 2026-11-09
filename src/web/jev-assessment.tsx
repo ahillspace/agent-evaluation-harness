@@ -2,8 +2,9 @@ import { useState } from "react";
 import type {
   JevAssessmentRecord,
   JevAssessmentSummary,
+  CommandInput,
 } from "../contracts.js";
-import { command } from "./api.js";
+import { CommandError, useResource } from "./api.js";
 import { ErrorNotice, JsonView, Modal, date } from "./ui.js";
 
 const labels = {
@@ -22,12 +23,27 @@ export function jevErrorLabel(code?: string) {
 export function JevAssessment({
   assessment,
   inspect = false,
+  assessmentContext,
 }: {
   assessment: JevAssessmentSummary | JevAssessmentRecord;
   inspect?: boolean;
+  assessmentContext?: CommandInput<"jev.get">["assessmentContext"];
 }) {
-  const [detail, setDetail] = useState<JevAssessmentRecord | null>(null);
-  const [error, setError] = useState<unknown>(null);
+  const input = { assessmentId: assessment.id, assessmentContext };
+  const inspectionKey = JSON.stringify(input);
+  const [openedKey, setOpenedKey] = useState<string | null>(null);
+  const open = inspect && openedKey === inspectionKey;
+  const fullRecord = "configuration" in assessment ? assessment : null;
+  const resource = useResource(
+    "jev.get",
+    input,
+    undefined,
+    open && !fullRecord && !!assessmentContext,
+  );
+  const detail = fullRecord ?? resource.data;
+  const conflict =
+    resource.error instanceof CommandError &&
+    resource.error.code === "conflict";
   const fallbackApplied =
     "configuration" in assessment
       ? Boolean(assessment.fallback)
@@ -109,49 +125,92 @@ export function JevAssessment({
       {inspect && (
         <button
           className="text-button"
-          onClick={() => {
-            void command("jev.get", { assessmentId: assessment.id })
-              .then(setDetail)
-              .catch(setError);
-          }}
+          disabled={!fullRecord && !assessmentContext}
+          onClick={() => setOpenedKey(inspectionKey)}
         >
           Inspect recorded request and provenance
         </button>
       )}
-      <ErrorNotice error={error} />
-      {detail && (
+      {open && (
         <Modal
           title="Jev assessment provenance"
-          onClose={() => setDetail(null)}
+          onClose={() => setOpenedKey(null)}
         >
-          <p>
-            Profile {detail.configuration.profile.name} · revision{" "}
-            {detail.configuration.profile.number}
-          </p>
-          <p className="subtle">
-            Evidence hash: <code>{detail.evidenceHash}</code>
-          </p>
-          <details className="disclosure">
-            <summary>Exact judge request and response</summary>
-            <JsonView
-              value={{
-                request: detail.request,
-                response: detail.response,
-                attempts: detail.attempts,
-              }}
-            />
-          </details>
-          <details className="disclosure">
-            <summary>Full recorded evidence and criteria</summary>
-            <JsonView
-              value={{ evidence: detail.evidence, criteria: detail.criteria }}
-            />
-          </details>
-          {detail.fallback && (
-            <details className="disclosure">
-              <summary>Original size error and fallback criteria</summary>
-              <JsonView value={detail.fallback} />
-            </details>
+          {assessment.status === "pending" && (
+            <p className="subtle">
+              Pending provenance is live until this assessment settles.
+            </p>
+          )}
+          <ErrorNotice error={resource.error} />
+          {!detail && (
+            <p className="subtle">
+              {resource.error
+                ? "The selected assessment's provenance could not be loaded."
+                : "Loading recorded provenance..."}
+            </p>
+          )}
+          {resource.error && !conflict && (
+            <button className="button secondary" onClick={resource.refresh}>
+              Retry loading
+            </button>
+          )}
+          {detail && (
+            <>
+              <p>
+                Profile {detail.configuration.profile.name} · revision{" "}
+                {detail.configuration.profile.number}
+              </p>
+              <p className="subtle">
+                Evidence hash: <code>{detail.evidenceHash}</code>
+              </p>
+              <details className="disclosure">
+                <summary>Exact judge request and response</summary>
+                <JsonView
+                  value={{
+                    assessmentId: detail.id,
+                    runId: detail.runId,
+                    resultId: detail.resultId,
+                    attemptId: detail.attemptId,
+                    kind: detail.kind,
+                    status: detail.status,
+                    published: detail.published,
+                    createdAt: detail.createdAt,
+                    finishedAt: detail.finishedAt,
+                    checks: detail.checks,
+                    reviewRequired: detail.reviewRequired,
+                    request: detail.request,
+                    response: detail.response,
+                    attempts: detail.attempts,
+                    requestId: detail.requestId,
+                    model: detail.model,
+                    error: detail.error,
+                    httpStatus: detail.httpStatus,
+                    usage: detail.usage,
+                    pricing: detail.pricing,
+                  }}
+                />
+              </details>
+              <details className="disclosure">
+                <summary>Full recorded evidence and criteria</summary>
+                <JsonView
+                  value={{
+                    evidence: detail.evidence,
+                    criteria: detail.criteria,
+                    configuration: detail.configuration,
+                    configurationHash: detail.configurationHash,
+                    attemptEvidenceHash: detail.attemptEvidenceHash,
+                    bankRevisionId: detail.bankRevisionId,
+                    evaluatorRevisionId: detail.evaluatorRevisionId,
+                  }}
+                />
+              </details>
+              {detail.fallback && (
+                <details className="disclosure">
+                  <summary>Original size error and fallback criteria</summary>
+                  <JsonView value={detail.fallback} />
+                </details>
+              )}
+            </>
           )}
         </Modal>
       )}

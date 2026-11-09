@@ -1,10 +1,15 @@
 import { useState } from "react";
-import type { Control, WorkspaceView } from "../contracts.js";
+import type {
+  AssessmentPass,
+  AssessmentPassObservation,
+  Control,
+  RunView,
+  WorkspaceView,
+} from "../contracts.js";
 import { command, useResource } from "./api.js";
 import { useObservation } from "./observation-stream.js";
 import {
   AssessmentScore,
-  AssessmentScores,
   AssessmentSelector,
   assessmentLabels,
   selectedAssessment,
@@ -56,9 +61,13 @@ export function Observe({
     initialResultId ?? "",
   );
   const [assessing, setAssessing] = useState(false);
-  const [review, setReview] = useState<{ resultId?: string } | null>(null);
+  const [review, setReview] = useState<{
+    view: RunView;
+    pass: AssessmentPassObservation;
+    resultId?: string;
+  } | null>(null);
   const [pending, setPending] = useState<string | null>(null);
-  const [exported, setExported] = useState<unknown>(null);
+  const [exported, setExported] = useState<AssessmentPass | null>(null);
   const [error, setError] = useState<unknown>(null);
   const view = resource.data;
   const currentPass = selectedAssessment(
@@ -67,12 +76,20 @@ export function Observe({
   );
   const passDetail = useResource(
     "runs.assessment",
-    { runId, passId: currentPass?.id ?? "" },
+    {
+      runId,
+      passId: currentPass?.id ?? "",
+      expectedObservationRevision: currentPass?.observationRevision,
+    },
     undefined,
     !!currentPass &&
       currentPass.status !== "running" &&
-      (section === "questions" || !!review),
+      section === "questions",
   );
+  const detail =
+    passDetail.data?.observationRevision === currentPass?.observationRevision
+      ? passDetail.data
+      : null;
   if (!view)
     return (
       <>
@@ -83,7 +100,7 @@ export function Observe({
   const { run } = view;
   const controllingSession = sessionId ?? run.researchSessionId;
   const passes = view.assessmentPasses ?? [];
-  const pass = passDetail.data ?? currentPass;
+  const pass = currentPass;
   const refresh = () => {
     resource.refresh();
     refreshWorkspace();
@@ -186,10 +203,16 @@ export function Observe({
         </div>
         <RunPerformanceTotals performance={view.performance} />
       </section>
-      <AssessmentScores passes={passes} selectedId={pass?.id} />
-      <div className="run-score-toolbar">
-        <div>
+      <section className="run-score-toolbar" aria-label="Selected saved score">
+        <div className="selected-score-identity">
           <span className="field-label">Saved score</span>
+          <h2>{pass?.name ?? "Assessment pending"}</h2>
+          {pass && (
+            <div className="selected-score-source">
+              <span>{assessmentLabels[pass.source]}</span>
+              <Status value={pass.status} />
+            </div>
+          )}
           <AssessmentSelector
             runId={runId}
             passes={passes}
@@ -197,7 +220,8 @@ export function Observe({
             onSaved={select}
           />
         </div>
-        <div className="actions">
+        <AssessmentScore pass={pass} />
+        <div className="selected-score-actions">
           <div className="actions">
             <button
               className="button secondary"
@@ -228,7 +252,9 @@ export function Observe({
                     ? "Wait for this assessment to finish."
                     : undefined
               }
-              onClick={() => setReview({})}
+              onClick={() => {
+                if (pass) setReview({ view, pass });
+              }}
             >
               Review judgments
             </button>
@@ -239,7 +265,7 @@ export function Observe({
             </Help>
           </div>
         </div>
-      </div>
+      </section>
       {!canAssess && (
         <p className="subtle">
           Scoring becomes available after an answer is recorded.
@@ -279,6 +305,7 @@ export function Observe({
                         void command("runs.export-assessment", {
                           runId,
                           passId: pass.id,
+                          expectedObservationRevision: pass.observationRevision,
                         })
                           .then(setExported)
                           .catch(setError);
@@ -327,6 +354,7 @@ export function Observe({
                         void command("runs.retry-assessment", {
                           runId,
                           passId: pass.id,
+                          expectedObservationRevision: pass.observationRevision,
                         })
                           .then((value) => saved(value.id))
                           .catch(setError)
@@ -351,9 +379,12 @@ export function Observe({
           <RunQuestions
             view={view}
             pass={pass}
+            assessmentDetail={detail ?? undefined}
             selectedResultId={selectedResultId}
             onSelectResult={setSelectedResultId}
-            onReview={(resultId) => setReview({ resultId })}
+            onReview={(resultId) => {
+              if (pass) setReview({ view, pass, resultId });
+            }}
           />
         )}
         {section === "research" && controllingSession && (
@@ -369,25 +400,19 @@ export function Observe({
           onSaved={saved}
         />
       )}
-      {review && pass && passDetail.data && (
+      {review && (
         <ReviewDialog
-          view={view}
-          pass={pass}
+          view={review.view}
+          pass={review.pass}
           resultId={review.resultId}
           onClose={() => setReview(null)}
           onSaved={saved}
         />
       )}
-      {review && pass && !passDetail.data && (
-        <Modal title="Review judgments" onClose={() => setReview(null)}>
-          <ErrorNotice error={passDetail.error} />
-          <p>Loading the saved assessment and reference...</p>
-        </Modal>
-      )}
       {exported !== null && (
         <Modal title="Export saved score" onClose={() => setExported(null)}>
           <DownloadButton
-            filename={`${runId}-${pass?.id ?? "score"}.json`}
+            filename={`${exported.runId}-${exported.id}.json`}
             value={exported}
           >
             Download score JSON

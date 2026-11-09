@@ -1,5 +1,9 @@
-import { useEffect, useState } from "react";
-import type { AssessmentPass, RunView } from "../contracts.js";
+import { useState } from "react";
+import type {
+  AssessmentPassObservation,
+  AssessmentPassDetail,
+  RunView,
+} from "../contracts.js";
 import { savedTarget } from "../contracts/targets.js";
 import { useResource } from "./api.js";
 import { useObservation, mergeEvents } from "./observation-stream.js";
@@ -47,12 +51,14 @@ export function matchesQuestionFilter(
 export function RunQuestions({
   view,
   pass,
+  assessmentDetail,
   onReview,
   selectedResultId,
   onSelectResult,
 }: {
   view: RunView;
-  pass?: AssessmentPass;
+  pass?: AssessmentPassObservation;
+  assessmentDetail?: AssessmentPassDetail;
   onReview: (id: string) => void;
   selectedResultId: string;
   onSelectResult: (id: string) => void;
@@ -87,9 +93,15 @@ export function RunQuestions({
   const summary = evidence?.attempt;
   const detail = useResource(
     "runs.attempt",
-    { runId: run.id, attemptId: summary?.id ?? "" },
+    {
+      runId: run.id,
+      attemptId: summary?.id ?? "",
+      expectedEvidenceHash: summary?.evidenceHash,
+    },
     undefined,
-    !!summary,
+    !!summary &&
+      summary.status !== "running" &&
+      (!summary.hasOutput || !!summary.evidenceHash),
   );
   const live = [
     "queued",
@@ -104,25 +116,19 @@ export function RunQuestions({
     !!summary,
     live,
   );
-  useEffect(() => {
-    if (summary) detail.refresh();
-  }, [
-    summary?.id,
-    summary?.status,
-    summary?.finishedAt,
-    pass?.id,
-    detail.refresh,
-  ]);
   const judgment = judgmentsByResult.get(current?.id ?? "");
+  const judgmentDetail = assessmentDetail?.judgments.find(
+    (item) => item.resultId === current?.id,
+  );
   const reference =
-    pass?.configuration.referenceBank?.questions.find(
+    assessmentDetail?.configuration.referenceBank?.questions.find(
       (item) => item.id === current?.questionId,
     ) ??
     (!pass || pass.basis.bankRevisionId === run.manifest.bank.id
       ? question
       : undefined);
   const rules =
-    pass?.configuration.evaluator ??
+    assessmentDetail?.configuration.evaluator ??
     (!pass || pass.basis.evaluatorRevisionId === run.manifest.evaluator.id
       ? run.manifest.evaluator
       : undefined);
@@ -147,10 +153,12 @@ export function RunQuestions({
     detail.data?.events ?? [],
     events.data?.events ?? [],
   ).filter((item) => item.attemptId === summary?.id || !item.attemptId);
-  const attempt = detail.data?.attempt ?? summary;
+  const attempt = summary;
   const external = savedTarget(run.manifest).kind === "external";
   const jev = view.jevAssessments?.find(
-    (item) => item.id === judgment?.jevAssessmentId,
+    (item) =>
+      item.id === judgment?.jevAssessmentId &&
+      item.status === judgment.jevAssessmentStatus,
   );
   const failedEvidence = detail.data?.attempt.failure?.transport;
   const failedText =
@@ -260,11 +268,48 @@ export function RunQuestions({
                       its saved answer.
                     </p>
                   )}
+                {attemptId && !judgment?.attemptId && pass && (
+                  <p className="answer-provenance">
+                    This score has no assessed answer for this question. Showing
+                    another recorded attempt.
+                  </p>
+                )}
+                {!attemptId &&
+                  !judgment?.attemptId &&
+                  pass &&
+                  history.length > 0 && (
+                    <p className="answer-provenance">
+                      This score has no assessed answer for this question.
+                      Recorded attempts remain available in Attempts.
+                    </p>
+                  )}
                 {detail.data?.attempt.output ? (
                   <Answer value={detail.data.attempt.output.answer} />
+                ) : summary?.hasOutput ? (
+                  <>
+                    <p className="waiting-text">
+                      {!summary.evidenceHash
+                        ? "The saved answer has no sealed evidence identity."
+                        : detail.error
+                          ? "Could not load the saved answer."
+                          : "Loading saved answer..."}
+                    </p>
+                    {detail.error && (
+                      <button
+                        className="button secondary"
+                        onClick={detail.refresh}
+                      >
+                        Retry loading answer
+                      </button>
+                    )}
+                  </>
                 ) : (
                   <p className="waiting-text">
-                    No final answer recorded for this attempt.
+                    {summary
+                      ? "No final answer recorded for this attempt."
+                      : pass
+                        ? "No answer was assessed for this question in this score."
+                        : "No attempt recorded for this question."}
                   </p>
                 )}
                 {detail.data?.attempt.output && (
@@ -310,6 +355,9 @@ export function RunQuestions({
                     value={summary?.id ?? ""}
                     onChange={(event) => setAttemptId(event.target.value)}
                   >
+                    {!summary && history.length > 0 && (
+                      <option value="">No assessed answer</option>
+                    )}
                     {history.length ? (
                       history.map((item) => (
                         <option key={item.id} value={item.id}>
@@ -351,7 +399,14 @@ export function RunQuestions({
                 <details className="disclosure">
                   <summary>Recorded attempt data</summary>
                   <JsonView
-                    value={attempt ?? { status: "No attempt recorded" }}
+                    value={
+                      attempt
+                        ? {
+                            metadata: attempt,
+                            recordedEvidence: detail.data?.attempt,
+                          }
+                        : { status: "No attempt recorded" }
+                    }
                   />
                 </details>
               </>
@@ -380,19 +435,39 @@ export function RunQuestions({
                 </small>
               </div>
             )}
-            {jev && <JevAssessment assessment={jev} inspect />}
-            {pass?.source === "deterministic" && judgment?.details && (
+            {jev && pass && (
+              <JevAssessment
+                assessment={jev}
+                inspect
+                assessmentContext={{
+                  runId: run.id,
+                  passId: pass.id,
+                  expectedObservationRevision: pass.observationRevision,
+                }}
+              />
+            )}
+            {judgment?.jevAssessmentId && !jev && (
+              <p className="subtle">
+                This score retains its captured Jev state. Use a current Jev
+                score to inspect the settled assessment.
+              </p>
+            )}
+            {pass?.source === "deterministic" && judgmentDetail?.details && (
               <details className="disclosure">
                 <summary>Comparison details</summary>
-                <JsonView value={judgment.details} />
+                <JsonView value={judgmentDetail.details} />
               </details>
             )}
             <div className="actions">
               <button
                 className="button secondary"
-                disabled={!pass || !current}
+                disabled={!pass || !current || pass.status === "running"}
                 title={
-                  !pass ? "Wait for the first saved assessment." : undefined
+                  !pass
+                    ? "Wait for the first saved assessment."
+                    : pass.status === "running"
+                      ? "Wait for this assessment to finish."
+                      : undefined
                 }
                 onClick={() => {
                   if (current) onReview(current.id);
@@ -434,14 +509,14 @@ export function RunQuestions({
                 </p>
               )}
             </details>
-            {(judgment?.request || judgment?.response) && (
+            {(judgmentDetail?.request || judgmentDetail?.response) && (
               <details className="disclosure inspector-section">
                 <summary>Assessment request and response</summary>
                 <JsonView
                   value={{
-                    request: judgment.request,
-                    response: judgment.response,
-                    configuration: pass?.configuration.judge,
+                    request: judgmentDetail.request,
+                    response: judgmentDetail.response,
+                    configuration: assessmentDetail?.configuration.judge,
                   }}
                 />
               </details>

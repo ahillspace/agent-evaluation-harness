@@ -1,6 +1,6 @@
 import { useState } from "react";
-import type { AssessmentPass, RunView } from "../contracts.js";
-import { command, useResource } from "./api.js";
+import type { AssessmentPassObservation, RunView } from "../contracts.js";
+import { CommandError, command, useResource } from "./api.js";
 import { Answer } from "./answer.js";
 import { AssessmentScore } from "./assessment-controls.js";
 import { ErrorNotice, Field, Modal, Status } from "./ui.js";
@@ -19,7 +19,7 @@ export function ReviewDialog({
   onSaved,
 }: {
   view: RunView;
-  pass: AssessmentPass;
+  pass: AssessmentPassObservation;
   resultId?: string;
   onClose: () => void;
   onSaved: (id: string) => void;
@@ -32,6 +32,15 @@ export function ReviewDialog({
   const [reviewer, setReviewer] = useState("Local reviewer");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const detail = useResource("runs.assessment", {
+    runId: view.run.id,
+    passId: pass.id,
+    expectedObservationRevision: pass.observationRevision,
+  });
+  const configuration =
+    detail.data?.observationRevision === pass.observationRevision
+      ? detail.data.configuration
+      : undefined;
   const change = changes[selected] ?? { choice: "note", note: "" };
   const judgment = pass.judgments.find((item) => item.resultId === selected);
   const result = view.results.find((item) => item.id === selected);
@@ -43,8 +52,11 @@ export function ReviewDialog({
     !!source?.completed,
   );
   const question = (
-    pass.configuration.referenceBank ?? view.run.manifest.bank
-  ).questions.find((item) => item.id === result?.questionId);
+    configuration?.referenceBank ??
+    (pass.basis.bankRevisionId === view.run.manifest.bank.id
+      ? view.run.manifest.bank
+      : undefined)
+  )?.questions.find((item) => item.id === result?.questionId);
   const edited = Object.entries(changes).filter(
     ([, item]) => item.choice !== "note" || item.note.trim(),
   );
@@ -57,6 +69,7 @@ export function ReviewDialog({
       const saved = await command("runs.review-assessment", {
         runId: view.run.id,
         parentPassId: pass.id,
+        expectedObservationRevision: pass.observationRevision,
         name,
         reviewer,
         overrides: edited.map(([id, item]) => ({
@@ -78,6 +91,8 @@ export function ReviewDialog({
       setPending(false);
     }
   };
+  const issue = error ?? detail.error ?? evidence.error;
+  const conflict = issue instanceof CommandError && issue.code === "conflict";
   return (
     <Modal
       title="Review judgments"
@@ -89,7 +104,20 @@ export function ReviewDialog({
         Start from {pass.name}. Change judgments or add notes. Untouched
         judgments carry forward into your named score.
       </p>
-      <ErrorNotice error={error ?? evidence.error} />
+      <ErrorNotice
+        error={
+          conflict
+            ? "The score changed. Close this review and reopen it from the current score. Your unsaved edits remain until you close this review."
+            : issue
+        }
+      />
+      {detail.error && issue === detail.error && !conflict && (
+        <div className="actions">
+          <button className="button secondary" onClick={detail.refresh}>
+            Retry loading
+          </button>
+        </div>
+      )}
       <fieldset className="judge-fieldset stack" disabled={pending}>
         <div className="review-basis">
           <span>Before review</span>
@@ -141,7 +169,11 @@ export function ReviewDialog({
             </p>
           )}
           <h3>Expected answer</h3>
-          <Answer value={question?.expected} />
+          {question ? (
+            <Answer value={question.expected} />
+          ) : (
+            <p className="subtle">Loading this assessment's reference...</p>
+          )}
         </details>
         <div className="actions">
           <Status value={judgment?.status ?? "unjudged"} />
@@ -196,7 +228,9 @@ export function ReviewDialog({
         <button
           className="button primary"
           disabled={
+            conflict ||
             !edited.length ||
+            !configuration ||
             !name.trim() ||
             !reviewer.trim() ||
             edited.some(([, item]) => !item.note.trim())

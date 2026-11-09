@@ -204,7 +204,9 @@ export async function startServer(
             ? 404
             : code === "internal_error"
               ? 500
-              : code === "idempotency_conflict" || code === "invalid_state"
+              : code === "idempotency_conflict" ||
+                  code === "invalid_state" ||
+                  code === "conflict"
                 ? 409
                 : 400;
       if (!response.headersSent)

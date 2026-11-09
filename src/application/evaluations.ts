@@ -172,7 +172,7 @@ export class EvaluationService {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
     for (const run of this.db.list("run", {
-      status: ["completed", "cancelled"],
+      status: ["completed", "cancelled", "failed"],
     }))
       this.sealOriginal(run.id);
   }

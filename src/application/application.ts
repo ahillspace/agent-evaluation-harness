@@ -111,7 +111,7 @@ export async function createApplication(options: {
     db,
     runtime,
     runs,
-    evaluations,
+    passes,
     options.dataDirectory,
   );
   try {
@@ -292,10 +292,18 @@ export async function createApplication(options: {
         return evaluations.calibrateDraft(
           commandSchemas["banks.calibrate-draft"].parse(input),
         );
-      case "banks.preview-draft":
+      case "banks.preview-draft": {
+        const value = commandSchemas["banks.preview-draft"].parse(input);
         return evaluations.previewDraft(
-          commandSchemas["banks.preview-draft"].parse(input),
+          value,
+          new Map(
+            value.runIds.map((runId) => [
+              runId,
+              passes.originalDeterministicVerdicts(runId),
+            ]),
+          ),
         );
+      }
       case "banks.export-package":
         return catalog.exportPackage(
           commandSchemas["banks.export-package"].parse(input),
@@ -334,6 +342,12 @@ export async function createApplication(options: {
           value.draftId,
           value.runIds,
           value.bankRevisionId,
+          new Map(
+            value.runIds.map((runId) => [
+              runId,
+              passes.originalDeterministicVerdicts(runId),
+            ]),
+          ),
         );
       }
       case "evaluators.calibrate": {
@@ -440,19 +454,6 @@ export async function createApplication(options: {
           commandSchemas["targets.sample"].parse(input),
           shutdownController.signal,
         );
-      case "runs.rescore": {
-        const value = commandSchemas["runs.rescore"].parse(input);
-        return evaluations.rescore(
-          value.runId,
-          value.evaluatorRevisionId,
-          value.publish,
-          value.bankRevisionId,
-        );
-      }
-      case "runs.publish-score": {
-        const value = commandSchemas["runs.publish-score"].parse(input);
-        return evaluations.publish(value.runId, value.scoreSetId);
-      }
       case "runs.compare": {
         const value = commandSchemas["runs.compare"].parse(input);
         return comparisons.compare(value.runIds, value.evaluatorRevisionId);

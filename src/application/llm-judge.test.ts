@@ -82,7 +82,10 @@ it("does not admit an original LLM judge after the target consumes the research 
   const run = await app.execute("runs.get", {
     runId: view.session.baselineRunId!,
   });
-  expect(run.scoreSets[0]?.assessments[0]?.judgeError).toMatch(/Token budget/);
+  expect(
+    run.assessmentPasses!.find((pass) => pass.source === "llm")?.judgments[0]
+      ?.explanation,
+  ).toMatch(/Token budget/);
 });
 
 it("sends complete sealed activity through the same original and saved LLM judging contract", async () => {

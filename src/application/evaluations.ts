@@ -11,8 +11,6 @@ import type {
   EvaluatorRevision,
   ResultRecord,
   RunRecord,
-  ScoreSet,
-  ScoreSetSummary,
 } from "../contracts.js";
 import { AnswerSources } from "./answer-sources.js";
 import { AppError } from "../domain/errors.js";
@@ -92,6 +90,7 @@ export class EvaluationService {
   }
   async previewDraft(
     input: CommandValue<"banks.preview-draft">,
+    previous: ReadonlyMap<string, ReadonlyMap<string, Verdict>>,
   ): Promise<EvaluationPreview> {
     const bank = this.db.require("bank", input.bankId);
     const reference = this.draftReference(input.questions, bank.id, bank.name);
@@ -104,40 +103,7 @@ export class EvaluationService {
       createdAt,
       updatedAt: createdAt,
     };
-    return this.previewSettings(draft, input.runIds, reference);
-  }
-  summaries(runId: string): ScoreSetSummary[] {
-    const saved = this.db.scoreSetSummaries(runId);
-    if (!saved.some((scores) => scores.kind === "original")) {
-      const run = this.db.require("run", runId);
-      const {
-        settings: _settings,
-        calibration,
-        ...metadata
-      } = run.manifest.evaluator;
-      const evaluator = {
-        ...metadata,
-        ...(calibration
-          ? {
-              calibration: {
-                bankRevisionId: calibration.bankRevisionId,
-                total: calibration.total,
-                passed: calibration.passed,
-              },
-            }
-          : {}),
-      };
-      saved.unshift({
-        id: `original_${runId}`,
-        runId,
-        evaluator,
-        createdAt: run.createdAt,
-        kind: "original",
-        published: false,
-        assessments: this.db.assessmentSummaries(runId),
-      });
-    }
-    return saved;
+    return this.previewSettings(draft, input.runIds, reference, previous);
   }
   async recover(): Promise<void> {
     for (const result of this.db.list("result", { status: "completed" })) {
@@ -171,10 +137,6 @@ export class EvaluationService {
       });
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
-    for (const run of this.db.list("run", {
-      status: ["completed", "cancelled", "failed"],
-    }))
-      this.sealOriginal(run.id);
   }
   async assess(
     run: RunRecord,
@@ -224,60 +186,6 @@ export class EvaluationService {
               "The evaluator requires unavailable or unspecified evidence. Publish an answer-compatible revision before rescoring this answer.",
           },
     };
-  }
-  original(runId: string): ScoreSet {
-    const saved = this.db
-      .list("scoreSet", { runId })
-      .find((s) => s.kind === "original");
-    if (saved) return saved;
-    const run = this.db.require("run", runId);
-    return {
-      id: `original_${runId}`,
-      runId,
-      evaluator: run.manifest.evaluator,
-      createdAt: run.createdAt,
-      kind: "original",
-      assessments: this.db.list("assessment", { runId }),
-      published: false,
-    };
-  }
-  sealOriginal(runId: string): void {
-    const original = this.original(runId);
-    if (original.published) return;
-    this.db.insert("scoreSet", { ...original, published: true }, true);
-  }
-  async rescore(
-    runId: string,
-    evaluatorRevisionId: string,
-    publish: boolean,
-    bankRevisionId?: string,
-  ): Promise<ScoreSet> {
-    const run = this.db.require("run", runId);
-    const evaluator = this.db.require("evaluator", evaluatorRevisionId);
-    if (evaluator.bankId !== run.manifest.bank.bankId)
-      throw new AppError(
-        "incompatible_basis",
-        "The evaluator belongs to a different question bank.",
-      );
-    const referenceBank = this.referenceBasis(run, bankRevisionId);
-    const assessments = await this.assessSaved(run, evaluator, referenceBank);
-    const scoreSet = this.db.insert("scoreSet", {
-      id: id("scores"),
-      runId,
-      evaluator,
-      ...(referenceBank ? { referenceBank } : {}),
-      createdAt: now(),
-      kind: "rescore",
-      assessments,
-      published: publish,
-    });
-    this.db.append({
-      runId,
-      type: "evaluation.rescored",
-      message: `Saved scoring under evaluator revision ${evaluator.number}.`,
-      data: { scoreSetId: scoreSet.id, published: publish },
-    });
-    return scoreSet;
   }
   private async assessSaved(
     run: RunRecord,
@@ -355,18 +263,20 @@ export class EvaluationService {
   async preview(
     draftId: string,
     runIds: string[],
-    bankRevisionId?: string,
+    bankRevisionId: string | undefined,
+    previous: ReadonlyMap<string, ReadonlyMap<string, Verdict>>,
   ): Promise<EvaluationPreview> {
     const draft = this.db.require("evaluatorDraft", draftId);
     const reference = bankRevisionId
       ? this.db.require("bankRevision", bankRevisionId)
       : undefined;
-    return this.previewSettings(draft, runIds, reference);
+    return this.previewSettings(draft, runIds, reference, previous);
   }
   private async previewSettings(
     draft: EvaluatorDraft,
     runIds: string[],
-    reference?: BankRevision,
+    reference: BankRevision | undefined,
+    previous: ReadonlyMap<string, ReadonlyMap<string, Verdict>>,
   ): Promise<EvaluationPreview> {
     const evaluator: EvaluatorRevision = {
       ...draft,
@@ -385,7 +295,7 @@ export class EvaluationService {
       for (const question of referenceBank?.questions ?? run.manifest.questions)
         validateQuestionPolicy(question, draft.settings);
       const assessments = await this.assessSaved(run, evaluator, referenceBank);
-      const previous = this.original(runId).assessments;
+      const before = (resultId: string) => previous.get(runId)?.get(resultId);
       runs.push({
         runId,
         name: run.name,
@@ -395,9 +305,7 @@ export class EvaluationService {
           const question = (
             referenceBank?.questions ?? run.manifest.questions
           ).find((item) => item.id === result.questionId)!;
-          const before = previous.find(
-            (item) => item.resultId === assessment.resultId,
-          )?.deterministic;
+          const prior = before(assessment.resultId);
           return {
             resultId: result.id,
             questionId: question.id,
@@ -406,16 +314,15 @@ export class EvaluationService {
             answer: this.db.require("attempt", assessment.attemptId).output!
               .answer,
             repetition: result.repetition,
-            before,
+            before: prior,
             after: assessment.deterministic,
-            changed: digest(before) !== digest(assessment.deterministic),
+            changed: digest(prior) !== digest(assessment.deterministic),
           };
         }),
         changes: assessments
           .map((assessment) => ({
             resultId: assessment.resultId,
-            before: previous.find((a) => a.resultId === assessment.resultId)
-              ?.deterministic,
+            before: before(assessment.resultId),
             after: assessment.deterministic,
           }))
           .filter((change) => digest(change.before) !== digest(change.after)),
@@ -441,15 +348,5 @@ export class EvaluationService {
       calibration,
       ...(summary ? { referenceBank: summary } : {}),
     };
-  }
-  publish(runId: string, scoreSetId: string): ScoreSet {
-    const scores = this.db.require("scoreSet", scoreSetId);
-    if (scores.runId !== runId)
-      throw new AppError(
-        "invalid_input",
-        "This score set belongs to a different run.",
-      );
-    if (scores.published) return scores;
-    return this.db.update("scoreSet", { ...scores, published: true });
   }
 }

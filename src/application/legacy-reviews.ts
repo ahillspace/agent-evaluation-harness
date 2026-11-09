@@ -83,7 +83,7 @@ export function restoreLegacyReviews(
         let pass = db.get("assessmentPass", passId);
         if (!pass) {
           const parent =
-            parents.get(basis) ?? passes.snapshotScores(runId, basis);
+            parents.get(basis) ?? passes.snapshotLegacyScore(runId, basis);
           const judgment = parent.judgments.find(
             (item) => item.resultId === review.resultId,
           );

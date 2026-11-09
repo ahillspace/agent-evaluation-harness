@@ -303,7 +303,12 @@ it("changes revisions for new sealed answers at the same interrupted status and 
   }
 });
 
-it.each(["published rescore", "retry parent"] as const)(
+it.each([
+  "saved assessment",
+  "historical ScoreSet",
+  "legacy original review",
+  "retry parent",
+] as const)(
   "keeps the %s fixed when the original run resumes",
   async (kind) => {
     const directory = await mkdtemp(join(tmpdir(), "aeh-frozen-basis-"));
@@ -330,7 +335,7 @@ it.each(["published rescore", "retry parent"] as const)(
       if (judgeFails) throw new Error("Local judge failure");
       return { verdict: true };
     };
-    const app = await createApplication({ dataDirectory: directory, runtime });
+    let app = await createApplication({ dataDirectory: directory, runtime });
     try {
       const bank = await app.execute("banks.create", {
         name: "Frozen basis",
@@ -359,13 +364,53 @@ it.each(["published rescore", "retry parent"] as const)(
       await app.execute("runs.control", { runId, action: "halt" });
       await app.waitForIdle();
       let passId: string;
-      if (kind === "published rescore") {
-        const scores = await app.execute("runs.rescore", {
+      if (kind === "saved assessment") {
+        const scores = await app.execute("runs.assess", {
+          source: "deterministic",
+          name: "Saved answer rules",
           runId,
           evaluatorRevisionId: launched.run.manifest.evaluator.id,
-          publish: true,
         });
-        passId = `scores_${scores.id}`;
+        passId = scores.id;
+      } else if (kind === "legacy original review") {
+        await app.close();
+        const db = new Database(join(directory, "workspace.sqlite"));
+        db.insert("review", {
+          id: "historical-review",
+          runId,
+          resultId: launched.results[0]!.id,
+          scoreSetId: `original_${runId}`,
+          verdict: false,
+          note: "Historical review of the first answer",
+          reviewer: "Fixture reviewer",
+          createdAt: new Date().toISOString(),
+        });
+        db.close();
+        app = await createApplication({ dataDirectory: directory, runtime });
+        const restored = (
+          await app.execute("runs.get", { runId })
+        ).assessmentPasses!.find((pass) => pass.source === "human")!;
+        passId = restored.parentPassId!;
+        expect(passId).not.toBe(`original_deterministic_${runId}`);
+      } else if (kind === "historical ScoreSet") {
+        await app.close();
+        const db = new Database(join(directory, "workspace.sqlite"));
+        db.insert(
+          "scoreSet",
+          {
+            id: "historical-partial",
+            runId,
+            evaluator: launched.run.manifest.evaluator,
+            createdAt: new Date().toISOString(),
+            kind: "rescore",
+            published: true,
+            assessments: db.list("assessment", { runId }),
+          },
+          true,
+        );
+        db.close();
+        app = await createApplication({ dataDirectory: directory, runtime });
+        passId = "scores_historical-partial";
       } else {
         const original = await app.execute("runs.assessment", {
           runId,
@@ -398,6 +443,11 @@ it.each(["published rescore", "retry parent"] as const)(
         ),
       ).not.toHaveProperty("attemptId");
       expect(q2Calls).toBe(2);
+      const current = await app.execute("runs.assessment", {
+        runId,
+        passId: `original_deterministic_${runId}`,
+      });
+      expect(current.coverage.correct).toBe(2);
     } finally {
       await app.close();
       await rm(directory, { recursive: true, force: true });

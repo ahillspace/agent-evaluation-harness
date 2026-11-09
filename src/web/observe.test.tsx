@@ -38,7 +38,6 @@ vi.mock("./observation-stream.js", () => ({
         { id: "result", questionId: "q1", repetition: 1, status: "queued" },
       ],
       attempts: [],
-      scoreSets: [],
       events: [],
       reviews: [],
       allowedActions: ["pause", "halt", "cancel"],

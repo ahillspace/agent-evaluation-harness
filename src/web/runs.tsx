@@ -503,13 +503,13 @@ function Comparison({ value }: { value: RunComparison }) {
               bankRevisionId,
               questionDigest,
               evaluatorRevisionId,
-              scoreSetId,
+              assessmentPassId,
             }) => ({
               runId,
               bankRevisionId,
               questionDigest,
               evaluatorRevisionId,
-              scoreSetId,
+              assessmentPassId,
             }),
           )}
         />

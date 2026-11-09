@@ -108,8 +108,8 @@ it("evaluates a real HTTP response without local harness readiness and freezes t
   expect(saved.run.status).toBe("completed");
   expect(saved.progress.completed).toBe(2);
   expect(
-    saved.scoreSets[0]?.assessments.every(
-      (item) => item.deterministic.status === "correct",
+    saved.assessmentPasses![0]?.judgments.every(
+      (item) => item.status === "correct",
     ),
   ).toBe(true);
   expect(requests).toHaveLength(2);
@@ -227,7 +227,7 @@ it("does not retry protocol errors or count them as incorrect answers", async ()
   const failed = await app.execute("runs.get", { runId: launched.run.id });
   expect(failed.attempts[0]?.status).toBe("failed");
   expect(failed.progress.completed).toBe(0);
-  expect(failed.scoreSets.flatMap((set) => set.assessments)).toHaveLength(0);
+  expect(failed.assessmentPasses![0]?.coverage.answered).toBe(0);
   expect(requests).toHaveLength(1);
 });
 it("recovers a dispatched crash checkpoint without resending uncertain work", async () => {
@@ -282,9 +282,7 @@ it("keeps incorrect returned answers as grading failures, not request errors", a
   await app.waitForIdle();
   const saved = await app.execute("runs.get", { runId: run.run.id });
   expect(saved.progress.completed).toBe(1);
-  expect(saved.scoreSets[0]?.assessments[0]?.deterministic.status).toBe(
-    "incorrect",
-  );
+  expect(saved.assessmentPasses![0]?.judgments[0]?.status).toBe("incorrect");
 });
 
 it("rejects external research before any endpoint request", async () => {
@@ -364,9 +362,7 @@ it("preserves an invalid public-format response as a completed incorrect answer"
   const saved = await app.execute("runs.get", { runId: started.run.id });
   expect(saved.run.status).toBe("completed");
   expect(saved.progress.completed).toBe(1);
-  expect(saved.scoreSets[0]?.assessments[0]?.deterministic.status).toBe(
-    "incorrect",
-  );
+  expect(saved.assessmentPasses![0]?.judgments[0]?.status).toBe("incorrect");
   const detail = await app.execute("runs.attempt", {
     runId: started.run.id,
     attemptId: saved.attempts[0]!.id,

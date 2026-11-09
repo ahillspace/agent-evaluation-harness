@@ -19,7 +19,7 @@ The architecture audit records its revision and validation scope in the reposito
 | Pure grading                  | [`grade`](../src/evaluation/scoring.ts) selects the answer, validates the reference, applies representation rules, and returns a verdict.                                                   |
 | Typed tables and ranking      | [`gradeTypedAnswer` and `validateReference`](../src/evaluation/typed-answers.ts) own typed values, ordering, ranking pools, and policy applicability.                                       |
 | Publication and calibration   | [`CatalogService.publishBank` and `publishDraft`](../src/application/catalog.ts) call [`calibrateSettings`](../src/application/calibration.ts) before transactional publication.            |
-| Saved-answer grading          | [`EvaluationService.assess`, `rescore`, and `preview`](../src/application/evaluations.ts) verify sealed evidence and select compatible reference revisions.                                 |
+| Saved-answer grading          | [`EvaluationService.assess` and `preview`](../src/application/evaluations.ts) calculate judgments from sealed evidence and compatible reference revisions.                                  |
 | Named assessments and retries | [`AssessmentPassService`](../src/application/assessment-passes.ts) freezes pass configuration; [`AnswerSources`](../src/application/answer-sources.ts) resolves physical evidence.          |
 
 Transport operations enter through [`createApplication`](../src/application/application.ts), which validates inputs and dispatches to these services.
@@ -190,7 +190,7 @@ The CLI accepts the same JSON payloads:
 node dist/cli.js evaluators.calibrate --file calibration-request.json
 node dist/cli.js evaluators.preview --file preview-request.json
 node dist/cli.js evaluators.publish --file publish-request.json
-node dist/cli.js runs.rescore --file rescore-request.json
+node dist/cli.js runs.assess --file rescore-request.json
 ```
 
 A corrected-reference rescore request contains:
@@ -198,15 +198,16 @@ A corrected-reference rescore request contains:
 ```json
 {
   "runId": "run_REPLACE",
+  "name": "Corrected reference assessment",
+  "source": "deterministic",
   "evaluatorRevisionId": "evaluator_REPLACE",
-  "bankRevisionId": "bankrev_CORRECTED",
-  "publish": true
+  "bankRevisionId": "bankrev_CORRECTED"
 }
 ```
 
 Omitting the bank revision preserves the run's frozen references.
 Corrected references must belong to the same bank and preserve the evaluated questions' identity.
-Rescoring creates another score set with reference provenance and leaves target evidence and original assessments unchanged.
+Rescoring saves a named assessment pass with reference provenance and leaves target evidence and original assessments unchanged.
 An original LLM judge remains labeled as original when displayed beside a later deterministic rescore.
 
 [`RunService.executeAttempt`](../src/application/runs.ts) seals the target response before deterministic or optional model judging.

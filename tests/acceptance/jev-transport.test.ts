@@ -236,10 +236,11 @@ describe("Jev browser and agent operations", () => {
     await app.application.waitForIdle();
     const run = await app.post("runs.get", { runId: launched.run.id });
     expect(app.calls).toEqual({ target: 1, llm: 1, jev: 1 });
-    expect(run.scoreSets[0]?.assessments[0]?.deterministic.status).toBe(
-      "correct",
-    );
-    expect(run.scoreSets[0]?.assessments[0]?.judge?.verdict).toBe(true);
+    expect(run.assessmentPasses![0]?.judgments[0]?.status).toBe("correct");
+    expect(
+      run.assessmentPasses!.find((pass) => pass.source === "llm")?.judgments[0]
+        ?.status,
+    ).toBe("correct");
     expect(run.jevAssessments).toHaveLength(1);
     expect(run.jevAssessments[0]?.published).toBe(true);
     expect(run.jevAssessments[0]?.checks?.answer.choice).toBe("acceptable");
@@ -296,6 +297,6 @@ describe("Jev browser and agent operations", () => {
     expect(published.configuration.profile.id).toBe(app.profile.id);
     expect(app.calls).toEqual({ target: 1, llm: 0, jev: 1 });
     const final = await app.post("runs.get", { runId: run.run.id });
-    expect(final.scoreSets).toEqual(run.scoreSets);
+    expect(final.assessmentPasses).toEqual(run.assessmentPasses);
   }, 30_000);
 });

@@ -165,6 +165,7 @@ it("refuses voluntary stopping when disabled without repeating an evaluated cand
 });
 it("compares candidates with the same eligible denominator and reports coverage", async () => {
   const summaries: Json[] = [];
+  const bestSummaries: Json[] = [];
   let turns = 0;
   const { app, bank } = await setup(
     async (input) => {
@@ -181,6 +182,30 @@ it("compares candidates with the same eligible denominator and reports coverage"
     async (input) => {
       const payload = JSON.parse(input.message) as Record<string, Json>;
       summaries.push(payload.baselineRun ?? payload.completedRun!);
+      if (payload.bestRun) bestSummaries.push(payload.bestRun);
+      if (turns === 0) {
+        const baseline = await app.execute("runs.get", {
+          runId: (payload.baselineRun as { runId: string }).runId,
+        });
+        const corrected = await app.execute("banks.revise", {
+          bankId: bank.bankId,
+          baseRevisionId: bank.id,
+          baseEvaluatorRevisionId: baseline.run.manifest.evaluator.id,
+          name: bank.name,
+          questions: bank.questions.map((question) => ({
+            ...question,
+            expected: question.id === "q2" ? 0 : 42,
+          })),
+        });
+        const later = await app.execute("runs.assess", {
+          runId: baseline.run.id,
+          source: "deterministic",
+          name: "Later corrected-reference score",
+          evaluatorRevisionId: baseline.run.manifest.evaluator.id,
+          bankRevisionId: corrected.id,
+        });
+        expect(later.accuracy).toBe(1);
+      }
       return ++turns === 1
         ? {
             conversationId: "fixture",
@@ -212,6 +237,9 @@ it("compares candidates with the same eligible denominator and reports coverage"
     { accuracy: 1, eligibleOutcome: 0.5, eligible: 2, coverage: 0.5 },
   ]);
   expect(session.bestRunId).toBe(session.baselineRunId);
+  expect(bestSummaries).toMatchObject([
+    { accuracy: 0.5, eligibleOutcome: 0.5, eligible: 2, coverage: 1 },
+  ]);
 });
 it("runs other questions while safe provider retry waits at concurrency one", async () => {
   const calls: string[] = [];

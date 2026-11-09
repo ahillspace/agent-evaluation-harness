@@ -987,26 +987,6 @@ export interface ScoreSet {
   assessments: Assessment[];
   published: boolean;
 }
-export type AssessmentSummary = Omit<
-  Assessment,
-  "deterministic" | "judge" | "judgeRequest" | "judgeResponse"
-> & {
-  deterministic: Pick<Verdict, "status" | "explanation">;
-  judge?: Pick<JudgeVerdict, "verdict" | "explanation">;
-};
-export type ScoreSetSummary = Omit<
-  ScoreSet,
-  "assessments" | "evaluator" | "referenceBank"
-> & {
-  referenceBank?: Omit<BankRevision, "questions">;
-  evaluator: Omit<EvaluatorRevision, "settings" | "calibration"> & {
-    calibration?: Pick<
-      CalibrationReport,
-      "bankRevisionId" | "total" | "passed"
-    >;
-  };
-  assessments: AssessmentSummary[];
-};
 export interface HumanReview {
   id: string;
   runId: string;
@@ -1282,7 +1262,6 @@ export interface RunView {
   run: RunRecord;
   results: ResultRecord[];
   attempts: AttemptSummary[];
-  scoreSets: ScoreSetSummary[];
   jevAssessments: JevAssessmentSummary[];
   reviews: HumanReview[];
   allowedActions: Control[];
@@ -1646,17 +1625,6 @@ export const commandSchemas = {
       exclude: z.boolean().default(false),
     })
     .strict(),
-  "runs.rescore": z
-    .object({
-      runId: identifier,
-      evaluatorRevisionId: identifier,
-      bankRevisionId: identifier.optional(),
-      publish: z.boolean().default(true),
-    })
-    .strict(),
-  "runs.publish-score": z
-    .object({ runId: identifier, scoreSetId: identifier })
-    .strict(),
   "runs.compare": z
     .object({
       runIds: z.array(identifier).min(2).max(100),
@@ -1788,7 +1756,7 @@ export interface RunComparison {
     bankRevisionId: string;
     questionDigest: string;
     evaluatorRevisionId: string | null;
-    scoreSetId: string | null;
+    assessmentPassId: string | null;
     unscorable?: number;
     accuracy: number | null;
     completed: number;
@@ -1855,8 +1823,6 @@ export interface CommandResultMap {
   };
   "runs.events": { events: ObservationEvent[]; cursor: number };
   "runs.export-agent": Json;
-  "runs.rescore": ScoreSet;
-  "runs.publish-score": ScoreSet;
   "runs.compare": RunComparison;
   "blueprints.save": Blueprint;
   "blueprints.delete": { deleted: boolean };

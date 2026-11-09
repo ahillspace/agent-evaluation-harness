@@ -16,6 +16,7 @@ import {
   type RunView,
   type RunObservation,
   type JevAssessmentRecord,
+  type Verdict,
 } from "../contracts.js";
 import { Database } from "../storage/database.js";
 import { AppError, errorMessage } from "../domain/errors.js";
@@ -35,6 +36,16 @@ function passRates(coverage: AssessmentPass["coverage"]) {
       ? coverage.correct / coverage.eligible
       : null,
   };
+}
+function originalPassesFirst<T extends Pick<AssessmentPass, "id" | "source">>(
+  passes: T[],
+  runId: string,
+): T[] {
+  const rank = (pass: T) =>
+    pass.id === `original_${pass.source}_${runId}`
+      ? ["deterministic", "llm", "jev"].indexOf(pass.source)
+      : 3;
+  return passes.sort((left, right) => rank(left) - rank(right));
 }
 function jevAssessmentState(
   source: AssessmentPass["source"],
@@ -326,7 +337,10 @@ export class AssessmentPassService {
     );
     const legacy = this.db.legacyScoreSummaryInputs(runId);
     if (!missing.length && !legacy.length)
-      return saved.map((pass) => ({ ...pass, ...passRates(pass.coverage) }));
+      return originalPassesFirst(
+        saved.map((pass) => ({ ...pass, ...passRates(pass.coverage) })),
+        runId,
+      );
     const originalBasis = missing.length
       ? this.db.runAssessmentBasis(runId).basis
       : undefined;
@@ -445,11 +459,14 @@ export class AssessmentPassService {
         }),
       };
     };
-    return [
-      ...missing.map((source) => make(source)),
-      ...legacy.map((seed) => make("deterministic", seed)),
-      ...saved.map((pass) => ({ ...pass, ...passRates(pass.coverage) })),
-    ];
+    return originalPassesFirst(
+      [
+        ...missing.map((source) => make(source)),
+        ...legacy.map((seed) => make("deterministic", seed)),
+        ...saved.map((pass) => ({ ...pass, ...passRates(pass.coverage) })),
+      ],
+      runId,
+    );
   }
   list(runId: string, details: true): AssessmentPass[];
   list(runId: string, details?: false): AssessmentPassObservation[];
@@ -459,7 +476,11 @@ export class AssessmentPassService {
   ): Array<AssessmentPass | AssessmentPassObservation> {
     const run = this.db.require("run", runId);
     const originals: AssessmentPass[] = [];
-    const scores = this.evaluations.original(runId);
+    const assessments =
+      this.db
+        .list("scoreSet", { runId })
+        .find((scores) => scores.kind === "original")?.assessments ??
+      this.db.list("assessment", { runId });
     const sources: AssessmentPass["source"][] = ["deterministic"];
     if (run.manifest.judge.enabled) sources.push("llm");
     if (run.manifest.jevJudge) sources.push("jev");
@@ -504,8 +525,8 @@ export class AssessmentPassService {
       pass.createdAt = run.createdAt;
       pass.judgments = pass.judgments.map((j) => {
         if (j.status === "excluded" || !j.attemptId) return j;
-        const assessment = scores.assessments.find(
-          (a) => a.resultId === j.resultId,
+        const assessment = assessments.find(
+          (a) => a.resultId === j.resultId && a.attemptId === j.attemptId,
         );
         if (source === "jev") {
           const record = this.db
@@ -567,11 +588,11 @@ export class AssessmentPassService {
     }
     for (const scores of this.db
       .list("scoreSet", { runId })
-      .filter((s) => s.kind !== "original" && s.published)) {
+      .filter((s) => s.kind !== "original")) {
       if (saved.some((pass) => pass.id === `scores_${scores.id}`)) continue;
-      originals.push(this.scorePass(runId, scores.id));
+      originals.push(this.legacyScorePass(runId, scores.id));
     }
-    return [...originals, ...saved]
+    return originalPassesFirst([...originals, ...saved], runId)
       .map((pass) => ({ ...pass, ...passRates(pass.coverage) }))
       .map((pass) => (details ? pass : observePass(pass)));
   }
@@ -589,19 +610,81 @@ export class AssessmentPassService {
       )
         this.db.insert("assessmentPass", pass);
   }
-  snapshotScores(runId: string, scoreSetId: string): AssessmentPass {
-    const pass = this.scorePass(runId, scoreSetId);
+  original(
+    runId: string,
+    source: "deterministic" | "llm" | "jev" = "deterministic",
+  ): AssessmentPass {
+    return this.get(runId, `original_${source}_${runId}`);
+  }
+  originalDeterministicVerdicts(runId: string): ReadonlyMap<string, Verdict> {
+    const pass = this.original(runId);
+    const owners = [
+      ...new Set(
+        pass.judgments.map((judgment) => judgment.source?.runId ?? runId),
+      ),
+    ];
+    const legacy = this.db
+      .list("scoreSet", { runId })
+      .find((scores) => scores.kind === "original");
+    const assessments = [
+      ...(legacy?.assessments ?? []),
+      ...this.db.list("assessment", { runId: owners }),
+    ];
+    return new Map(
+      pass.judgments.flatMap((judgment) => {
+        if (!judgment.attemptId) return [];
+        const assessment = assessments.find(
+          (item) =>
+            item.attemptId === judgment.attemptId &&
+            item.resultId === (judgment.source?.resultId ?? judgment.resultId),
+        );
+        if (!assessment) return [];
+        const verdict = assessment.deterministic;
+        // Exclusion cards omit the raw verdict's reference note and diagnostic details.
+        // Every verdict must match the captured status rather than later recovered grading.
+        if (
+          computedJudgmentStatus("deterministic", {
+            deterministic: verdict.status,
+          }) !== judgment.status
+        )
+          return [];
+        if (
+          judgment.status !== "excluded" &&
+          verdict.explanation !== judgment.explanation
+        )
+          return [];
+        return [[judgment.resultId, verdict] as const];
+      }),
+    );
+  }
+  latestDeterministic(
+    runId: string,
+    evaluatorRevisionId: string,
+  ): AssessmentPass | undefined {
+    return this.list(runId, true)
+      .filter(
+        (pass) =>
+          pass.source === "deterministic" &&
+          pass.status === "completed" &&
+          pass.configuration.evaluator?.id === evaluatorRevisionId &&
+          (!pass.id.startsWith("scores_") ||
+            this.db.get("scoreSet", pass.id.slice("scores_".length))
+              ?.published !== false),
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .at(-1);
+  }
+  snapshotLegacyScore(runId: string, scoreSetId: string): AssessmentPass {
+    if (scoreSetId === `original_${runId}`)
+      return this.snapshot(runId, `original_deterministic_${runId}`);
+    const pass = this.legacyScorePass(runId, scoreSetId);
     if (!this.db.get("assessmentPass", pass.id))
       this.db.insert("assessmentPass", pass);
     return pass;
   }
-  private scorePass(runId: string, scoreSetId: string): AssessmentPass {
+  private legacyScorePass(runId: string, scoreSetId: string): AssessmentPass {
     const run = this.db.require("run", runId);
-    const original = this.evaluations.original(runId);
-    const scores =
-      scoreSetId === original.id
-        ? original
-        : this.db.require("scoreSet", scoreSetId);
+    const scores = this.db.require("scoreSet", scoreSetId);
     if (scores.runId !== runId)
       throw new AppError(
         "incompatible_basis",
@@ -618,7 +701,7 @@ export class AssessmentPassService {
       run,
       results: this.db.list("result", { runId }),
       source: "deterministic",
-      name: `${scores.evaluator.name} (revision ${scores.evaluator.number})`,
+      name: `${scores.evaluator.name} (revision ${scores.evaluator.number})${scores.published ? "" : " (unpublished historical score)"}`,
       configuration: {
         evaluator: scores.evaluator,
         referenceBank: scores.referenceBank,
@@ -775,7 +858,8 @@ export class AssessmentPassService {
       }),
     };
   }
-  private boundJev(
+  /** Resolve only the physical judge record and state captured by this pass. */
+  boundJev(
     pass: AssessmentPass,
     judgment: PassJudgment,
   ): JevAssessmentRecord | undefined {
@@ -845,6 +929,11 @@ export class AssessmentPassService {
   snapshot(runId: string, passId: string): AssessmentPass {
     const pass = this.get(runId, passId);
     if (this.db.get("assessmentPass", pass.id)) return pass;
+    const legacy = pass.id.startsWith("scores_")
+      ? this.db.get("scoreSet", pass.id.slice("scores_".length))
+      : undefined;
+    if (legacy?.runId === runId)
+      return this.snapshotLegacyScore(runId, legacy.id);
     return this.db.insert(
       "assessmentPass",
       measurePass({

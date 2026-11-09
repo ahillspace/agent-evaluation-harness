@@ -8,7 +8,12 @@ import {
   type WorkspaceView,
 } from "../contracts.js";
 import { BankWorkspace } from "./bank-workspace.js";
-import { bankDraftKey } from "./bank-draft.js";
+import {
+  bankDraftKey,
+  decodeBankDraft,
+  encodeBankDraft,
+  initialBankDraft,
+} from "./bank-draft.js";
 
 const { command } = vi.hoisted(() => ({ command: vi.fn() }));
 vi.mock("./api.js", () => ({
@@ -62,13 +67,13 @@ let root: Root;
 let container: HTMLDivElement;
 const published = vi.fn();
 const refresh = vi.fn();
-const render = async (value = detail) => {
+const render = async (value = detail, bankId = "b1") => {
   await act(async () =>
     root.render(
       <BankWorkspace
         workspace={workspace}
-        bankId="b1"
-        detail={value}
+        bankId={bankId}
+        detail={bankId === "new" ? undefined : value}
         refresh={refresh}
         onPublished={published}
       />,
@@ -212,16 +217,13 @@ it("refreshes after a publication conflict and reloads actual latest content wit
     '"baseRevisionId":"v2"',
   );
 });
-it("keeps import errors and imported optional profile criteria reviewable", async () => {
+it("imports pasted content in one action and retains optional profile criteria for later publication", async () => {
   await click("Import");
   await input(
     "Question import content",
     '{"format":"agent-evaluation-harness/question-bank","version":1,"name":"Package","questions":[{"id":"q3","text":"Total?","expected":3}],"evaluator":{"name":"Precision","settings":{"questionOverrides":{"q3":{"decimalPlaces":1}}}},"jevProfile":{"name":"Private criteria","settings":{}}}',
   );
-  await click("Review import");
-  expect(document.body.textContent).toContain(
-    "Includes Jev profile: Private criteria",
-  );
+  expect(document.body.textContent).not.toContain("Review import");
   await click("Import into draft");
   expect(container.textContent).toContain("Total?");
   expect(container.textContent).toContain(
@@ -243,9 +245,248 @@ async function importProfile(name: string, questionId: string) {
       jevProfile: { name, settings: {} },
     }),
   );
-  await click("Review import");
   await click("Import into draft");
 }
+
+const packageSource = JSON.stringify({
+  format: "agent-evaluation-harness/question-bank",
+  version: 1,
+  name: "Imported package",
+  questions: [{ id: "q3", text: "Imported total?", expected: 3 }],
+  evaluator: {
+    name: "Imported precision",
+    settings: {
+      decimalPlaces: 2,
+      questionOverrides: { q3: { decimalPlaces: 1 } },
+    },
+  },
+  jevProfile: { name: "Imported criteria", settings: {} },
+});
+async function chooseFile(text: () => Promise<string>) {
+  const field = document.querySelector<HTMLInputElement>(
+    '[aria-label="Import question file"]',
+  )!;
+  await act(async () => {
+    Object.defineProperty(field, "files", {
+      configurable: true,
+      value: [{ name: "questions.json", text }],
+    });
+    field.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+async function newBank(stored = initialBankDraft()) {
+  await act(async () => root.unmount());
+  sessionStorage.clear();
+  sessionStorage.setItem(
+    bankDraftKey("workspace", "new")!,
+    encodeBankDraft(stored),
+  );
+  root = createRoot(container);
+  await render(detail, "new");
+}
+function savedDraft(bankId = "b1") {
+  return decodeBankDraft(
+    sessionStorage.getItem(bankDraftKey("workspace", bankId)!),
+  )!;
+}
+
+it("imports a selected file directly after the existing-draft action choice", async () => {
+  await click("Import");
+  const mode = document.querySelector('[aria-label="Import action"]')!;
+  const file = document.querySelector('[aria-label="Import question file"]')!;
+  expect(
+    mode.compareDocumentPosition(file) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  await chooseFile(async () => packageSource);
+  expect(
+    document.querySelector('[aria-label="Import question file"]'),
+  ).toBeNull();
+  expect(savedDraft().questions.map((item) => item.id)).toEqual([
+    "q1",
+    "q2",
+    "q3",
+  ]);
+  expect(savedDraft().settings.decimalPlaces).toBeUndefined();
+  expect(savedDraft().settings.questionOverrides.q3).toEqual({
+    decimalPlaces: 1,
+  });
+  expect(command).not.toHaveBeenCalled();
+});
+it("imports the complete package into a pristine new draft without a mode choice", async () => {
+  await newBank();
+  await click("Import");
+  expect(document.querySelector('[aria-label="Import action"]')).toBeNull();
+  await chooseFile(async () => packageSource);
+  expect(savedDraft("new")).toMatchObject({
+    name: "Imported package",
+    evaluatorName: "Imported precision",
+    settings: {
+      decimalPlaces: 2,
+      questionOverrides: { q3: { decimalPlaces: 1 } },
+    },
+    importedJevProfile: { name: "Imported criteria" },
+  });
+  expect(command).not.toHaveBeenCalled();
+});
+it("preserves authored settings and name in an empty draft unless replacement is selected", async () => {
+  await newBank({
+    ...initialBankDraft(),
+    name: "Authored bank",
+    settings: evaluatorSettingsSchema.parse({ decimalPlaces: 4 }),
+  });
+  await click("Import");
+  expect(document.querySelector('[aria-label="Import action"]')).not.toBeNull();
+  await chooseFile(async () => packageSource);
+  expect(savedDraft("new").questions).toHaveLength(1);
+  expect(savedDraft("new").name).toBe("Authored bank");
+  expect(savedDraft("new").settings.decimalPlaces).toBe(4);
+});
+it("replaces draft questions and shared rules when selected before file import", async () => {
+  await click("Import");
+  const mode = document.querySelector<HTMLSelectElement>(
+    '[aria-label="Import action"]',
+  )!;
+  await act(async () => {
+    mode.value = "replace";
+    mode.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await chooseFile(async () => packageSource);
+  expect(savedDraft().questions.map((item) => item.id)).toEqual(["q3"]);
+  expect(savedDraft().settings.decimalPlaces).toBe(2);
+  expect(command).not.toHaveBeenCalled();
+});
+it.each(["[]", "question,expected\n"])(
+  "retains the draft and import dialog when a replacement file has no questions: %s",
+  async (source) => {
+    await click("Import");
+    const mode = document.querySelector<HTMLSelectElement>(
+      '[aria-label="Import action"]',
+    )!;
+    await act(async () => {
+      mode.value = "replace";
+      mode.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await chooseFile(async () => source);
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "at least one question",
+    );
+    expect(
+      document.querySelector<HTMLTextAreaElement>(
+        '[aria-label="Question import content"]',
+      )!.value,
+    ).toBe(source);
+    expect(savedDraft().questions).toEqual(questions);
+    expect(command).not.toHaveBeenCalled();
+  },
+);
+it.each([
+  [
+    "unsupported CSV",
+    "question,expected,private\nCount?,1,secret",
+    "Unsupported CSV columns: private",
+  ],
+  [
+    "invalid CSV",
+    'question,expected\n"Unclosed,1',
+    "The CSV contains an unclosed quoted value.",
+  ],
+  ["invalid package", '{"format":"unsupported"}', "Invalid"],
+  [
+    "duplicate IDs",
+    '[{"id":"q1","text":"Duplicate?","expected":1}]',
+    "Question ID q1 already exists",
+  ],
+])(
+  "keeps %s input and the draft intact when direct file import fails",
+  async (_name, source, message) => {
+    await click("Import");
+    await chooseFile(async () => source);
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      message,
+    );
+    expect(
+      document.querySelector<HTMLTextAreaElement>(
+        '[aria-label="Question import content"]',
+      )!.value,
+    ).toBe(source);
+    expect(savedDraft().questions).toEqual(questions);
+    expect(command).not.toHaveBeenCalled();
+  },
+);
+it("keeps pasted content after a file read failure", async () => {
+  await click("Import");
+  await input("Question import content", "Authored import content");
+  await chooseFile(async () => {
+    throw new Error("Cannot read file");
+  });
+  expect(document.body.textContent).toContain("Cannot read file");
+  expect(
+    document.querySelector<HTMLTextAreaElement>(
+      '[aria-label="Question import content"]',
+    )!.value,
+  ).toBe("Authored import content");
+  expect(command).not.toHaveBeenCalled();
+});
+it("ignores an older file read after another file is selected", async () => {
+  await click("Import");
+  let finish!: (value: string) => void;
+  await chooseFile(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  await chooseFile(async () => packageSource);
+  await act(async () => finish('[{"id":"old","text":"Old?","expected":0}]'));
+  expect(savedDraft().questions.map((item) => item.id)).toEqual([
+    "q1",
+    "q2",
+    "q3",
+  ]);
+});
+it("ignores a pending file read after pasted content changes", async () => {
+  await click("Import");
+  let finish!: (value: string) => void;
+  await chooseFile(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  await input(
+    "Question import content",
+    '[{"id":"pasted","text":"Pasted?","expected":0}]',
+  );
+  await act(async () => finish(packageSource));
+  expect(
+    document.querySelector<HTMLTextAreaElement>(
+      '[aria-label="Question import content"]',
+    )!.value,
+  ).toContain("pasted");
+  await click("Import into draft");
+  expect(savedDraft().questions.map((item) => item.id)).toEqual([
+    "q1",
+    "q2",
+    "pasted",
+  ]);
+});
+it("ignores a pending file read after the import dialog closes", async () => {
+  await click("Import");
+  let finish!: (value: string) => void;
+  await chooseFile(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const close = document.querySelector<HTMLButtonElement>(
+    '[aria-label="Close dialog"]',
+  )!;
+  await act(async () => close.click());
+  await act(async () => finish(packageSource));
+  expect(savedDraft().questions).toEqual(questions);
+  expect(command).not.toHaveBeenCalled();
+});
 it("retains a newly imported profile when an older profile publication completes", async () => {
   await importProfile("Profile A", "q3");
   let finish!: (value: unknown) => void;
@@ -264,6 +505,41 @@ it("retains a newly imported profile when an older profile publication completes
   expect(sessionStorage.getItem(bankDraftKey("workspace", "b1")!)).toContain(
     "Profile B",
   );
+});
+it("does not restore a published profile when a file started reading before publication completed", async () => {
+  await importProfile("Profile A", "q3");
+  let finishPublication!: (value: unknown) => void;
+  command.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finishPublication = resolve;
+      }),
+  );
+  await click("Publish and activate imported Jev profile");
+  await click("Import");
+  let finishFile!: (value: string) => void;
+  await chooseFile(
+    () =>
+      new Promise((resolve) => {
+        finishFile = resolve;
+      }),
+  );
+  await act(async () => finishPublication({ id: "profile-a" }));
+  expect(savedDraft().importedJevProfile).toBeUndefined();
+  await act(async () =>
+    finishFile('[{"id":"q4","text":"New question?","expected":4}]'),
+  );
+  expect(savedDraft().questions.map((item) => item.id)).toEqual([
+    "q1",
+    "q2",
+    "q3",
+    "q4",
+  ]);
+  expect(savedDraft().importedJevProfile).toBeUndefined();
+  expect(container.textContent).not.toContain(
+    "Review imported Jev profile: Profile A",
+  );
+  expect(command).toHaveBeenCalledTimes(1);
 });
 it("preserves a reopened draft when an old bank publication completes after navigation", async () => {
   await input("Bank name", "Original publication");

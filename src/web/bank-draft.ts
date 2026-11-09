@@ -8,6 +8,7 @@ import {
   type JevProfileSettings,
   type Question,
 } from "../contracts.js";
+import type { BankImport } from "./bank-import.js";
 
 export interface BankDraft {
   name: string;
@@ -17,6 +18,93 @@ export interface BankDraft {
   baseRevisionId?: string;
   baseEvaluatorRevisionId?: string;
   importedJevProfile?: { name: string; settings: JevProfileSettings };
+}
+export interface BankAuthoringState {
+  draft: BankDraft;
+  importDialog: { error: unknown } | null;
+}
+export type BankAuthoringAction =
+  | { type: "update"; update: BankDraft | ((current: BankDraft) => BankDraft) }
+  | { type: "import-dialog"; open: boolean }
+  | {
+      type: "import";
+      value: BankImport;
+      mode: "replace" | "append";
+      importName: boolean;
+    };
+
+export function bankAuthoringReducer(
+  state: BankAuthoringState,
+  action: BankAuthoringAction,
+): BankAuthoringState {
+  switch (action.type) {
+    case "update":
+      return {
+        ...state,
+        draft:
+          typeof action.update === "function"
+            ? action.update(state.draft)
+            : action.update,
+      };
+    case "import-dialog":
+      return { ...state, importDialog: action.open ? { error: null } : null };
+    case "import": {
+      try {
+        return {
+          draft: importBankDraft(state.draft, action),
+          importDialog: null,
+        };
+      } catch (error) {
+        return { ...state, importDialog: { error } };
+      }
+    }
+  }
+}
+
+function importBankDraft(
+  draft: BankDraft,
+  { value, mode, importName }: Extract<BankAuthoringAction, { type: "import" }>,
+): BankDraft {
+  const ids = new Set(
+    mode === "append" ? draft.questions.map((item) => item.id) : [],
+  );
+  for (const question of value.questions) {
+    if (ids.has(question.id))
+      throw new Error(
+        `Question ID ${question.id} already exists. Choose replacement or change duplicate IDs before importing.`,
+      );
+    ids.add(question.id);
+  }
+  return {
+    ...draft,
+    name: importName && !draft.name && value.name ? value.name : draft.name,
+    questions:
+      mode === "append"
+        ? [...draft.questions, ...value.questions]
+        : value.questions,
+    evaluatorName:
+      mode === "replace" && value.evaluator
+        ? value.evaluator.name
+        : draft.evaluatorName,
+    settings:
+      mode === "replace" && value.evaluator
+        ? value.evaluator.settings
+        : {
+            ...draft.settings,
+            questionOverrides: {
+              ...(mode === "append" ? draft.settings.questionOverrides : {}),
+              ...(value.evaluator?.settings.questionOverrides ?? {}),
+            },
+            calibrationExamples:
+              mode === "append"
+                ? [
+                    ...(draft.settings.calibrationExamples ?? []),
+                    ...(value.evaluator?.settings.calibrationExamples ?? []),
+                  ]
+                : [],
+          },
+    ...(value.jevProfile ? { importedJevProfile: value.jevProfile } : {}),
+  };
 }
 const draftComparisonSchema = evaluatorSettingsSchema
   .innerType()

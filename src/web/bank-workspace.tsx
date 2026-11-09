@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import type {
   BankDetail,
   BankRevision,
@@ -10,6 +10,7 @@ import { command, useResource } from "./api.js";
 import {
   bankDraftKey,
   bankDraftsEqual,
+  bankAuthoringReducer,
   decodeBankDraft,
   encodeBankDraft,
   initialBankDraft,
@@ -56,15 +57,21 @@ export function BankWorkspace({
       mounted.current = false;
     };
   }, []);
-  const [draft, setDraft] = useState<BankDraft>(
-    () => storedDraft(key) ?? initialBankDraft(detail),
+  const [{ draft, importDialog }, dispatchDraft] = useReducer(
+    bankAuthoringReducer,
+    undefined,
+    () => ({
+      draft: storedDraft(key) ?? initialBankDraft(detail),
+      importDialog: null,
+    }),
   );
+  const setDraft = (update: BankDraft | ((current: BankDraft) => BankDraft)) =>
+    dispatchDraft({ type: "update", update });
   const [tab, setTab] = useState("questions");
   const [editing, setEditing] = useState<{
     question: Question;
     previousId?: string;
   } | null>(null);
-  const [importing, setImporting] = useState(false);
   const [history, setHistory] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [discarding, setDiscarding] = useState(false);
@@ -119,47 +126,12 @@ export function BankWorkspace({
     });
   };
   const imported = (value: BankImport, mode: "replace" | "append") => {
-    const ids = new Set(
-      mode === "append" ? draft.questions.map((item) => item.id) : [],
-    );
-    for (const question of value.questions) {
-      if (ids.has(question.id))
-        throw new Error(
-          `Question ID ${question.id} already exists. Choose replacement or change duplicate IDs before importing.`,
-        );
-      ids.add(question.id);
-    }
-    setDraft({
-      ...draft,
-      name: bankId === "new" && value.name ? value.name : draft.name,
-      questions:
-        mode === "append"
-          ? [...draft.questions, ...value.questions]
-          : value.questions,
-      evaluatorName:
-        mode === "replace" && value.evaluator
-          ? value.evaluator.name
-          : draft.evaluatorName,
-      settings:
-        mode === "replace" && value.evaluator
-          ? value.evaluator.settings
-          : {
-              ...draft.settings,
-              questionOverrides: {
-                ...(mode === "append" ? draft.settings.questionOverrides : {}),
-                ...(value.evaluator?.settings.questionOverrides ?? {}),
-              },
-              calibrationExamples:
-                mode === "append"
-                  ? [
-                      ...(draft.settings.calibrationExamples ?? []),
-                      ...(value.evaluator?.settings.calibrationExamples ?? []),
-                    ]
-                  : [],
-            },
-      ...(value.jevProfile ? { importedJevProfile: value.jevProfile } : {}),
+    dispatchDraft({
+      type: "import",
+      value,
+      mode,
+      importName: bankId === "new",
     });
-    setImporting(false);
   };
   const publish = async () => {
     setPending("publish");
@@ -316,7 +288,7 @@ export function BankWorkspace({
           </button>
           <button
             className="button secondary"
-            onClick={() => setImporting(true)}
+            onClick={() => dispatchDraft({ type: "import-dialog", open: true })}
           >
             Import
           </button>
@@ -514,9 +486,14 @@ export function BankWorkspace({
           }
         />
       )}
-      {importing && (
+      {importDialog && (
         <BankImportDialog
-          onClose={() => setImporting(false)}
+          pristine={bankId === "new" && !changed}
+          importError={importDialog.error}
+          onClearImportError={() =>
+            dispatchDraft({ type: "import-dialog", open: true })
+          }
+          onClose={() => dispatchDraft({ type: "import-dialog", open: false })}
           onImport={imported}
         />
       )}

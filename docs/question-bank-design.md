@@ -44,7 +44,14 @@ CLI and HTTP call the same operations.
 Sample checks, calibration, and saved-answer previews use the existing evaluation module.
 The browser never implements a second answer matcher.
 Complete exports use a versioned package with questions and selected grading configuration.
-Imports preview supported content and surface unsupported or invalid fields.
+Choosing a file validates supported content and imports it directly into the draft.
+Pasted content uses one Import into draft action.
+An existing or edited draft offers append or replacement before file selection.
+An untouched new draft imports the complete package, including shared grading rules.
+Invalid imports preserve their input and leave the draft unchanged.
+Every import format requires at least one question.
+Imports validate and merge against the current draft, including changes completed while a file is being read.
+Publication remains the final review and validation step.
 
 Published records and saved evidence remain immutable.
 Target inputs contain only public question fields.

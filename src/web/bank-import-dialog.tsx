@@ -1,22 +1,48 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { parseBankImport, type BankImport } from "./bank-import.js";
 import { ErrorNotice, Field, Modal } from "./ui.js";
 
 export function BankImportDialog({
+  pristine,
+  importError,
+  onClearImportError,
   onClose,
   onImport,
 }: {
+  pristine: boolean;
+  importError: unknown;
+  onClearImportError: () => void;
   onClose: () => void;
   onImport: (value: BankImport, mode: "replace" | "append") => void;
 }) {
   const [source, setSource] = useState("");
-  const [mode, setMode] = useState<"replace" | "append">("append");
-  const [reviewed, setReviewed] = useState<BankImport | null>(null);
+  const [mode, setMode] = useState<"replace" | "append">(
+    pristine ? "replace" : "append",
+  );
+  const [reading, setReading] = useState(false);
+  const readVersion = useRef(0);
+  useEffect(
+    () => () => {
+      readVersion.current++;
+    },
+    [],
+  );
   const [error, setError] = useState<unknown>(null);
   const change = (value: string) => {
+    readVersion.current++;
+    setReading(false);
     setSource(value);
-    setReviewed(null);
     setError(null);
+    onClearImportError();
+  };
+  const importSource = (value: string) => {
+    setError(null);
+    onClearImportError();
+    try {
+      onImport(parseBankImport(value), mode);
+    } catch (cause) {
+      setError(cause);
+    }
   };
   const template = () => {
     const url = URL.createObjectURL(
@@ -32,8 +58,15 @@ export function BankImportDialog({
     URL.revokeObjectURL(url);
   };
   return (
-    <Modal title="Import questions" onClose={onClose}>
+    <Modal
+      title="Import questions"
+      onClose={() => {
+        readVersion.current++;
+        onClose();
+      }}
+    >
       <div className="stack">
+        <p>Choose a file to import into this draft, or paste content below.</p>
         <p className="subtle">
           CSV accepts question, expected, optional id, and tags separated by |.
           Versioned JSON packages preserve shared rules and question overrides.
@@ -41,15 +74,56 @@ export function BankImportDialog({
         <button className="button secondary" onClick={template}>
           Download CSV template
         </button>
+        {!pristine && (
+          <Field label="Import action">
+            <select
+              aria-label="Import action"
+              value={mode}
+              disabled={reading}
+              onChange={(event) => {
+                setMode(event.target.value as "replace" | "append");
+                setError(null);
+                onClearImportError();
+              }}
+            >
+              <option value="append">Add to this draft</option>
+              <option value="replace">
+                Replace draft questions and imported rules
+              </option>
+            </select>
+            <p className="subtle">
+              {mode === "append"
+                ? "Keeps current shared rules and imports question-specific overrides."
+                : "Replaces draft questions and imports the package's full grading rules."}
+            </p>
+          </Field>
+        )}
         <input
           type="file"
           aria-label="Import question file"
           accept=".csv,.json"
-          onChange={(event) => {
+          onChange={async (event) => {
             const file = event.target.files?.[0];
-            if (file) void file.text().then(change).catch(setError);
+            if (!file) return;
+            event.target.value = "";
+            const version = ++readVersion.current;
+            setReading(true);
+            setError(null);
+            onClearImportError();
+            try {
+              const value = await file.text();
+              if (version !== readVersion.current) return;
+              setReading(false);
+              setSource(value);
+              importSource(value);
+            } catch (cause) {
+              if (version !== readVersion.current) return;
+              setReading(false);
+              setError(cause);
+            }
           }}
         />
+        {reading && <p role="status">Reading question file...</p>}
         <Field label="Question import content">
           <textarea
             aria-label="Question import content"
@@ -59,65 +133,13 @@ export function BankImportDialog({
             onChange={(event) => change(event.target.value)}
           />
         </Field>
-        <Field label="Import action">
-          <select
-            aria-label="Import action"
-            value={mode}
-            onChange={(event) =>
-              setMode(event.target.value as "replace" | "append")
-            }
-          >
-            <option value="append">Add to this draft</option>
-            <option value="replace">
-              Replace draft questions and imported rules
-            </option>
-          </select>
-        </Field>
-        <ErrorNotice error={error} />
-        {reviewed && (
-          <div className="bank-import-preview notice">
-            <strong>{reviewed.questions.length} validated questions</strong>
-            <p>
-              {reviewed.evaluator
-                ? `Includes evaluator: ${reviewed.evaluator.name}. Replace mode imports its full rules; append mode keeps current shared rules and imports question-specific overrides.`
-                : "Shared grading rules stay unchanged."}
-            </p>
-            {reviewed.jevProfile && (
-              <p>
-                Includes Jev profile: {reviewed.jevProfile.name}. Review and
-                publish this profile separately after importing; it does not
-                become active automatically.
-              </p>
-            )}
-          </div>
-        )}
+        <ErrorNotice error={error ?? importError} />
         <footer className="modal-footer">
           <p>Import changes the draft. Review before publishing.</p>
           <button
-            className="button secondary"
-            onClick={() => {
-              setError(null);
-              try {
-                setReviewed(parseBankImport(source));
-              } catch (cause) {
-                setError(cause);
-              }
-            }}
-          >
-            Review import
-          </button>
-          <button
             className="button primary"
-            disabled={!reviewed}
-            onClick={() => {
-              if (reviewed) {
-                try {
-                  onImport(reviewed, mode);
-                } catch (cause) {
-                  setError(cause);
-                }
-              }
-            }}
+            disabled={reading || !source.trim()}
+            onClick={() => importSource(source)}
           >
             Import into draft
           </button>

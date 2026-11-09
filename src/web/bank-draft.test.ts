@@ -3,6 +3,7 @@ import { evaluatorSettingsSchema } from "../contracts.js";
 import {
   bankDraftKey,
   bankDraftsEqual,
+  bankAuthoringReducer,
   decodeBankDraft,
   encodeBankDraft,
   initialBankDraft,
@@ -43,6 +44,50 @@ describe("question bank drafts", () => {
     expect(bankDraftKey("one", "b")).not.toBe(bankDraftKey("two", "b"));
     expect(bankDraftKey("one", "b")).not.toBe(bankDraftKey("one", "c"));
   });
+  it("validates imports against the current draft and preserves that draft on failure", () => {
+    const initial = {
+      draft: initialBankDraft(),
+      importDialog: { error: null },
+    };
+    const incoming = parseBankImport(
+      '[{"id":"q1","text":"Incoming?","expected":1}]',
+    );
+    const current = bankAuthoringReducer(initial, {
+      type: "update",
+      update: (draft) => ({
+        ...draft,
+        name: "Current draft",
+        questions: [{ id: "q1", text: "Current?", expected: 2, tags: [] }],
+      }),
+    });
+    const failed = bankAuthoringReducer(current, {
+      type: "import",
+      mode: "append",
+      value: incoming,
+      importName: true,
+    });
+    expect(failed.draft).toBe(current.draft);
+    expect(failed.importDialog?.error).toBeInstanceOf(Error);
+    expect((failed.importDialog?.error as Error).message).toContain(
+      "Question ID q1 already exists",
+    );
+    const cleared = bankAuthoringReducer(failed, {
+      type: "import-dialog",
+      open: true,
+    });
+    expect(cleared.importDialog?.error).toBeNull();
+    const retried = bankAuthoringReducer(cleared, {
+      type: "import",
+      mode: "replace",
+      value: incoming,
+      importName: true,
+    });
+    expect(retried.draft.name).toBe("Current draft");
+    expect(retried.draft.questions[0]?.text).toBe("Incoming?");
+    expect(retried.importDialog).toBeNull();
+    expect(initial.draft.questions).toEqual([]);
+    expect(current.draft.questions[0]?.text).toBe("Current?");
+  });
   it("preserves incomplete authoring and publication bases", () => {
     const draft = {
       ...initialBankDraft(),
@@ -80,6 +125,23 @@ describe("question bank drafts", () => {
       ),
     ).toThrow("Unsupported CSV columns: context");
   });
+  it.each([
+    "[]",
+    "question,expected\n",
+    '{"name":"Legacy","questions":[]}',
+    JSON.stringify({
+      format: "agent-evaluation-harness/question-bank",
+      version: 1,
+      name: "Package",
+      questions: [],
+      evaluator: { name: "Rules", settings: {} },
+    }),
+  ])(
+    "rejects an empty question collection in every import form: %s",
+    (source) => {
+      expect(() => parseBankImport(source)).toThrow("at least one question");
+    },
+  );
   it("rejects unsupported JSON fields in packages, raw arrays, and legacy wrappers", () => {
     const question = {
       id: "q1",

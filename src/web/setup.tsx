@@ -394,10 +394,10 @@ export function Setup({
           throw new Error(
             "The engine did not return a baseline Run for this research launch.",
           );
-        destination = `/observe/${result.session.currentRunId}?session=${result.session.id}`;
+        destination = `/runs/${result.session.currentRunId}?session=${result.session.id}`;
       } else {
         const result = await command("runs.launch", request.input);
-        destination = `/observe/${result.run.id}`;
+        destination = `/runs/${result.run.id}`;
       }
       if (!mounted.current) return;
       acknowledged.current = true;
@@ -435,7 +435,7 @@ export function Setup({
   return (
     <>
       <PageHeading
-        title="New evaluation"
+        title="New run"
         description="Choose an agent and question bank, then review your evaluation settings."
       >
         <button
@@ -462,7 +462,7 @@ export function Setup({
             setDraftSource("");
             setDraftReady(true);
             setError(null);
-            navigate("/run");
+            navigate("/runs/new");
           }}
         >
           Reset setup

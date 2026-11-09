@@ -50,7 +50,7 @@ export function RetryResults({
       {view.run.retryOf && (
         <p>
           This rerun is linked to{" "}
-          <a href={`#/observe/${view.run.retryOf.runId}`}>the original run</a>.
+          <a href={`#/runs/${view.run.retryOf.runId}`}>the original run</a>.
           {eligibility?.alreadyAppliedResultIds.length
             ? ` ${eligibility.alreadyAppliedResultIds.length} answer${eligibility.alreadyAppliedResultIds.length === 1 ? " is" : "s are"} already applied.`
             : " Apply completed answers to update its results and saved scores."}
@@ -64,7 +64,7 @@ export function RetryResults({
               <li key={item.id}>
                 {item.bindings.length} answer
                 {item.bindings.length === 1 ? "" : "s"} from{" "}
-                <a href={`#/observe/${item.retryRunId}`}>rerun</a>. Original
+                <a href={`#/runs/${item.retryRunId}`}>rerun</a>. Original
                 attempts and scores stay available.
               </li>
             ))}
@@ -139,7 +139,7 @@ export function RetryResults({
                     setSelected(null);
                     onSaved();
                     if (view.run.retryOf)
-                      navigate(`/observe/${view.run.retryOf.runId}`);
+                      navigate(`/runs/${view.run.retryOf.runId}`);
                   })
                   .catch((cause: unknown) => {
                     if (mounted.current) setError(cause);

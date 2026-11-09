@@ -15,7 +15,10 @@ export function RunConfiguration({ view }: { view: RunView }) {
           <p>The settings saved when this run started.</p>
         </div>
         <div className="actions">
-          <a className="button secondary" href={`#/run?source=${view.run.id}`}>
+          <a
+            className="button secondary"
+            href={`#/runs/new?source=${view.run.id}`}
+          >
             Reuse configuration
           </a>
           {resource.data && (

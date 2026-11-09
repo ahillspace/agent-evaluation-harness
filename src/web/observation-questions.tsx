@@ -248,7 +248,7 @@ export function RunQuestions({
                 {evidence?.fromRerun && summary && (
                   <p className="answer-provenance">
                     Rerun answer from{" "}
-                    <a href={`#/observe/${summary.runId}`}>the linked rerun</a>.
+                    <a href={`#/runs/${summary.runId}`}>the linked rerun</a>.
                     Original attempts remain in Attempts.
                   </p>
                 )}

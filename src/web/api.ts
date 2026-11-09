@@ -95,10 +95,10 @@ export function navigate(path: string) {
 }
 export function useRoute() {
   const [route, setRoute] = useState(
-    () => window.location.hash.slice(1) || "/run",
+    () => window.location.hash.slice(1) || "/runs",
   );
   useEffect(() => {
-    const update = () => setRoute(window.location.hash.slice(1) || "/run");
+    const update = () => setRoute(window.location.hash.slice(1) || "/runs");
     window.addEventListener("hashchange", update);
     return () => window.removeEventListener("hashchange", update);
   }, []);

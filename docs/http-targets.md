@@ -64,7 +64,7 @@ Deterministic grading remains the default.
 Custom evaluators and optional judges must declare that their checks can use answer-only evidence.
 Incompatible checks are rejected before launch; saved-evidence judging records unsupported evidence without a provider call.
 
-Results supports comparison, rescoring, human review, configuration reuse, and blueprints.
+Runs supports comparison, rescoring, human review, configuration reuse, and blueprints.
 External JSON exports contain endpoint invocation settings and credential placeholders.
 They cannot export the remote agent's system prompt or implementation.
 Remote deployment changes remain outside the harness's control; a deployment label helps identify the version you intend to evaluate.

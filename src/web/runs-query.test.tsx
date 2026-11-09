@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { RunSummary, WorkspaceView } from "../contracts.js";
-import { Results } from "./results.js";
+import { Runs } from "./runs.js";
 
 let root: Root, container: HTMLDivElement;
 const request = vi.fn();
@@ -75,7 +75,7 @@ const input = async (value: string) =>
   });
 it("searches the source and resets pagination while displaying matching counts", async () => {
   await act(async () =>
-    root.render(<Results workspace={workspace} refresh={() => {}} />),
+    root.render(<Runs workspace={workspace} refresh={() => {}} />),
   );
   await act(async () =>
     Array.from(container.querySelectorAll("button"))
@@ -96,7 +96,7 @@ it("searches the source and resets pagination while displaying matching counts",
 });
 it("sends the selected status to the same paginated source", async () => {
   await act(async () =>
-    root.render(<Results workspace={workspace} refresh={() => {}} />),
+    root.render(<Runs workspace={workspace} refresh={() => {}} />),
   );
   await act(async () => {
     const element = container.querySelector<HTMLSelectElement>(

@@ -66,10 +66,13 @@
 - Advanced tool selection exposes discovered tools and freezes the selected allowlist.
 - Blueprint reuse copies a saved Run configuration into Setup without launching or adding a required hierarchy.
 - Research exposes candidate and duration budgets, explicit decisions, and exact conversation continuity.
-- Run Setup supports question selection, connection, harness, model, prompt, repetitions, and optional research.
+- Runs combines the execution library, new-run setup, and live or saved Run details under one navigation destination.
+- New run supports question selection, connection, harness, model, prompt, repetitions, and optional research.
 - Observe shows question progress, actual activity, answer, grading, and acknowledged controls.
-- Results supports saved observation, comparisons, human review, rescoring, blueprints, and tested agent JSON export.
-- Results filters all saved Runs before pagination, with matching Unicode normalization for search text and stored labels.
+- Runs supports saved observation, comparisons, human review, rescoring, blueprints, and tested agent JSON export.
+- Runs filters all saved Runs before pagination, with matching Unicode normalization for search text and stored labels.
+- Canonical Runs routes and legacy aliases preserve session, question result, saved score, source Run, and blueprint selections.
+- Setup drafts retain their workspace and tab identity across equivalent routes without resetting or launching work.
 - Run summaries exclude full target configurations and evidence while preserving selected scores, live coverage, and applied answer counts.
 - Bank grading previews page the selected bank independently of the latest workspace Runs and preserve selection across pages.
 - Catalog migration adds scoped query indexes transactionally and preserves existing record bytes after success or failure.
@@ -108,7 +111,7 @@ Clearly distinguish implementation coverage from checks blocked by local authent
 - Saved-answer assessment and retry never rerun a target; retry carries successful judgments forward.
 - Failed and oversized judge requests remain unjudged errors with inspectable request and response evidence.
 - Human review preserves untouched judgments, records overrides, and supports notes on failed executions.
-- Results remembers each Run's selected pass and shows correct / judged accuracy with separate coverage.
+- Runs remembers each Run's selected pass and shows correct / judged accuracy with separate coverage.
 - Research selection retains a fixed eligible objective and coverage guard.
 - Unknown target, researcher, and judge usage appears as unknown instead of zero.
 - Question findings link saved evidence and require an explicit decision before publishing corrected references or exclusions.

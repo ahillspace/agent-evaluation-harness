@@ -4,8 +4,7 @@ import { buildId } from "./build.js";
 
 const destinations = [
   { href: "/banks", icon: "bank", label: "Question banks" },
-  { href: "/run", icon: "run", label: "Run" },
-  { href: "/results", icon: "results", label: "Results" },
+  { href: "/runs", icon: "run", label: "Runs" },
   { href: "/settings", icon: "settings", label: "Settings" },
 ];
 const buildLabel =
@@ -20,17 +19,17 @@ const buildLabel =
 
 export function AppShell({
   section,
-  observing,
+  location,
   connected,
   children,
 }: {
   section: string;
-  observing: boolean;
+  location?: "New run" | "Run details";
   connected: boolean;
   children: ReactNode;
 }) {
   const current =
-    destinations.find((item) => item.href === section)?.label ?? "Run";
+    destinations.find((item) => item.href === section)?.label ?? "Runs";
   return (
     <div className="app-shell">
       <a
@@ -88,13 +87,13 @@ export function AppShell({
             <span className="breadcrumb-slash" aria-hidden="true">
               /
             </span>
-            <strong>{current}</strong>
-            {section === "/run" && (
+            {location ? <a href="#/runs">Runs</a> : <strong>{current}</strong>}
+            {location && (
               <>
                 <span className="breadcrumb-slash" aria-hidden="true">
                   /
                 </span>
-                <span>{observing ? "Observe" : "Setup"}</span>
+                <strong>{location}</strong>
               </>
             )}
           </div>

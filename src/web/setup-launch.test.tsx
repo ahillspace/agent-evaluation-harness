@@ -166,7 +166,7 @@ it.each([false, true])(
       expect(requests[1]).toEqual(requests[0]);
       expect(accepted.size).toBe(1);
       expect(sessionStorage.getItem(key)).toBeNull();
-      expect(window.location.hash).toContain("/observe/run");
+      expect(window.location.hash).toContain("/runs/run");
       await start();
       expect(requests).toHaveLength(3);
       expect(requests[2]).not.toEqual(requests[0]);

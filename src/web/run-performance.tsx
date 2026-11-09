@@ -61,61 +61,6 @@ export function UsageValue({
   );
 }
 
-export function RunPerformanceTotals({
-  performance,
-}: {
-  performance?: RunPerformance;
-}) {
-  return (
-    <div
-      className="run-performance-totals"
-      role="region"
-      aria-label="Performance totals"
-      tabIndex={0}
-    >
-      <Metric label="Run duration" value={elapsed(performance?.durationMs)} />
-      <Metric
-        label="Average answer"
-        value={elapsed(performance?.answerLatencyMs.average)}
-      />
-      <div className="metric">
-        <span>
-          Input tokens <TokenUsageHelp />
-        </span>
-        <UsageValue
-          value={performance?.target.uncachedInputTokens}
-          reporting={performance?.target.reporting?.uncachedInputTokens}
-        />
-      </div>
-      <div className="metric">
-        <span>Output tokens</span>
-        <UsageValue
-          value={performance?.target.outputTokens}
-          reporting={performance?.target.reporting?.outputTokens}
-        />
-      </div>
-      <div className="metric">
-        <span>Cache tokens</span>
-        <UsageValue
-          value={performance?.target.cachedInputTokens}
-          reporting={performance?.target.reporting?.cachedInputTokens}
-        />
-      </div>
-      <Metric label="Target turns" value={count(performance?.target.turns)} />
-      <Metric label="Tool calls" value={count(performance?.target.toolCalls)} />
-      <Metric
-        label="Attempts"
-        value={count(performance?.attempts)}
-        detail={
-          performance
-            ? `${performance.retries} ${performance.retries === 1 ? "retry" : "retries"}`
-            : undefined
-        }
-      />
-    </div>
-  );
-}
-
 export function RunPerformanceSummary({
   performance,
 }: {

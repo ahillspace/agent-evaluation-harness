@@ -1,10 +1,6 @@
 import { expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import {
-  UsageValue,
-  RunPerformanceTotals,
-  RunPerformanceSummary,
-} from "./run-performance.js";
+import { UsageValue, RunPerformanceSummary } from "./run-performance.js";
 import type { RunPerformance } from "../contracts/assessment-passes.js";
 
 const usage = {
@@ -26,24 +22,21 @@ const performance: RunPerformance = {
   judge: { ...usage, calls: 1 },
 };
 
-it("uses separate uncached input, output, and cache values in compact and detailed totals", () => {
-  for (const component of [
-    <RunPerformanceTotals performance={performance} />,
+it("uses separate uncached input, output, and cache values in the performance summary", () => {
+  const html = renderToStaticMarkup(
     <RunPerformanceSummary performance={performance} />,
-  ]) {
-    const html = renderToStaticMarkup(component);
-    expect(html).toContain("Input tokens");
-    expect(html).toContain("Output tokens");
-    expect(html).toContain("Cache tokens");
-    expect(html).toContain('title="200"');
-    expect(html).toContain('title="800"');
-    expect(html).not.toContain('title="1,000"');
-  }
+  );
+  expect(html).toContain("Input tokens");
+  expect(html).toContain("Output tokens");
+  expect(html).toContain("Cache tokens");
+  expect(html).toContain('title="200"');
+  expect(html).toContain('title="800"');
+  expect(html).not.toContain('title="1,000"');
 });
 
 it("does not label an inclusive legacy input total as uncached input", () => {
   const html = renderToStaticMarkup(
-    <RunPerformanceTotals
+    <RunPerformanceSummary
       performance={{
         ...performance,
         target: { ...performance.target, uncachedInputTokens: undefined },

@@ -2618,12 +2618,6 @@ tr:last-child td {
   align-items: flex-start;
   gap: 12px;
 }
-.observation-totals {
-  margin-bottom: 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  overflow: hidden;
-}
 .retry-results {
   padding: 12px 16px;
   margin-bottom: 16px;
@@ -2654,38 +2648,21 @@ tr:last-child td {
   color: var(--muted);
   font-size: 12px;
 }
-.run-progress-line {
+.run-progress {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 20px;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--line);
+  margin-bottom: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
   color: var(--muted);
   font-size: 12px;
 }
-.run-progress-line > strong {
+.run-progress > strong {
   color: var(--text);
   font-weight: 500;
-}
-.run-performance-totals {
-  display: grid;
-  grid-template-columns: repeat(8, minmax(115px, 1fr));
-  overflow-x: auto;
-}
-.run-performance-totals .metric {
-  min-width: 0;
-  padding: 12px 16px;
-}
-.run-performance-totals .metric > strong,
-.run-performance-totals .usage-value > span {
-  font-size: 17px;
-  font-weight: 500;
-  color: var(--text);
-}
-.run-performance-totals .usage-value {
-  display: flex;
-  margin-bottom: 0;
 }
 .usage-value {
   display: flex;

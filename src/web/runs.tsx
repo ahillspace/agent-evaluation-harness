@@ -125,25 +125,44 @@ export function Runs({
                 : `Compare${selected.length ? ` (${selected.length})` : ""}`}
             </button>
           </div>
-          <div className="table-scroll">
-            <table className="results-table">
-              <thead>
-                <tr>
-                  <th>
+          <div className="table-scroll runs-table-container">
+            <table
+              className="results-table"
+              role="table"
+              aria-label="Saved runs"
+            >
+              <thead role="rowgroup">
+                <tr role="row">
+                  <th scope="col" role="columnheader">
                     <span className="sr-only">Select</span>
                   </th>
-                  <th>Run</th>
-                  <th>Agent</th>
-                  <th>Status</th>
-                  <th>Answers</th>
-                  <th>Saved score</th>
-                  <th>Actions</th>
+                  <th scope="col" role="columnheader">
+                    Run
+                  </th>
+                  <th scope="col" role="columnheader">
+                    Agent
+                  </th>
+                  <th scope="col" role="columnheader">
+                    Status
+                  </th>
+                  <th scope="col" role="columnheader">
+                    Answers
+                  </th>
+                  <th scope="col" role="columnheader">
+                    Saved score
+                  </th>
+                  <th scope="col" role="columnheader">
+                    Actions
+                  </th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody role="rowgroup">
                 {runs.map((run) => (
-                  <tr key={run.id}>
-                    <td>
+                  <tr key={run.id} role="row">
+                    <td className="results-selection" role="cell">
+                      <span className="results-field-label" aria-hidden="true">
+                        Compare
+                      </span>
                       <input
                         type="checkbox"
                         aria-label={`Select ${run.name} for comparison`}
@@ -157,7 +176,7 @@ export function Runs({
                         }
                       />
                     </td>
-                    <td>
+                    <td className="results-identity" role="cell">
                       <a
                         className="run-link"
                         href={`#/runs/${run.id}${run.researchSessionId ? `?session=${run.researchSessionId}` : ""}`}
@@ -168,7 +187,10 @@ export function Runs({
                         {run.bankName} · {date(run.createdAt)}
                       </small>
                     </td>
-                    <td>
+                    <td role="cell">
+                      <span className="results-field-label" aria-hidden="true">
+                        Agent
+                      </span>
                       <span>
                         {run.targetKind === "external"
                           ? run.targetName
@@ -180,13 +202,22 @@ export function Runs({
                           : run.harness}
                       </small>
                     </td>
-                    <td>
+                    <td role="cell">
+                      <span className="results-field-label" aria-hidden="true">
+                        Status
+                      </span>
                       <Status value={run.status} />
                     </td>
-                    <td className="mono">
+                    <td className="mono" role="cell">
+                      <span className="results-field-label" aria-hidden="true">
+                        Answers
+                      </span>
                       <RunOutcomes {...run} />
                     </td>
-                    <td className="mono">
+                    <td className="mono" role="cell">
+                      <span className="results-field-label" aria-hidden="true">
+                        Saved score
+                      </span>
                       <AssessmentSelector
                         runId={run.id}
                         passes={run.assessmentPasses ?? []}
@@ -212,7 +243,10 @@ export function Runs({
                         )}
                       />
                     </td>
-                    <td>
+                    <td role="cell">
+                      <span className="results-field-label" aria-hidden="true">
+                        Actions
+                      </span>
                       <div className="row-actions">
                         <a
                           href={`#/runs/new?source=${run.id}`}

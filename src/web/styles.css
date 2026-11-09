@@ -1336,6 +1336,77 @@ tr:last-child td {
 .results-table td {
   vertical-align: middle;
 }
+.results-field-label {
+  display: none;
+}
+.runs-table-container {
+  container: runs-library / inline-size;
+}
+@container runs-library (width < 850px) {
+  .results-table,
+  .results-table tbody {
+    display: block;
+    min-width: 0;
+  }
+  .results-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+  .results-table tbody > tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 18px 16px;
+    padding: 20px 18px;
+  }
+  .results-table tbody > tr + tr {
+    border-top: 1px solid var(--line);
+  }
+  .results-table td {
+    display: block;
+    grid-column: 1 / -1;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    overflow-wrap: anywhere;
+  }
+  .results-table .results-selection {
+    grid-column: 2;
+    grid-row: 1;
+    text-align: center;
+  }
+  .results-table .results-identity {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .results-field-label {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .results-table .score-selector select {
+    min-width: 0;
+    max-width: 100%;
+  }
+}
+@container runs-library (540px <= width < 850px) {
+  .results-table tbody > tr {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .results-table td:nth-child(n + 3):nth-child(-n + 6) {
+    grid-column: auto;
+  }
+  .results-table .results-selection {
+    justify-self: end;
+  }
+}
 .run-link {
   font-weight: 500;
   color: var(--text);
@@ -2375,9 +2446,6 @@ tr:last-child td {
   }
   .observer-footer > .mono {
     display: none;
-  }
-  .results-table {
-    min-width: 780px;
   }
   .question-table {
     overflow: auto;

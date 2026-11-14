@@ -13,7 +13,7 @@
     "build": "tsc -p tsconfig.build.json && vite build",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=4",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

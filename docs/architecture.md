@@ -322,6 +322,7 @@ Generated builds, dependencies, workspaces, and databases are ignored and are no
 | Ancillary scripts       | Scripts, explicit type checks, isolated workflow execution.                |
 
 **npm run validate** runs formatting, import boundaries, types, lint, tests, and build.
+By default, the test command runs at most four Vitest workers to bound local CI resource use.
 The architecture checker has its own [regression tests](../tests/architecture-check.test.ts).
 The offline [preview seeder](../scripts/seed-observation-preview.ts) imports fixture runtime support and participates in TypeScript checking.
 Pass `--data-directory` to verify it in an isolated workspace.

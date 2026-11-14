@@ -122,11 +122,19 @@ export function runPerformance(
     : undefined;
   const researcherUsage: UsageReport[] = [];
   let researcherTurns = 0;
+  let researcherInterrupted = false;
   let previousConversation: Usage;
   let seenConversation = false;
-  for (const turn of parent?.turns ?? []) {
+  for (const turn of parent?.reports ?? []) {
     const belongs = turn.runId === runId;
-    if (turn.runId === null) researcherUsage.push({});
+    if (turn.state !== "accepted") {
+      if (belongs) {
+        researcherUsage.push(turn.state === "pending" ? { pending: true } : {});
+        if (turn.state === "pending") researcherTurns++;
+        else researcherInterrupted = true;
+      }
+      continue;
+    }
     let value = turn.usage;
     if (turn.usageScope === "conversation") {
       const current = value;
@@ -155,11 +163,6 @@ export function runPerformance(
       researcherTurns++;
       researcherUsage.push({ usage: value });
     }
-  }
-  if (parent?.currentRunId === runId) {
-    if (parent.pending) researcherUsage.push({ pending: true });
-    for (let index = 0; index < (parent.interruptedTurns ?? 1); index++)
-      researcherUsage.push({});
   }
   const originalJudges = [
     ...db.originalJudgeUsage(runId),
@@ -229,20 +232,20 @@ export function runPerformance(
       turns: turns || null,
       toolCalls: toolCalls || null,
     },
-    researcher: {
-      ...aggregateUsage(researcherUsage),
-      turns:
-        parent &&
-        (((parent.accounting.status === "unavailable" ||
-          (parent.interruptedTurns ?? 0) > 0) &&
-          parent.currentRunId === runId) ||
-          parent.turns.some((turn) => turn.runId === null))
-          ? null
-          : parent
-            ? researcherTurns +
-              (parent.pending && parent.currentRunId === runId ? 1 : 0)
-            : 0,
-    },
+    researcher:
+      parent && !parent.attributionKnown
+        ? {
+            inputTokens: null,
+            uncachedInputTokens: null,
+            outputTokens: null,
+            cachedInputTokens: null,
+            costUsd: null,
+            turns: null,
+          }
+        : {
+            ...aggregateUsage(researcherUsage),
+            turns: researcherInterrupted ? null : researcherTurns,
+          },
     judge: { ...aggregateUsage(judgeUsage), calls: judgeUsage.length },
   };
 }

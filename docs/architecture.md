@@ -260,6 +260,9 @@ Active, paused, and halted research sessions retain ownership; cancelled Runs re
 Unknown usage blocks admissions under a configured spending ceiling.
 Thresholds cannot retract work already in flight.
 [Performance](../src/application/performance.ts) and [usage projection](../src/application/usage-projection.ts) preserve subtotals, unknown components, and pending counts.
+The database projects researcher usage ownership from saved accepted inputs, pending inputs, and parent-session interruption audits, independently of the current Run pointer.
+Interruption attribution requires valid linked Run identities, complete audit checkpoints, and counts consistent with admission accounting.
+Unprovable history uses unknown researcher totals and turns without claiming per-Run coverage counts.
 Run duration sums active execution segments and excludes paused, saved, and restart downtime.
 A crash without a provable segment end marks total duration incomplete instead of estimating it.
 Original failure and recovered-result counts follow physical first-execution history after logical recovery.

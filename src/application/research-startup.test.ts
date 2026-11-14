@@ -342,10 +342,13 @@ it.each(["cancelled", "failed", "completed"] as const)(
     expect(saved.pendingTurn).toBeUndefined();
     const usage = (await app.execute("runs.get", { runId: f.runId }))
       .performance!.researcher;
-    expect(usage.reporting?.inputTokens).toMatchObject({
-      missing: 8,
-      pending: 0,
+    expect(usage).toMatchObject({
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: null,
+      turns: null,
     });
+    expect(usage.reporting).toBeUndefined();
     const db = new Database(join(f.path, "workspace.sqlite"));
     try {
       const events = db.events({ sessionId: f.sessionId });
@@ -457,10 +460,13 @@ it("preserves the recorded count of an already classified legacy failed checkpoi
   expect(saved.pendingTurn).toBeUndefined();
   const usage = (await app.execute("runs.get", { runId: f.runId })).performance!
     .researcher;
-  expect(usage.reporting?.inputTokens).toMatchObject({
-    missing: 1,
-    pending: 0,
+  expect(usage).toMatchObject({
+    inputTokens: null,
+    outputTokens: null,
+    costUsd: null,
+    turns: null,
   });
+  expect(usage.reporting).toBeUndefined();
   await app.close();
   const bytes = read(f.path, f.sessionId);
   const restarted = await f.open();
@@ -552,11 +558,12 @@ it.each(
     const performance = (await app.execute("runs.get", { runId: f.runId }))
       .performance!.researcher;
     expect(performance.turns).toBeNull();
-    expect(performance.reporting?.inputTokens.missing).toBeGreaterThanOrEqual(
-      1,
-    );
-    expect(performance.reporting?.inputTokens.pending).toBe(0);
-    if (!completed) expect(performance.inputTokens).toBeNull();
+    expect(performance).toMatchObject({
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: null,
+    });
+    expect(performance.reporting).toBeUndefined();
     const raw = JSON.parse(read(f.path, f.sessionId)) as ResearchRecord;
     expect(raw.researcherInvocations).toBeUndefined();
     expect(raw.interruptedTurns).toBe(recorded);
@@ -748,10 +755,12 @@ it.each(
     expect(observed.session.interruptedTurns).toBeUndefined();
     const run = await post("runs.get", { runId: f.runId });
     expect(run.performance.researcher.turns).toBeNull();
-    expect(run.performance.researcher.reporting.inputTokens).toMatchObject({
-      missing: 1,
-      pending: 0,
+    expect(run.performance.researcher).toMatchObject({
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: null,
     });
+    expect(run.performance.researcher.reporting).toBeUndefined();
     await post("research.control", {
       sessionId: f.sessionId,
       action: "resume",
@@ -840,7 +849,12 @@ it.each([
       const usage = (await app.execute("runs.get", { runId: f.runId }))
         .performance!.researcher;
       expect(usage.turns).toBeNull();
-      expect(usage.reporting?.inputTokens.missing).toBeGreaterThanOrEqual(1);
+      expect(usage).toMatchObject({
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+      });
+      expect(usage.reporting).toBeUndefined();
     }
     await app.execute("research.control", {
       sessionId: f.sessionId,

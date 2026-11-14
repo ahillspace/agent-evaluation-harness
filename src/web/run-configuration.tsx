@@ -39,9 +39,14 @@ export function RunConfiguration({ view }: { view: RunView }) {
             ? "The remote system controls its own prompts, models, and tools. This export describes the saved endpoint request."
             : "The export contains agent settings and credential placeholders. Questions and expected answers stay in this app."}
         </p>
-        <JsonView
-          value={resource.data ?? { status: "Loading saved configuration..." }}
-        />
+        <details className="disclosure">
+          <summary>Target configuration JSON</summary>
+          <JsonView
+            value={
+              resource.data ?? { status: "Loading saved configuration..." }
+            }
+          />
+        </details>
         <details className="disclosure">
           <summary>Question bank and evaluation settings</summary>
           <JsonView

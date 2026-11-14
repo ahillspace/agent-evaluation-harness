@@ -239,7 +239,7 @@ it("searches the source and resets pagination while displaying matching counts",
     offset: 0,
   });
   expect(container.textContent).toContain("Source match");
-  expect(container.textContent).toContain("1-1 of 1 matching runs");
+  expect(container.textContent).toContain("1-1 of 1 matching run");
   await input("missing");
   expect(container.textContent).toContain("No runs match these filters.");
   expect(container.textContent).toContain("0-0 of 0 matching runs");

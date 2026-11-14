@@ -29,7 +29,8 @@ export function EvaluatorPreview({ preview }: { preview: EvaluationPreview }) {
               : `${changed} assessment${changed === 1 ? "" : "s"} changed`}
           </strong>
           <p>
-            {total} saved answers reviewed across {preview.runs.length} runs.
+            {total} saved answer{total === 1 ? "" : "s"} reviewed across{" "}
+            {preview.runs.length} run{preview.runs.length === 1 ? "" : "s"}.
             This draft is not published.
           </p>
         </div>

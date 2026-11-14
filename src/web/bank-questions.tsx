@@ -211,8 +211,9 @@ export function BankQuestions({
         </Empty>
       )}
       <p className="subtle">
-        {visible.length} of {questions.length} questions. Select a question to
-        edit its answer and effective rules.
+        {visible.length} of {questions.length} question
+        {questions.length === 1 ? "" : "s"}. Select a question to edit its
+        answer and effective rules.
       </p>
     </div>
   );

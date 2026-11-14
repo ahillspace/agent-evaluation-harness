@@ -210,9 +210,9 @@ export function ReviewDialog({
           />
         </Field>
         <p className="subtle">
-          {edited.length} questions reviewed. Each change records the prior
-          judgment, reviewer, and reason. Excluded questions are reported
-          separately.
+          {edited.length} question{edited.length === 1 ? "" : "s"} reviewed.
+          Each change records the prior judgment, reviewer, and reason. Excluded
+          questions are reported separately.
         </p>
         <button
           className="button primary"

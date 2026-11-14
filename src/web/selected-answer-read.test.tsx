@@ -590,6 +590,6 @@ it("reads human-review answers only while disclosed, pins their hash, and preser
       '[aria-label="Reason or review note"]',
     )!.value,
   ).toBe("Preserved first-question note");
-  expect(document.body.textContent).toContain("1 questions reviewed");
+  expect(document.body.textContent).toContain("1 question reviewed");
   expect(requested("runs.answer")).toHaveLength(1);
 });

@@ -85,9 +85,12 @@ export type AssessmentPassObservation = Omit<
   judgments: Omit<PassJudgment, "request" | "response" | "details">[];
   observationRevision: string;
 };
-export type AssessmentPassDetail = AssessmentPass & {
+/** UI inspection; complete saved passes are available through assessment export. */
+export interface AssessmentPassDetail {
+  configuration: AssessmentPass["configuration"];
+  judgments: PassJudgment[];
   observationRevision: string;
-};
+}
 export type AssessmentPassSummary = Omit<
   AssessmentPass,
   "configuration" | "judgments" | "basis"

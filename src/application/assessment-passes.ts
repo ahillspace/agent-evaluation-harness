@@ -61,24 +61,26 @@ function jevAssessmentState(
     return "completed";
   return judgment.status === "error" ? "error" : undefined;
 }
+function observeJudgment(
+  source: AssessmentPass["source"],
+  {
+    request: _request,
+    response: _response,
+    details: _details,
+    ...judgment
+  }: PassJudgment,
+): AssessmentPassObservation["judgments"][number] {
+  const jevAssessmentStatus =
+    judgment.jevAssessmentId && jevAssessmentState(source, judgment);
+  return jevAssessmentStatus ? { ...judgment, jevAssessmentStatus } : judgment;
+}
 export function observePass(pass: AssessmentPass): AssessmentPassObservation {
   const { configuration: _configuration, ...metadata } = pass;
   const observation = {
     ...metadata,
     ...passRates(pass.coverage),
-    judgments: pass.judgments.map(
-      ({
-        request: _request,
-        response: _response,
-        details: _details,
-        ...judgment
-      }) => {
-        const jevAssessmentStatus =
-          judgment.jevAssessmentId && jevAssessmentState(pass.source, judgment);
-        return jevAssessmentStatus
-          ? { ...judgment, jevAssessmentStatus }
-          : judgment;
-      },
+    judgments: pass.judgments.map((judgment) =>
+      observeJudgment(pass.source, judgment),
     ),
   };
   return { ...observation, observationRevision: digest(observation) };
@@ -963,7 +965,25 @@ export class AssessmentPassService {
       passId,
       expectedObservationRevision,
     );
-    return { ...this.detail(pass), observationRevision };
+    return {
+      configuration: pass.configuration,
+      observationRevision,
+      judgments: pass.judgments.map((original) => {
+        const judgment = observeJudgment(pass.source, original);
+        return {
+          ...judgment,
+          ...(original.details !== undefined
+            ? { details: original.details }
+            : {}),
+          ...(!judgment.jevAssessmentId && original.request !== undefined
+            ? { request: original.request }
+            : {}),
+          ...(!judgment.jevAssessmentId && original.response !== undefined
+            ? { response: original.response }
+            : {}),
+        };
+      }),
+    };
   }
   private detail(pass: AssessmentPass): AssessmentPass {
     const captured =

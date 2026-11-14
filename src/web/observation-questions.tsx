@@ -55,6 +55,7 @@ export function RunQuestions({
   onReview,
   selectedResultId,
   onSelectResult,
+  onInspectCapturedScore,
 }: {
   view: RunView;
   pass?: AssessmentPassObservation;
@@ -62,6 +63,7 @@ export function RunQuestions({
   onReview: (id: string) => void;
   selectedResultId: string;
   onSelectResult: (id: string) => void;
+  onInspectCapturedScore: () => void;
 }) {
   const [attemptId, setAttemptId] = useState("");
   const [tab, setTab] = useState(() =>
@@ -449,10 +451,22 @@ export function RunQuestions({
               />
             )}
             {judgment?.jevAssessmentId && !jev && (
-              <p className="subtle">
-                This score retains its captured Jev state. Use a current Jev
-                score to inspect the settled assessment.
-              </p>
+              <div className="stack">
+                <p className="subtle">
+                  This score retains its captured Jev state. Use a current Jev
+                  score to inspect the settled assessment.
+                </p>
+                {pass && pass.status !== "running" && (
+                  <div className="actions">
+                    <button
+                      className="text-button"
+                      onClick={onInspectCapturedScore}
+                    >
+                      Inspect captured score
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
             {pass?.source === "deterministic" && judgmentDetail?.details && (
               <details className="disclosure">
@@ -511,18 +525,19 @@ export function RunQuestions({
                 </p>
               )}
             </details>
-            {(judgmentDetail?.request || judgmentDetail?.response) && (
-              <details className="disclosure inspector-section">
-                <summary>Assessment request and response</summary>
-                <JsonView
-                  value={{
-                    request: judgmentDetail.request,
-                    response: judgmentDetail.response,
-                    configuration: assessmentDetail?.configuration.judge,
-                  }}
-                />
-              </details>
-            )}
+            {!judgmentDetail?.jevAssessmentId &&
+              (judgmentDetail?.request || judgmentDetail?.response) && (
+                <details className="disclosure inspector-section">
+                  <summary>Assessment request and response</summary>
+                  <JsonView
+                    value={{
+                      request: judgmentDetail.request,
+                      response: judgmentDetail.response,
+                      configuration: assessmentDetail?.configuration.judge,
+                    }}
+                  />
+                </details>
+              )}
             <details className="disclosure inspector-section">
               <summary>Attempt details</summary>
               {attempt?.error && <p className="warning">{attempt.error}</p>}

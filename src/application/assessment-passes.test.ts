@@ -374,7 +374,7 @@ it("retries only failed LLM judgments and preserves the original pass and refere
     expect(targetCalls).toBe(2);
     expect(
       (
-        await app.execute("runs.assessment", {
+        await app.execute("runs.export-assessment", {
           runId: launched.run.id,
           passId: pass.id,
         })

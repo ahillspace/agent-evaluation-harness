@@ -237,11 +237,16 @@ it("saves automatic and named scores through assessment passes across HTTP witho
     runId: launched.run.id,
     passId: "scores_legacy-unpublished",
   });
-  expect(unpublished.name).toContain("unpublished historical score");
+  const unpublishedObservation = (
+    await post("runs.get", { runId: launched.run.id })
+  ).assessmentPasses.find(
+    (pass: { id: string }) => pass.id === "scores_legacy-unpublished",
+  );
+  expect(unpublishedObservation.name).toContain("unpublished historical score");
   expect(unpublished.judgments[0]).not.toHaveProperty("attemptId");
   const exportedDraft = await post("runs.export-assessment", {
     runId: launched.run.id,
-    passId: unpublished.id,
+    passId: "scores_legacy-unpublished",
   });
   expect(exportedDraft.judgments).toEqual(unpublished.judgments);
   const defaultView = await post("runs.get", { runId: second.run.id });

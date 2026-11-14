@@ -359,7 +359,7 @@ it.each(["empty", "note"] as const)(
       accuracy: 1,
       graded: 1,
     });
-    const draft = await post("runs.assessment", {
+    const draft = await post("runs.export-assessment", {
       runId: first.run.id,
       passId: "scores_unpublished-history",
     });

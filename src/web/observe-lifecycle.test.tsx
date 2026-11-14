@@ -2,12 +2,9 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
-import type {
-  AssessmentPassDetail,
-  AttemptRecord,
-  RunView,
-} from "../contracts.js";
+import type { AssessmentPass, AttemptRecord, RunView } from "../contracts.js";
 import { Observe } from "./observe.js";
+type FixturePass = AssessmentPass & { observationRevision: string };
 
 it.each([
   { observeRunning: true, bodyUnavailable: false },
@@ -20,7 +17,7 @@ it.each([
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let phase: "interrupted" | "running" | "completed" = "interrupted";
     let detailCalls = 0;
-    const currentPass = (): AssessmentPassDetail => {
+    const currentPass = (): FixturePass => {
       const completed = phase === "completed";
       return {
         id: "original-pass",

@@ -147,7 +147,7 @@ it.each(["normal", "selection-gap"])(
       expect(humans).toHaveLength(3);
       const recovered = await Promise.all(
         humans.map((pass) =>
-          app.execute("runs.assessment", { runId, passId: pass.id }),
+          app.execute("runs.export-assessment", { runId, passId: pass.id }),
         ),
       );
       const chained = recovered.find(
@@ -167,7 +167,7 @@ it.each(["normal", "selection-gap"])(
         (pass) => pass.createdAt === reviews[2]!.createdAt,
       )!;
       expect(rescored.parentPassId).toBe(`scores_${scores.id}`);
-      const baseline = await app.execute("runs.assessment", {
+      const baseline = await app.execute("runs.export-assessment", {
         runId,
         passId: `original_deterministic_${runId}`,
       });
@@ -256,7 +256,7 @@ it("preserves an ambiguous applied-answer legacy review without blocking startup
     const human = recovered.assessmentPasses!.find(
       (pass) => pass.source === "human",
     )!;
-    const pass = await app.execute("runs.assessment", {
+    const pass = await app.execute("runs.export-assessment", {
       runId,
       passId: human.id,
     });
@@ -284,7 +284,7 @@ it("preserves an ambiguous applied-answer legacy review without blocking startup
     await app.close();
     app = await createApplication({ dataDirectory: directory, runtime });
     expect(
-      (await app.execute("runs.assessment", { runId, passId: pass.id }))
+      (await app.execute("runs.export-assessment", { runId, passId: pass.id }))
         .judgments,
     ).toEqual(pass.judgments);
     expect(execute).toHaveBeenCalledTimes(2);

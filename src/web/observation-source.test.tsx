@@ -2,9 +2,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { AssessmentPassDetail, RunView } from "../contracts.js";
+import type { AssessmentPass, RunView } from "../contracts.js";
 import { RunQuestions } from "./observation-questions.js";
 import { ReviewDialog } from "./human-review.js";
+type FixturePass = AssessmentPass & { observationRevision: string };
 
 const { resource } = vi.hoisted(() => ({ resource: vi.fn() }));
 vi.mock("./api.js", async (importOriginal) => ({
@@ -89,7 +90,7 @@ const pass = (recovered: boolean) =>
           : {}),
       },
     ],
-  }) as AssessmentPassDetail;
+  }) as FixturePass;
 let root: Root;
 let container: HTMLDivElement;
 beforeEach(() => {
@@ -126,6 +127,7 @@ it("shows the recovered verdict and its source instead of the original execution
         pass={pass(true)}
         selectedResultId="r1"
         onSelectResult={() => {}}
+        onInspectCapturedScore={() => {}}
         onReview={() => {}}
       />,
     ),
@@ -151,6 +153,7 @@ it("keeps original failed evidence when the original score is selected", async (
         pass={pass(false)}
         selectedResultId="r1"
         onSelectResult={() => {}}
+        onInspectCapturedScore={() => {}}
         onReview={() => {}}
       />,
     ),

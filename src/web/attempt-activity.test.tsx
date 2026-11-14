@@ -70,6 +70,7 @@ async function render(
         pass={pass}
         selectedResultId={selected}
         onSelectResult={() => {}}
+        onInspectCapturedScore={() => {}}
         onReview={() => {}}
       />,
     ),

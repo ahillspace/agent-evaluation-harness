@@ -423,7 +423,19 @@ it("polls live first and recovery automatic scores over HTTP without reading evi
     });
     expect(
       detail.judgments.find((judgment) => judgment.resultId === error.resultId),
-    ).toMatchObject({ error: { code: "fixture_capacity", httpStatus: 422 } });
+    ).not.toHaveProperty("error");
+    const record = await command("jev.get", {
+      assessmentId: error.jevAssessmentId!,
+      assessmentContext: {
+        runId,
+        passId: failedJudge.id,
+        expectedObservationRevision: failedJudge.observationRevision,
+      },
+    });
+    expect(record).toMatchObject({
+      error: { code: "fixture_capacity" },
+      httpStatus: 422,
+    });
   } finally {
     watching = false;
     releaseJudge();

@@ -1,7 +1,6 @@
 import {
   useId,
   useState,
-  useEffect,
   useLayoutEffect,
   useRef,
   type ReactNode,
@@ -218,7 +217,7 @@ export function Help({
           >
             {tooltip ?? children}
           </span>,
-          document.body,
+          anchor.current?.closest("dialog") ?? document.body,
         )}
       {open && (
         <Modal title={label} onClose={() => setOpen(false)}>
@@ -428,50 +427,38 @@ export function Modal({
   onClose: () => void;
 }) {
   const id = useId();
-  const ref = useRef<HTMLElement>(null);
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    ref.current
-      ?.querySelector<HTMLElement>(
-        "button, input, select, textarea, [tabindex]",
-      )
-      ?.focus();
-    return () => previous?.focus();
+  const ref = useRef<HTMLDialogElement>(null);
+  useLayoutEffect(() => {
+    const dialog = ref.current;
+    if (!dialog) return;
+    dialog.showModal();
+    return () => dialog.close();
   }, []);
   const content = (
-    <div
+    <dialog
+      ref={ref}
       className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={id}
+      closedby="none"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          onClose();
+        }
+      }}
+      onCancel={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+      }}
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <section
-        ref={ref}
-        className="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={id}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.stopPropagation();
-            onClose();
-          }
-          if (event.key === "Tab") {
-            const items = ref.current?.querySelectorAll<HTMLElement>(
-              'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]',
-            );
-            const first = items?.[0],
-              last = items?.[items.length - 1];
-            if (event.shiftKey && document.activeElement === first) {
-              event.preventDefault();
-              last?.focus();
-            } else if (!event.shiftKey && document.activeElement === last) {
-              event.preventDefault();
-              first?.focus();
-            }
-          }
-        }}
-      >
+      <section className="modal">
         <header>
           <h2 id={id}>{heading}</h2>
           <button
@@ -484,7 +471,7 @@ export function Modal({
         </header>
         {children}
       </section>
-    </div>
+    </dialog>
   );
   return typeof document === "undefined"
     ? content

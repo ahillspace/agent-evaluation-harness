@@ -1250,6 +1250,7 @@ export interface ResearchRecord {
   pendingProposal?: AgentConfig;
   pendingTurn?: { input: string; startedAt: string };
   researcherInvocations?: number;
+  /** Historical recorded count; current accounting derives from admissions and saved outputs. */
   interruptedTurns?: number;
   turns: Array<{ input: string; output: ResearchTurn; createdAt: string }>;
   error?: string;

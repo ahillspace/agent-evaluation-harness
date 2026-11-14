@@ -56,6 +56,11 @@
 - Research candidates launch through the same engine as manual Runs.
 - Gold retrieval requires an explicit audited request.
 - Research limits stop additional target and researcher admissions.
+- Reopening settled research preserves its saved bytes, while each interrupted researcher admission becomes one missing usage report without remaining pending.
+- Research startup preserves request evidence, reconstructs committed baseline linkage, and rejects lost conversation continuity without invoking a provider.
+- Persisted terminal research checkpoints settle once while preserving lifecycle and captured input; interruption audit and checkpoint consumption commit atomically.
+- Stale initialization cannot release research ownership while a newer researcher drains, admit an early Resume, or enable manual Run takeover.
+- Missing admission counts with saved history remain unknown in observation and prevent all new research work before candidate creation, regardless of spending limits.
 
 ## Product
 

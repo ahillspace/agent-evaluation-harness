@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { targetFixture } from "../../tests/fixtures/runtime-targets.js";
 import {
@@ -291,6 +292,155 @@ it("keeps a newer initialization Resume when the earlier paused baseline prepara
   expect(receipt.body.session.runIds).toHaveLength(1);
   expect(f.execute).toHaveBeenCalledTimes(1);
 });
+
+it.each(["cancel", "halt"] as const)(
+  "keeps a newer researcher draining when stale initialization returns after %s",
+  async (action) => {
+    const f = await setup();
+    const post = await httpCommands(f.app);
+    const initialEntered = deferred();
+    const initialRelease = deferred();
+    const researcherEntered = deferred();
+    const researcherRelease = deferred();
+    let resolutions = 0;
+    f.runtime.resolveTarget = async (target) => {
+      if (++resolutions === 1) {
+        initialEntered.resolve();
+        await initialRelease.promise;
+      }
+      return targetFixture.resolveTarget.call(f.runtime, target);
+    };
+    f.researcher.mockImplementationOnce(async (input) => {
+      input.onEvent({
+        type: "conversation.created",
+        message: "Ready",
+        data: { conversationId: "fixture-conversation" },
+      });
+      researcherEntered.resolve();
+      await researcherRelease.promise;
+      throw new Error("Interrupted fixture researcher");
+    });
+    const initial = post("research.launch", {
+      ...f.input,
+      maxTargetInvocations: 10,
+    });
+    await initialEntered.promise;
+    const sessionId = (await post("workspace.get", {})).body
+      .researchSessions[0]!.id;
+    try {
+      expect(
+        (await post("research.control", { sessionId, action: "pause" })).status,
+      ).toBe(200);
+      expect(
+        (await post("research.control", { sessionId, action: "resume" }))
+          .status,
+      ).toBe(200);
+      await researcherEntered.promise;
+      expect(
+        (await post("research.control", { sessionId, action })).status,
+      ).toBe(200);
+      initialRelease.resolve();
+      expect((await initial).status).toBeGreaterThanOrEqual(400);
+      const db = new Database(join(f.directory, "workspace.sqlite"));
+      try {
+        expect(db.require("research", sessionId)).toMatchObject({
+          status: action === "cancel" ? "cancelling" : "halting",
+          pendingTurn: { input: expect.any(String) },
+        });
+      } finally {
+        db.close();
+      }
+      expect(
+        (await post("research.control", { sessionId, action: "resume" }))
+          .status,
+      ).toBe(409);
+      const live = await post("research.get", { sessionId });
+      const child = await post("runs.get", {
+        runId: live.body.session.currentRunId,
+      });
+      expect(child.body.controllingJob?.kind).toBe("research");
+      expect(
+        (
+          await post("runs.retry-failed", {
+            runId: live.body.session.currentRunId,
+            idempotencyKey: "no-pending-takeover",
+            acknowledgeDuplicateWork: true,
+          })
+        ).status,
+      ).toBe(409);
+    } finally {
+      initialRelease.resolve();
+      researcherRelease.resolve();
+    }
+    await f.app.waitForIdle();
+    const db = new Database(join(f.directory, "workspace.sqlite"));
+    let runId: string;
+    try {
+      const saved = db.require("research", sessionId);
+      expect(saved).toMatchObject({
+        status: action === "cancel" ? "cancelled" : "halted",
+        intent: action,
+      });
+      expect(saved.interruptedTurns).toBeUndefined();
+      expect(
+        (await f.app.execute("research.get", { sessionId })).session
+          .interruptedTurns,
+      ).toBe(1);
+      expect(saved.pendingTurn).toBeUndefined();
+      runId = saved.currentRunId;
+      expect(
+        db
+          .events({ sessionId })
+          .filter((event) => event.type === "research.turn.requested")
+          .map((event) => event.data),
+      ).toEqual([
+        { input: expect.stringContaining("baselineRun"), conversationId: null },
+      ]);
+    } finally {
+      db.close();
+    }
+    const usage = (await f.app.execute("runs.get", { runId })).performance!
+      .researcher;
+    expect(usage.reporting?.inputTokens).toMatchObject({
+      missing: 1,
+      pending: 0,
+    });
+    await f.app.close();
+    const readSavedBytes = () => {
+      const reader = new DatabaseSync(join(f.directory, "workspace.sqlite"), {
+        readOnly: true,
+      });
+      try {
+        return reader
+          .prepare("SELECT value FROM records WHERE kind='research' AND id=?")
+          .get(sessionId)!.value;
+      } finally {
+        reader.close();
+      }
+    };
+    const before = readSavedBytes();
+    const restarted = await createApplication({
+      dataDirectory: f.directory,
+      runtime: f.runtime,
+    });
+    cleanups.push(() => restarted.close());
+    expect(readSavedBytes()).toBe(before);
+    if (action === "halt") {
+      await restarted.execute("research.control", {
+        sessionId,
+        action: "resume",
+      });
+      await restarted.waitForIdle();
+      expect(
+        (await restarted.execute("research.get", { sessionId })).session.status,
+      ).toBe("completed");
+    }
+    await restarted.close();
+    if (action === "cancel") expect(readSavedBytes()).toBe(before);
+    expect(f.researcher).toHaveBeenCalledTimes(action === "cancel" ? 1 : 2);
+    expect(f.execute).toHaveBeenCalledTimes(1);
+  },
+);
 
 async function pausedBaseline(repetitions = 2, failed = false) {
   const f = await setup();
@@ -754,6 +904,7 @@ it.each([
     await entered.promise;
     const db = new Database(join(f.directory, "workspace.sqlite"));
     const parent = db.require("research", sessionId);
+    const parentView = (await post("research.get", { sessionId })).body.session;
     try {
       const child = db.require("run", runId);
       expect(
@@ -779,7 +930,7 @@ it.each([
       after.results.filter((result) => result.status === "completed"),
     ).toHaveLength(1);
     expect((await post("research.get", { sessionId })).body.session).toEqual(
-      parent,
+      parentView,
     );
     expect(f.execute).toHaveBeenCalledTimes(2);
     expect(f.researcher).not.toHaveBeenCalled();

@@ -25,6 +25,7 @@ import { RunService, type ResearchControlAdmission } from "./runs.js";
 import { checkResearchBudget } from "./research-budget.js";
 import { validateResearchProposal } from "../domain/research-proposal.js";
 import { AnswerSources } from "./answer-sources.js";
+import { RESEARCH_HISTORY_UNAVAILABLE } from "../domain/research-turns.js";
 
 /** The complete serialized research evidence response is limited to 16 MiB. */
 export const MAX_RESEARCH_EVIDENCE_BYTES = 16 * 1024 * 1024;
@@ -59,20 +60,21 @@ export class ResearchService {
     private readonly directory: string,
   ) {}
   recover(): void {
-    for (let session of this.db
-      .list("research")
-      .filter((s) => !isTerminal(s.status))) {
+    for (let session of this.db.list("research")) {
+      if (isTerminal(session.status)) {
+        if (session.pendingTurn)
+          this.saveStopped({ ...session, updatedAt: now() });
+        continue;
+      }
       if (cancellationRequested(session)) {
-        this.db.update("research", {
+        this.saveStopped({
           ...session,
           ...faultTransition(session, true),
-          ...(session.pendingTurn
-            ? { interruptedTurns: (session.interruptedTurns ?? 0) + 1 }
-            : {}),
           updatedAt: now(),
         });
         continue;
       }
+      let linkedBaseline = false;
       if (!session.baselineRunId) {
         const baselineInput = {
           ...session.configuration.baseline,
@@ -88,14 +90,15 @@ export class ResearchService {
           : undefined;
         if (!baseline || baseline.researchSessionId !== session.id) {
           if (session.intent === "pause") {
-            this.db.update("research", {
-              ...session,
-              status: "paused",
-              updatedAt: now(),
-            });
+            if (session.status !== "paused" || session.pendingTurn)
+              this.saveStopped({
+                ...session,
+                status: "paused",
+                updatedAt: now(),
+              });
             continue;
           }
-          this.db.update("research", {
+          this.saveStopped({
             ...session,
             status: "failed",
             intent: "halt",
@@ -105,34 +108,64 @@ export class ResearchService {
           });
           continue;
         }
+        const runIds = session.runIds.length ? session.runIds : [baseline.id];
+        const onlyBaseline = runIds.length === 1 && runIds[0] === baseline.id;
+        const currentRunId =
+          session.currentRunId || (onlyBaseline ? baseline.id : "");
+        const bestRunId =
+          session.bestRunId || (onlyBaseline ? baseline.id : "");
+        if (
+          runIds[0] !== baseline.id ||
+          new Set(runIds).size !== runIds.length ||
+          this.db.count("run", { researchSessionId: session.id }) !==
+            runIds.length ||
+          !currentRunId ||
+          !bestRunId ||
+          !runIds.includes(currentRunId) ||
+          !runIds.includes(bestRunId) ||
+          runIds.some(
+            (runId) =>
+              this.db.get("run", runId)?.researchSessionId !== session.id,
+          )
+        )
+          throw new AppError(
+            "invalid_state",
+            "Saved research run links are inconsistent. Recovery cannot replace an established current or retained run.",
+          );
         session = {
           ...session,
           baselineRunId: baseline.id,
-          currentRunId: baseline.id,
-          bestRunId: baseline.id,
-          runIds: [baseline.id],
+          currentRunId,
+          bestRunId,
+          runIds,
         };
+        linkedBaseline = true;
       }
       const continuityLost =
         session.phase === "researching" && !session.conversationId;
-      this.db.update("research", {
+      const transition = continuityLost
+        ? faultTransition(session, true)
+        : {
+            status:
+              session.intent === "pause"
+                ? ("paused" as const)
+                : ("halted" as const),
+            intent:
+              session.intent === "pause"
+                ? ("pause" as const)
+                : ("halt" as const),
+          };
+      if (
+        !linkedBaseline &&
+        !continuityLost &&
+        !session.pendingTurn &&
+        session.status === transition.status &&
+        session.intent === transition.intent
+      )
+        continue;
+      this.saveStopped({
         ...session,
-        ...(session.pendingTurn
-          ? { interruptedTurns: (session.interruptedTurns ?? 0) + 1 }
-          : {}),
-        status: continuityLost
-          ? "failed"
-          : session.intent === "cancel"
-            ? "cancelled"
-            : session.intent === "pause"
-              ? "paused"
-              : "halted",
-        intent:
-          session.intent === "cancel"
-            ? "cancel"
-            : session.intent === "pause"
-              ? "pause"
-              : "halt",
+        ...transition,
         ...(continuityLost
           ? {
               error:
@@ -142,6 +175,25 @@ export class ResearchService {
         updatedAt: now(),
       });
     }
+  }
+  private saveStopped(session: ResearchRecord): void {
+    if (session.pendingTurn) this.db.researchAccounting(session.id);
+    this.db.transaction(() => {
+      if (session.pendingTurn) {
+        this.db.append({
+          sessionId: session.id,
+          type: "research.turn.interrupted",
+          message:
+            "The researcher request was interrupted. Its completion and usage are unknown.",
+          data: { ...session.pendingTurn, completion: "unknown" },
+        });
+        session = {
+          ...session,
+          pendingTurn: undefined,
+        };
+      }
+      this.db.update("research", session);
+    });
   }
   async launch(input: ResearchInput): Promise<ResearchView> {
     if (this.closing)
@@ -226,8 +278,9 @@ export class ResearchService {
       this.schedule(sessionId);
     } catch (error) {
       const current = this.db.require("research", sessionId);
-      if (current.intent !== "run") this.settle(sessionId);
-      else if (
+      if (current.intent !== "run") {
+        if (!this.jobs.has(sessionId)) this.settle(sessionId);
+      } else if (
         digest(current) === digest(session) &&
         this.db.controlSequence({ sessionId }) === sourceSequence
       )
@@ -246,6 +299,8 @@ export class ResearchService {
     sourceSequence: number,
   ): ResearchRecord {
     const current = this.db.require("research", expected.id);
+    if (this.db.researchAccounting(current.id).status === "unavailable")
+      throw new AppError("invalid_state", RESEARCH_HISTORY_UNAVAILABLE);
     if (this.closing || current.intent !== "run" || isTerminal(current.status))
       throw new AppError(
         "interrupted",
@@ -518,12 +573,7 @@ export class ResearchService {
     if (this.jobs.has(sessionId) || this.closing) return;
     const job = this.drive(sessionId)
       .catch((error: unknown) => {
-        let current = this.db.require("research", sessionId);
-        if (current.pendingTurn)
-          current = this.db.update("research", {
-            ...current,
-            interruptedTurns: (current.interruptedTurns ?? 0) + 1,
-          });
+        const current = this.db.require("research", sessionId);
         const continuityLost =
           current.phase === "researching" &&
           !!current.pendingTurn &&
@@ -534,7 +584,7 @@ export class ResearchService {
         )
           this.settle(sessionId);
         else
-          this.db.update("research", {
+          this.saveStopped({
             ...current,
             ...faultTransition(current, true),
             error: errorMessage(error),
@@ -702,6 +752,9 @@ export class ResearchService {
           "evaluation_incomplete",
           `Research requires a completed run; the current run is ${current.status}.`,
         );
+      const accounting = this.db.researchAccounting(session.id);
+      if (accounting.status === "unavailable")
+        throw new AppError("invalid_state", RESEARCH_HISTORY_UNAVAILABLE);
       const budget = this.budgetReason(session);
       if (budget) return this.stop(session, budget);
       if (session.pendingProposal) {
@@ -752,7 +805,7 @@ export class ResearchService {
         continue;
       }
       if (
-        (session.researcherInvocations ?? session.turns.length) >=
+        accounting.nextInvocation - 1 >=
         session.configuration.maxResearcherTurns
       )
         return this.stop(session, "Researcher turn budget reached.");
@@ -805,32 +858,33 @@ export class ResearchService {
             decisionNeeded:
               "Return disposition keep or discard, independently of control continue or stop. To continue, propose a distinct unevaluated configuration. If early stopping is disabled, stop only for a concrete technical blocker or an exhausted hard budget.",
           });
-      this.db.update("research", {
-        ...session,
-        phase: "researching",
-        pendingTurn: { input: message, startedAt: now() },
-        researcherInvocations:
-          (session.researcherInvocations ?? session.turns.length) + 1,
-        updatedAt: now(),
+      this.db.transaction(() => {
+        this.db.update("research", {
+          ...session,
+          phase: "researching",
+          pendingTurn: { input: message, startedAt: now() },
+          researcherInvocations: accounting.nextInvocation,
+          updatedAt: now(),
+        });
+        this.db.append({
+          sessionId,
+          type: "research.turn.started",
+          message: initial
+            ? "Researcher conversation started after baseline evaluation."
+            : "Resuming the same researcher conversation.",
+        });
+        this.db.append({
+          sessionId,
+          type: "research.turn.requested",
+          message: "Saved researcher input before provider admission.",
+          data: {
+            input: message,
+            conversationId: session.conversationId ?? null,
+          },
+        });
       });
       const controller = new AbortController();
       this.controllers.set(sessionId, controller);
-      this.db.append({
-        sessionId,
-        type: "research.turn.started",
-        message: initial
-          ? "Researcher conversation started after baseline evaluation."
-          : "Resuming the same researcher conversation.",
-      });
-      this.db.append({
-        sessionId,
-        type: "research.turn.requested",
-        message: "Saved researcher input before provider admission.",
-        data: {
-          input: message,
-          conversationId: session.conversationId ?? null,
-        },
-      });
       const output = await this.runtime.researcher({
         sessionId,
         ...(session.conversationId
@@ -970,14 +1024,23 @@ export class ResearchService {
   }
   private settle(sessionId: string): void {
     const session = this.db.require("research", sessionId);
-    if (isTerminal(session.status)) return;
+    if (isTerminal(session.status)) {
+      if (session.pendingTurn)
+        this.saveStopped({ ...session, updatedAt: now() });
+      return;
+    }
     const status =
       session.intent === "cancel"
         ? "cancelled"
         : session.intent === "pause"
           ? "paused"
           : "halted";
-    this.db.update("research", { ...session, status, updatedAt: now() });
+    if (session.status === status && !session.pendingTurn) return;
+    this.saveStopped({
+      ...session,
+      status,
+      updatedAt: now(),
+    });
     this.db.append({
       sessionId,
       type: `research.${status}`,

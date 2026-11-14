@@ -41,6 +41,7 @@ export function checkResearchBudget(
   return researchBudgetReason(
     session,
     attempts,
+    db.researchAccounting(session.id),
     additionalTargets,
     Date.now(),
     [

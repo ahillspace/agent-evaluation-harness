@@ -309,6 +309,9 @@ export function Setup({
       number: bank.number,
       count: bank.questions.length,
     });
+  const selectedCount = bank
+    ? selectedQuestionIds(draft, bank.questions).length
+    : 0;
   const timeoutIssue = questionTimeoutIssue(draft);
   const launch = async () => {
     setPending(true);
@@ -677,7 +680,7 @@ export function Setup({
             <footer className="setup-footer">
               <span>
                 {bankState === "ready" && bank
-                  ? `${selectedQuestionIds(draft, bank.questions).length} questions × ${draft.repetitions} repetitions`
+                  ? `${selectedCount} ${selectedCount === 1 ? "question" : "questions"} × ${draft.repetitions} ${draft.repetitions === 1 ? "repetition" : "repetitions"}`
                   : {
                       unselected: "Choose a question bank",
                       loading: "Loading question bank...",

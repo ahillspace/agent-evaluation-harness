@@ -269,7 +269,8 @@ export function BankWorkspace({
         <div>
           <h2>{draft.name || "New question bank"}</h2>
           <p>
-            {draft.questions.length} questions
+            {draft.questions.length} question
+            {draft.questions.length === 1 ? "" : "s"}
             {revision
               ? ` - Published revision ${revision.number} - ${date(revision.createdAt)}`
               : " - Unpublished"}
@@ -514,7 +515,8 @@ export function BankWorkspace({
         >
           <div className="stack">
             <p>
-              Publish {draft.questions.length} questions and the current answer
+              Publish {draft.questions.length} question
+              {draft.questions.length === 1 ? "" : "s"} and the current answer
               rules as immutable revisions. Existing runs retain their recorded
               versions.
             </p>

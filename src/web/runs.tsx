@@ -303,7 +303,8 @@ export function Runs({
             <span>
               {runs.length ? offset + 1 : 0}-
               {runs.length ? offset + runs.length : 0} of{" "}
-              {page.data?.total ?? 0} matching runs
+              {page.data?.total ?? 0} matching run
+              {page.data?.total === 1 ? "" : "s"}
             </span>
             <div className="actions">
               <button

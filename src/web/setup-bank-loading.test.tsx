@@ -173,7 +173,7 @@ it("explains a failed selected bank and retries without changing the complete dr
   expect(savedDraft()).toEqual(draft);
   await act(async () => second.resolve(Response.json(detail())));
   expect(start().disabled).toBe(false);
-  expect(footer()).toContain("1 questions × 3 repetitions");
+  expect(footer()).toContain("1 question × 3 repetitions");
   expect(container.querySelector('[role="alert"]')).toBeNull();
   expect(retry()).toBeUndefined();
   const questions = Array.from(

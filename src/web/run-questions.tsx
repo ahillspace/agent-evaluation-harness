@@ -93,7 +93,8 @@ export function RunQuestions({
           <option value="">Choose a bank</option>
           {published.map((item) => (
             <option key={item.id} value={item.id}>
-              {item.name} · revision {item.number} · {item.count} questions
+              {item.name} · revision {item.number} · {item.count}{" "}
+              {item.count === 1 ? "question" : "questions"}
             </option>
           ))}
         </select>

@@ -52,7 +52,8 @@ export function BankHistory({
               <div>
                 <strong>Revision {revision.number}</strong>
                 <p>
-                  {revision.questions.length} questions -{" "}
+                  {revision.questions.length} question
+                  {revision.questions.length === 1 ? "" : "s"} -{" "}
                   {date(revision.createdAt)}
                 </p>
               </div>

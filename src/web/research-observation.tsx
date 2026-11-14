@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Control } from "../contracts.js";
-import { command, navigate } from "./api.js";
+import { command, navigate, useResource } from "./api.js";
 import { useObservation } from "./observation-stream.js";
 import { EventList } from "./observation-events.js";
 import {
@@ -23,7 +23,10 @@ export function ResearchPanel({
   const resource = useObservation("research.get", { sessionId });
   const [pending, setPending] = useState<string | null>(null),
     [error, setError] = useState<unknown>(null);
-  const [fullTurn, setFullTurn] = useState<unknown>(null);
+  const [selectedTurn, setSelectedTurn] = useState<{
+    sessionId: string;
+    index: number;
+  } | null>(null);
   if (!resource.data) return <ErrorNotice error={resource.error} />;
   const { session, allowedActions, events } = resource.data;
   return (
@@ -121,11 +124,7 @@ export function ResearchPanel({
                 {turn.output.reason && <p>{turn.output.reason}</p>}
                 <button
                   className="text-button"
-                  onClick={() => {
-                    void command("research.turn", { sessionId, index })
-                      .then(setFullTurn)
-                      .catch(setError);
-                  }}
+                  onClick={() => setSelectedTurn({ sessionId, index })}
                 >
                   Inspect full researcher turn
                 </button>
@@ -141,14 +140,45 @@ export function ResearchPanel({
           />
         </details>
       </div>
-      {fullTurn !== null && (
-        <Modal
-          title="Recorded researcher turn"
-          onClose={() => setFullTurn(null)}
-        >
-          <JsonView value={fullTurn} />
-        </Modal>
+      {selectedTurn?.sessionId === sessionId && (
+        <ResearchTurnDialog
+          key={JSON.stringify(selectedTurn)}
+          sessionId={selectedTurn.sessionId}
+          index={selectedTurn.index}
+          onClose={() => setSelectedTurn(null)}
+        />
       )}
     </section>
+  );
+}
+
+function ResearchTurnDialog({
+  sessionId,
+  index,
+  onClose,
+}: {
+  sessionId: string;
+  index: number;
+  onClose: () => void;
+}) {
+  const resource = useResource("research.turn", { sessionId, index });
+  return (
+    <Modal title={`Recorded researcher turn ${index + 1}`} onClose={onClose}>
+      <ErrorNotice error={resource.loading ? null : resource.error} />
+      {resource.data ? (
+        <JsonView value={resource.data} />
+      ) : (
+        <p className="subtle" role="status">
+          {resource.loading
+            ? "Loading recorded researcher turn..."
+            : "The selected researcher turn could not be loaded."}
+        </p>
+      )}
+      {resource.error && !resource.loading && (
+        <button className="button secondary" onClick={resource.refresh}>
+          Retry
+        </button>
+      )}
+    </Modal>
   );
 }

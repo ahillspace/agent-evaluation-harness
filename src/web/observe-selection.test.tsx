@@ -196,6 +196,30 @@ const click = async (text: string) =>
       .click();
   });
 
+it.each([0, 1])(
+  "keeps score identity and coverage without a dead chooser for %i saved scores",
+  async (count) => {
+    view.assessmentPasses = passes.slice(0, count);
+    view.selectedAssessmentPassId = count ? "rules" : undefined;
+    await render();
+    expect(selector()).toBeNull();
+    expect(summary().querySelector("h2")?.textContent).toBe(
+      count ? "Saved rules" : "Assessment pending",
+    );
+    expect(summary().textContent?.split("Saved rules")).toHaveLength(
+      count ? 2 : 1,
+    );
+    expect(summary().textContent).toContain(
+      count ? "3 / 5 judged" : "Awaiting results",
+    );
+    expect(
+      request.mock.calls.filter(([url]) =>
+        url.endsWith("/runs.select-assessment"),
+      ),
+    ).toHaveLength(0);
+  },
+);
+
 it("summarizes only the selected fourth pass with its full name and judgments", async () => {
   await render();
   expect(selector().value).toBe("human");
@@ -324,11 +348,11 @@ it("honors a linked saved pass and displays interrupted and running status witho
   ).toBe(true);
 });
 
-it("shows a pending assessment and disables selection and review before any passes exist", async () => {
+it("shows a pending assessment without selection and disables review before any passes exist", async () => {
   view.assessmentPasses = [];
   view.progress.completed = 0;
   await render();
-  expect(selector().disabled).toBe(true);
+  expect(selector()).toBeNull();
   expect(summary().textContent).toContain("Assessment pending");
   expect(summary().textContent).toContain("Awaiting results");
   expect(summary().textContent).not.toContain("0.0%");

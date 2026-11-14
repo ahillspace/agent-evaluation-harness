@@ -64,30 +64,39 @@ export function AssessmentSelector({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const optionLabels = assessmentOptionLabels(passes);
+  const selected = selectedAssessment(passes, selectedId);
   return (
     <div className="score-selector">
-      <select
-        aria-label={label}
-        value={selectedAssessment(passes, selectedId)?.id ?? ""}
-        disabled={pending || !passes.length}
-        onChange={(event) => {
-          const passId = event.target.value;
-          setPending(true);
-          setError(null);
-          void command("runs.select-assessment", { runId, passId })
-            .then(() => onSaved(passId))
-            .catch(setError)
-            .finally(() => setPending(false));
-        }}
-      >
-        {!passes.length && <option value="">Awaiting assessment</option>}
-        {passes.map((pass) => (
-          <option key={pass.id} value={pass.id}>
-            {optionLabels.get(pass.id)}
-            {pass.status === "completed" ? "" : ` (${pass.status})`}
-          </option>
-        ))}
-      </select>
+      {passes.length < 2 ? (
+        <span>
+          {selected?.name ?? "Awaiting assessment"}
+          {selected && selected.status !== "completed"
+            ? ` (${selected.status})`
+            : ""}
+        </span>
+      ) : (
+        <select
+          aria-label={label}
+          value={selected?.id ?? ""}
+          disabled={pending}
+          onChange={(event) => {
+            const passId = event.target.value;
+            setPending(true);
+            setError(null);
+            void command("runs.select-assessment", { runId, passId })
+              .then(() => onSaved(passId))
+              .catch(setError)
+              .finally(() => setPending(false));
+          }}
+        >
+          {passes.map((pass) => (
+            <option key={pass.id} value={pass.id}>
+              {optionLabels.get(pass.id)}
+              {pass.status === "completed" ? "" : ` (${pass.status})`}
+            </option>
+          ))}
+        </select>
+      )}
       <ErrorNotice error={error} />
     </div>
   );

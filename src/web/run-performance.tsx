@@ -70,16 +70,29 @@ export function RunPerformanceSummary({
     <section className="panel">
       <div className="panel-heading">
         <h2>Performance</h2>
-        <Help label="Run performance">
-          Run duration adds active execution time and excludes idle gaps.
-          Incomplete historical or interrupted timing appears as Unknown. Answer
-          time covers completed attempts. Tokens measure text sent to and
-          received from models. Turns are agent steps; tool calls are requests
-          to connected tools. Token totals include all reported requests.
-          Pending or unreported requests appear separately. Input excludes
-          reused text, which appears under Cache. Output is generated text.
-          Large counts use K for thousand and M for million; hover over a count
-          for its exact value.
+        <Help
+          label="Run performance"
+          tooltip="Review execution time, reported usage, and usage coverage. Open for token and attribution details."
+        >
+          <p>
+            Run duration adds active execution time and excludes idle gaps.
+            Incomplete historical or interrupted timing appears as Unknown.
+            Answer time covers completed attempts. Turns are agent steps; tool
+            calls are requests to connected tools.
+          </p>
+          <p>
+            Tokens measure text sent to and received from models. Totals include
+            all reported requests; pending or unreported requests appear
+            separately. Input excludes reused text, which appears under Cache.
+            Output is generated text. Reused conversation context can make
+            cumulative cache counts much larger than one question. Missing cache
+            reports also leave uncached input unreported. Large counts use K for
+            thousand and M for million; hover over a count for its exact value.
+          </p>
+          <p>
+            Researcher usage counts decisions made after this run. Roles with no
+            attributed turns or calls are omitted.
+          </p>
         </Help>
       </div>
       <div className="panel-body">
@@ -119,9 +132,7 @@ export function RunPerformanceSummary({
             <thead>
               <tr>
                 <th>Activity</th>
-                <th>
-                  Input tokens <TokenUsageHelp />
-                </th>
+                <th>Input tokens</th>
                 <th>Output tokens</th>
                 <th>Cache tokens</th>
                 <th>Turns / calls</th>
@@ -154,70 +165,69 @@ export function RunPerformanceSummary({
                 <td>{count(performance?.target.turns)}</td>
                 <td>{count(performance?.target.toolCalls)}</td>
               </tr>
-              <tr>
-                <th>Researcher (this run)</th>
-                <td>
-                  <UsageValue
-                    value={performance?.researcher.uncachedInputTokens}
-                    reporting={
-                      performance?.researcher.reporting?.uncachedInputTokens
-                    }
-                  />
-                </td>
-                <td>
-                  <UsageValue
-                    value={performance?.researcher.outputTokens}
-                    reporting={performance?.researcher.reporting?.outputTokens}
-                  />
-                </td>
-                <td>
-                  <UsageValue
-                    value={performance?.researcher.cachedInputTokens}
-                    reporting={
-                      performance?.researcher.reporting?.cachedInputTokens
-                    }
-                  />
-                </td>
-                <td>{count(performance?.researcher.turns)}</td>
-                <td>Not recorded</td>
-              </tr>
-              <tr>
-                <th>Judges</th>
-                <td>
-                  <UsageValue
-                    value={performance?.judge.uncachedInputTokens}
-                    reporting={
-                      performance?.judge.reporting?.uncachedInputTokens
-                    }
-                  />
-                </td>
-                <td>
-                  <UsageValue
-                    value={performance?.judge.outputTokens}
-                    reporting={performance?.judge.reporting?.outputTokens}
-                  />
-                </td>
-                <td>
-                  <UsageValue
-                    value={performance?.judge.cachedInputTokens}
-                    reporting={performance?.judge.reporting?.cachedInputTokens}
-                  />
-                </td>
-                <td>{count(performance?.judge.calls)}</td>
-                <td>Not applicable</td>
-              </tr>
+              {performance?.researcher.turns !== 0 && (
+                <tr>
+                  <th>Researcher (this run)</th>
+                  <td>
+                    <UsageValue
+                      value={performance?.researcher.uncachedInputTokens}
+                      reporting={
+                        performance?.researcher.reporting?.uncachedInputTokens
+                      }
+                    />
+                  </td>
+                  <td>
+                    <UsageValue
+                      value={performance?.researcher.outputTokens}
+                      reporting={
+                        performance?.researcher.reporting?.outputTokens
+                      }
+                    />
+                  </td>
+                  <td>
+                    <UsageValue
+                      value={performance?.researcher.cachedInputTokens}
+                      reporting={
+                        performance?.researcher.reporting?.cachedInputTokens
+                      }
+                    />
+                  </td>
+                  <td>{count(performance?.researcher.turns)}</td>
+                  <td>Not recorded</td>
+                </tr>
+              )}
+              {performance?.judge.calls !== 0 && (
+                <tr>
+                  <th>Judges</th>
+                  <td>
+                    <UsageValue
+                      value={performance?.judge.uncachedInputTokens}
+                      reporting={
+                        performance?.judge.reporting?.uncachedInputTokens
+                      }
+                    />
+                  </td>
+                  <td>
+                    <UsageValue
+                      value={performance?.judge.outputTokens}
+                      reporting={performance?.judge.reporting?.outputTokens}
+                    />
+                  </td>
+                  <td>
+                    <UsageValue
+                      value={performance?.judge.cachedInputTokens}
+                      reporting={
+                        performance?.judge.reporting?.cachedInputTokens
+                      }
+                    />
+                  </td>
+                  <td>{count(performance?.judge.calls)}</td>
+                  <td>Not applicable</td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
-        <p className="subtle">
-          Input excludes Cache. Reused conversation context can make cumulative
-          cache counts much larger than one question. Missing cache reports also
-          leave uncached input unreported.
-        </p>
-        <p className="subtle">
-          Researcher usage counts decisions made after this run. Zero means no
-          researcher turn is attributed to it.
-        </p>
       </div>
     </section>
   );

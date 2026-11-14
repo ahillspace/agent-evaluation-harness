@@ -164,7 +164,9 @@ function measureJudgments(
           (j) =>
             j.attemptId &&
             (j.status === "error" ||
-              (j.status === "unjudged" && !j.response && !j.jevAssessmentId)),
+              (j.status === "unjudged" &&
+                j.response === undefined &&
+                !j.jevAssessmentId)),
         ).length;
   const retryUnavailableReason = retryableJudgments
     ? undefined
@@ -214,7 +216,7 @@ export class AssessmentPassService {
           judgments: pass.judgments.map((j) =>
             j.status === "unjudged" &&
             j.attemptId &&
-            !j.response &&
+            j.response === undefined &&
             !j.jevAssessmentId
               ? {
                   ...j,
@@ -550,15 +552,17 @@ export class AssessmentPassService {
           assessment.judgeError ??
           assessment.judge?.explanation ??
           "The judge did not return a verdict.",
-        ...(assessment.judgeRequest
+        ...(assessment.judgeRequest !== undefined
           ? { request: assessment.judgeRequest }
           : {}),
         ...(run
-          ? assessment.judgeResponse || assessment.judge
+          ? assessment.judgeResponse !== undefined ||
+            assessment.judge !== undefined
             ? {
                 response:
-                  assessment.judgeResponse ??
-                  jsonSchema.parse(assessment.judge),
+                  assessment.judgeResponse !== undefined
+                    ? assessment.judgeResponse
+                    : jsonSchema.parse(assessment.judge),
               }
             : {}
           : input.raw.judgeResponded
@@ -960,11 +964,32 @@ export class AssessmentPassService {
     passId: string,
     expectedObservationRevision?: string,
   ): AssessmentPassDetail {
-    const { pass, observationRevision } = this.readBase(
-      runId,
-      passId,
-      expectedObservationRevision,
-    );
+    const stored = this.db.assessmentInspection(passId);
+    if (stored && stored.pass.runId !== runId)
+      throw new AppError(
+        "not_found",
+        "This assessment pass does not belong to the run.",
+      );
+    const pass = stored?.pass;
+    const observed = pass
+      ? observePass(pass)
+      : this.list(runId).find((item) => item.id === passId);
+    if (!observed)
+      throw new AppError(
+        "not_found",
+        "This assessment pass does not belong to the run.",
+      );
+    const observationRevision = observed.observationRevision;
+    if (
+      expectedObservationRevision !== undefined &&
+      expectedObservationRevision !== observationRevision
+    )
+      throw new AppError(
+        "conflict",
+        "This saved score changed. Refresh its judgments before continuing.",
+      );
+    if (!pass) return this.fallbackInspection(runId, observed);
+    const exchanges = new Set(stored.recordedExchangeResultIds);
     return {
       configuration: pass.configuration,
       observationRevision,
@@ -975,11 +1000,66 @@ export class AssessmentPassService {
           ...(original.details !== undefined
             ? { details: original.details }
             : {}),
-          ...(!judgment.jevAssessmentId && original.request !== undefined
-            ? { request: original.request }
+          ...(!judgment.jevAssessmentId && exchanges.has(judgment.resultId)
+            ? { hasRecordedExchange: true }
             : {}),
-          ...(!judgment.jevAssessmentId && original.response !== undefined
-            ? { response: original.response }
+        };
+      }),
+    };
+  }
+  private fallbackInspection(
+    runId: string,
+    observed: AssessmentPassObservation,
+  ): AssessmentPassDetail {
+    const legacyId = observed.id.startsWith("scores_")
+      ? observed.id.slice("scores_".length)
+      : undefined;
+    const run = this.db.require("run", runId);
+    const inputs = this.db.automaticAssessmentInputs(
+      runId,
+      observed.id.startsWith("original_") || !!legacyId,
+      legacyId,
+    );
+    const configuration: AssessmentPass["configuration"] = legacyId
+      ? this.db.legacyInspectionConfiguration(runId, legacyId)
+      : {
+          evaluator: run.manifest.evaluator,
+          referenceBank: run.manifest.bank,
+          ...(observed.source === "llm" ? { judge: run.manifest.judge } : {}),
+          ...(observed.source === "jev"
+            ? { jevJudge: run.manifest.jevJudge }
+            : {}),
+        };
+    return {
+      configuration,
+      observationRevision: observed.observationRevision,
+      judgments: observed.judgments.map((judgment) => {
+        const input = inputs.find(
+          (item) =>
+            item.result.id === judgment.resultId &&
+            item.attemptId === judgment.attemptId,
+        );
+        if (
+          !input?.raw ||
+          !judgment.attemptId ||
+          judgment.status === "excluded"
+        )
+          return judgment;
+        const inspection = this.db.automaticJudgmentInspection(
+          input.raw,
+          input.raw.assessment.resultId,
+          judgment.attemptId,
+        );
+        return {
+          ...judgment,
+          ...(observed.source === "deterministic" &&
+          inspection.details !== undefined
+            ? { details: inspection.details }
+            : {}),
+          ...(observed.source === "llm" &&
+          !judgment.jevAssessmentId &&
+          inspection.hasRecordedExchange
+            ? { hasRecordedExchange: true }
             : {}),
         };
       }),
@@ -1236,7 +1316,9 @@ export class AssessmentPassService {
         (j) =>
           j.attemptId &&
           (j.status === "error" ||
-            (j.status === "unjudged" && !j.response && !j.jevAssessmentId)),
+            (j.status === "unjudged" &&
+              j.response === undefined &&
+              !j.jevAssessmentId)),
       )
     )
       throw new AppError(
@@ -1270,7 +1352,7 @@ export class AssessmentPassService {
         !(
           judgment.status === "error" ||
           (judgment.status === "unjudged" &&
-            !judgment.response &&
+            judgment.response === undefined &&
             !judgment.jevAssessmentId)
         )
       )
@@ -1391,10 +1473,10 @@ export class AssessmentPassService {
           next = {
             ...judgment,
             ...(assessed.judgeAdmitted ? { judgmentId } : {}),
-            ...(assessed.judgeRequest
+            ...(assessed.judgeRequest !== undefined
               ? { request: assessed.judgeRequest }
               : {}),
-            ...(assessed.judgeResponse
+            ...(assessed.judgeResponse !== undefined
               ? { response: assessed.judgeResponse }
               : {}),
             status: assessed.judgeError

@@ -211,6 +211,18 @@ export interface AutomaticAssessmentInput {
     error?: { message: string };
   };
 }
+export interface AssessmentInspectionSource {
+  pass: Omit<AssessmentPass, "judgments"> & {
+    judgments: Array<
+      Omit<AssessmentPass["judgments"][number], "request" | "response">
+    >;
+  };
+  recordedExchangeResultIds: string[];
+}
+export interface JudgmentInspection {
+  details?: Json;
+  hasRecordedExchange: boolean;
+}
 export type RunListQuery = {
   bankId?: string;
   status?: string;
@@ -809,6 +821,74 @@ export class Database {
       )
       .all(runId)
       .map((row) => JSON.parse(row.value as string) as AssessmentPass);
+  }
+  /** Inspection keeps comparison bodies, but never parses recorded judge exchanges. */
+  assessmentInspection(passId: string): AssessmentInspectionSource | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT
+      json_set(value,'$.judgments',json(COALESCE((SELECT json_group_array(json_remove(item.value,'$.request','$.response')) FROM json_each(records.value,'$.judgments') item),'[]'))) AS pass,
+      COALESCE((SELECT json_group_array(json_extract(item.value,'$.resultId')) FROM json_each(records.value,'$.judgments') item WHERE json_type(item.value,'$.request') IS NOT NULL OR json_type(item.value,'$.response') IS NOT NULL),'[]') AS exchanges
+      FROM records WHERE kind='assessmentPass' AND id=?`,
+      )
+      .get(passId);
+    return row
+      ? {
+          pass: JSON.parse(
+            String(row.pass),
+          ) as AssessmentInspectionSource["pass"],
+          recordedExchangeResultIds: JSON.parse(
+            String(row.exchanges),
+          ) as string[],
+        }
+      : undefined;
+  }
+  automaticJudgmentInspection(
+    raw: NonNullable<AutomaticAssessmentInput["raw"]>,
+    resultId: string,
+    attemptId: string,
+  ): JudgmentInspection {
+    const projection = (value: string) =>
+      `json_object('details',json(${value} -> '$.deterministic.details'),'hasDetails',json_type(${value},'$.deterministic.details') IS NOT NULL,'hasRecordedExchange',json_type(${value},'$.judgeRequest') IS NOT NULL OR json_type(${value},'$.judgeResponse') IS NOT NULL OR json_type(${value},'$.judge') IS NOT NULL)`;
+    const row = raw.recordId
+      ? this.db
+          .prepare(
+            `SELECT ${projection("value")} AS value FROM records WHERE kind='assessment' AND id=? AND json_extract(value,'$.resultId')=? AND json_extract(value,'$.attemptId')=?`,
+          )
+          .get(raw.recordId, resultId, attemptId)
+      : raw.scoreSetId
+        ? this.db
+            .prepare(
+              `SELECT ${projection("item.value")} AS value FROM records,json_each(records.value,'$.assessments') item WHERE records.kind='scoreSet' AND records.id=? AND json_extract(item.value,'$.resultId')=? AND json_extract(item.value,'$.attemptId')=? LIMIT 1`,
+            )
+            .get(raw.scoreSetId, resultId, attemptId)
+        : undefined;
+    if (!row) return { hasRecordedExchange: false };
+    const value = JSON.parse(String(row.value)) as {
+      details: Json;
+      hasDetails: number;
+      hasRecordedExchange: number;
+    };
+    return {
+      ...(value.hasDetails ? { details: value.details } : {}),
+      hasRecordedExchange: value.hasRecordedExchange === 1,
+    };
+  }
+  legacyInspectionConfiguration(
+    runId: string,
+    scoreSetId: string,
+  ): AssessmentPass["configuration"] {
+    const row = this.db
+      .prepare(
+        `SELECT json_object('evaluator',json_extract(scores.value,'$.evaluator'),'referenceBank',COALESCE(json_extract(scores.value,'$.referenceBank'),json_extract(run.value,'$.manifest.bank'))) AS value FROM records scores JOIN records run ON run.kind='run' AND run.id=scores.run_id WHERE scores.kind='scoreSet' AND scores.id=? AND scores.run_id=?`,
+      )
+      .get(scoreSetId, runId);
+    if (!row)
+      throw new AppError(
+        "not_found",
+        "The historical score does not belong to this run.",
+      );
+    return JSON.parse(String(row.value)) as AssessmentPass["configuration"];
   }
   eventCounts(runId: string, attemptIds?: string[]): Record<string, number> {
     return Object.fromEntries(

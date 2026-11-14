@@ -1013,15 +1013,26 @@ it.each([true, false])(
       judgment.response = { marker: "LLM_RESPONSE" };
       view.jevAssessments = [];
     }
-    assessmentResponse = async () => Response.json(selected);
+    assessmentResponse = async () =>
+      Response.json({
+        configuration: selected.configuration,
+        observationRevision: selected.observationRevision,
+        judgments: selected.judgments.map(
+          ({ request: _request, response: _response, ...item }) => ({
+            ...item,
+            hasRecordedExchange: !jevBound,
+          }),
+        ),
+      });
+    exportResponse = async () => Response.json(selected);
     jevResponse = async () => Response.json(fullJev);
     await render();
     if (!jevBound) {
       expect(container.textContent).toContain(
         "Assessment request and response",
       );
-      expect(container.textContent).toContain("LLM_REQUEST");
-      expect(container.textContent).toContain("LLM_RESPONSE");
+      expect(container.textContent).not.toContain("LLM_REQUEST");
+      expect(container.textContent).not.toContain("LLM_RESPONSE");
       expect(container.querySelector(".jev-assessment")).toBeNull();
       return;
     }
@@ -1038,6 +1049,164 @@ it.each([true, false])(
     expect(document.body.textContent).toContain("PRIMARY_REQUEST");
     expect(document.body.textContent).toContain("PRIMARY_RESPONSE");
     expect(document.body.textContent).not.toContain("INLINE_JEV_REQUEST");
+  },
+);
+
+it.each(["llm", "human"] as const)(
+  "loads a complete %s exchange only when its inline disclosure opens",
+  async (source) => {
+    const selected = structuredClone(passes[1]!);
+    selected.source = source;
+    selected.judgments[0]!.request = { marker: "RAW_REQUEST_FIRST_LAST" };
+    selected.judgments[0]!.response = { marker: "RAW_RESPONSE_FIRST_LAST" };
+    selected.configuration.judge = { enabled: false, instructions: "Fixture" };
+    view.selectedAssessmentPassId = selected.id;
+    assessmentResponse = async () =>
+      Response.json({
+        configuration: selected.configuration,
+        observationRevision: selected.observationRevision,
+        judgments: [
+          {
+            resultId: "result",
+            status: "correct",
+            explanation: "Recorded",
+            hasRecordedExchange: true,
+          },
+        ],
+      });
+    exportResponse = async () => Response.json(selected);
+    await render();
+    const exports = () =>
+      request.mock.calls.filter(([url]) =>
+        url.endsWith("/runs.export-assessment"),
+      );
+    expect(exports()).toHaveLength(0);
+    expect(container.textContent).not.toContain("RAW_REQUEST_FIRST_LAST");
+    const disclosure = Array.from(container.querySelectorAll("details")).find(
+      (element) =>
+        element.querySelector("summary")?.textContent ===
+        "Assessment request and response",
+    );
+    expect(disclosure).toBeDefined();
+    await act(async () => {
+      disclosure!.open = true;
+      disclosure!.dispatchEvent(new Event("toggle"));
+    });
+    expect(exports()).toHaveLength(1);
+    expect(JSON.parse(exports()[0]![1].body as string)).toEqual({
+      runId: "run",
+      passId: selected.id,
+      expectedObservationRevision: selected.observationRevision,
+    });
+    expect(container.textContent).toContain("RAW_REQUEST_FIRST_LAST");
+    expect(container.textContent).toContain("RAW_RESPONSE_FIRST_LAST");
+    expect(document.body.querySelector("dialog")).toBeNull();
+  },
+);
+
+const rawDisclosure = () =>
+  Array.from(container.querySelectorAll("details")).find(
+    (element) =>
+      element.querySelector("summary")?.textContent ===
+      "Assessment request and response",
+  )!;
+const toggleRaw = async (open: boolean) =>
+  act(async () => {
+    const element = rawDisclosure();
+    element.open = open;
+    element.dispatchEvent(new Event("toggle"));
+  });
+function rawSelection() {
+  const selected = structuredClone(passes[1]!);
+  selected.source = "llm";
+  selected.judgments[0]!.attemptId = "a1";
+  selected.judgments[0]!.evidenceHash = "sealed";
+  selected.judgments[0]!.request = { marker: "FULL_REQUEST_BEGIN_END" };
+  selected.judgments[0]!.response = { marker: "FULL_RESPONSE_BEGIN_END" };
+  view.assessmentPasses = [selected];
+  view.selectedAssessmentPassId = selected.id;
+  assessmentResponse = async () =>
+    Response.json({
+      configuration: selected.configuration,
+      observationRevision: selected.observationRevision,
+      judgments: selected.judgments.map(
+        ({ request: _request, response: _response, ...item }) => ({
+          ...item,
+          hasRecordedExchange: true,
+        }),
+      ),
+    });
+  return selected;
+}
+
+it("shows exchange loading, stale errors and retry without exposing a mismatched physical answer", async () => {
+  const selected = rawSelection();
+  let release!: (response: Response) => void;
+  exportResponse = () =>
+    new Promise((resolve) => {
+      release = resolve;
+    });
+  await render();
+  await toggleRaw(true);
+  expect(container.textContent).toContain(
+    "Loading recorded assessment exchange",
+  );
+  await act(async () =>
+    release(
+      Response.json(
+        { error: { code: "conflict", message: "This saved score changed." } },
+        { status: 409 },
+      ),
+    ),
+  );
+  expect(container.textContent).toContain("This saved score changed.");
+  exportResponse = async () =>
+    Response.json({
+      ...selected,
+      judgments: [{ ...selected.judgments[0], attemptId: "other-attempt" }],
+    });
+  await click("Retry loading assessment exchange");
+  expect(container.textContent).toContain("does not match the selected score");
+  expect(container.textContent).not.toContain("FULL_RESPONSE_BEGIN_END");
+  exportResponse = async () => Response.json(selected);
+  await click("Retry loading assessment exchange");
+  expect(container.textContent).toContain("FULL_REQUEST_BEGIN_END");
+  expect(container.textContent).toContain("FULL_RESPONSE_BEGIN_END");
+});
+
+it.each(["close", "selection", "unmount"] as const)(
+  "cancels an exchange on %s and ignores transport completion after abort",
+  async (change) => {
+    const selected = rawSelection();
+    const next = {
+      ...selected,
+      id: "second-score",
+      observationRevision: "second-revision",
+    };
+    if (change === "selection") view.assessmentPasses!.push(next);
+    const pending: Array<{
+      release: (response: Response) => void;
+      signal?: AbortSignal;
+    }> = [];
+    exportResponse = (_id, _revision, signal) =>
+      new Promise((release) => pending.push({ release, signal }));
+    await render();
+    await toggleRaw(true);
+    expect(pending).toHaveLength(1);
+    if (change === "close") await toggleRaw(false);
+    else if (change === "selection") {
+      await select(next.id);
+    } else await act(async () => root.render(null));
+    expect(pending[0]!.signal?.aborted).toBe(true);
+    await act(async () => pending[0]!.release(Response.json(selected)));
+    expect(container.textContent).not.toContain("FULL_RESPONSE_BEGIN_END");
+    if (change === "close") {
+      await toggleRaw(true);
+      expect(pending).toHaveLength(2);
+      expect(container.textContent).not.toContain("FULL_REQUEST_BEGIN_END");
+      await act(async () => pending[1]!.release(Response.json(selected)));
+      expect(container.textContent).toContain("FULL_RESPONSE_BEGIN_END");
+    }
   },
 );
 

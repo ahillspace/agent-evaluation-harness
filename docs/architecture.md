@@ -156,7 +156,13 @@ Background reads preserve initialized content and errors until successful recove
 Selected attempt detail retains complete answer and failure evidence without duplicating event history.
 Current observations own the selected score, coverage, question verdicts, and answer identities.
 Each observed pass includes an `observationRevision` derived from its compact projection with the canonical digest.
-`runs.assessment` includes that revision and returns an inspection projection with matching frozen configuration, corrected references, comparison details, and non-Jev judge exchanges.
+`runs.assessment` includes that revision and returns an inspection projection with matching frozen configuration, corrected references, comparison details, and recorded-exchange availability.
+SQLite removes raw exchanges before inspection records enter JavaScript, including original, saved, and human-derived scores.
+Unsnapshotted automatic and historical scores retain their existing compact observation authority and enrich only configuration, comparison details, and exchange availability from the same physical bindings.
+Availability is derived inspection metadata and never enters the canonical observation digest or saved passes.
+The existing non-Jev exchange disclosure reads the full score through `runs.export-assessment` only while open, pinned to the displayed revision.
+It verifies the selected result and physical answer binding before rendering complete recorded requests, responses, and judge configuration.
+Closing the disclosure or changing its selected identity cancels the read and removes raw content; canceled transport responses cannot replace the current selection.
 Jev exchanges load only through `jev.get` with the selected pass and observation revision; the question inspector has one Jev provenance entry point.
 Inspection omits Jev-bound exchanges already copied into human reviews or snapshots without changing their saved records.
 When no matching Jev record remains, the captured-state notice opens the existing full-score export modal only on an explicit inspection action.

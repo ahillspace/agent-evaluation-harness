@@ -1,10 +1,16 @@
 import { useState } from "react";
-import type { AssessmentPassObservation, RunView } from "../contracts.js";
+import type {
+  AssessmentPassObservation,
+  AttemptSummary,
+  Json,
+  RunView,
+} from "../contracts.js";
 import { CommandError, command, useResource } from "./api.js";
 import { Answer } from "./answer.js";
 import { AssessmentScore } from "./assessment-controls.js";
 import { ErrorNotice, Field, Modal, Status } from "./ui.js";
 import { questionEvidence } from "./question-evidence.js";
+import { SavedAnswer } from "./selected-answer.js";
 
 type ReviewChange = {
   choice: "note" | "correct" | "incorrect" | "excluded";
@@ -45,12 +51,6 @@ export function ReviewDialog({
   const judgment = pass.judgments.find((item) => item.resultId === selected);
   const result = view.results.find((item) => item.id === selected);
   const source = result ? questionEvidence(view, result, pass) : undefined;
-  const evidence = useResource(
-    "runs.attempt",
-    { runId: view.run.id, attemptId: source?.attempt?.id ?? "" },
-    undefined,
-    !!source?.completed,
-  );
   const question = (
     configuration?.referenceBank ??
     (pass.basis.bankRevisionId === view.run.manifest.bank.id
@@ -91,7 +91,7 @@ export function ReviewDialog({
       setPending(false);
     }
   };
-  const issue = error ?? detail.error ?? evidence.error;
+  const issue = error ?? detail.error;
   const conflict = issue instanceof CommandError && issue.code === "conflict";
   return (
     <Modal
@@ -151,30 +151,19 @@ export function ReviewDialog({
             )?.text
           }
         </p>
-        <details className="disclosure">
-          <summary>Recorded answer and reference</summary>
-          <h3>Recorded answer</h3>
-          {source?.fromRerun && (
-            <p className="subtle">
-              Applied rerun answer. Original failed attempts remain saved.
-            </p>
-          )}
-          {evidence.data?.attempt.output ? (
-            <Answer value={evidence.data.attempt.output.answer} />
-          ) : (
-            <p className="subtle">
-              {source?.completed
-                ? "Loading saved answer..."
-                : "No answer recorded."}
-            </p>
-          )}
-          <h3>Expected answer</h3>
-          {question ? (
-            <Answer value={question.expected} />
-          ) : (
-            <p className="subtle">Loading this assessment's reference...</p>
-          )}
-        </details>
+        <ReviewEvidence
+          key={JSON.stringify([
+            view.run.id,
+            selected,
+            pass.id,
+            source?.attempt?.id,
+            source?.attempt?.evidenceHash,
+          ])}
+          runId={view.run.id}
+          attempt={source?.completed ? source.attempt : undefined}
+          fromRerun={!!source?.fromRerun}
+          reference={question?.expected}
+        />
         <div className="actions">
           <Status value={judgment?.status ?? "unjudged"} />
           <span className="subtle">
@@ -243,5 +232,48 @@ export function ReviewDialog({
         </button>
       </fieldset>
     </Modal>
+  );
+}
+
+function ReviewEvidence({
+  runId,
+  attempt,
+  fromRerun,
+  reference,
+}: {
+  runId: string;
+  attempt?: AttemptSummary;
+  fromRerun: boolean;
+  reference?: Json;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details
+      className="disclosure"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>Recorded answer and reference</summary>
+      {open && (
+        <>
+          <h3>Recorded answer</h3>
+          {fromRerun && (
+            <p className="subtle">
+              Applied rerun answer. Original failed attempts remain saved.
+            </p>
+          )}
+          {attempt ? (
+            <SavedAnswer runId={runId} attempt={attempt} />
+          ) : (
+            <p className="subtle">No answer recorded.</p>
+          )}
+          <h3>Expected answer</h3>
+          {reference !== undefined ? (
+            <Answer value={reference} />
+          ) : (
+            <p className="subtle">Loading this assessment's reference...</p>
+          )}
+        </>
+      )}
+    </details>
   );
 }

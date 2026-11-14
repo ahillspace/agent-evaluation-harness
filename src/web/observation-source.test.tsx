@@ -57,6 +57,8 @@ const view = {
       resultId: "rr1",
       number: 1,
       status: "completed",
+      hasOutput: true,
+      evidenceHash: "h",
       startedAt: "2026-10-12T12:01:00Z",
     },
   ],
@@ -97,15 +99,18 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   resource.mockReset();
   resource.mockImplementation(
-    (_operation: string, input: { attemptId: string }) => ({
-      data: {
-        attempt: {
-          ...view.attempts.find((item) => item.id === input.attemptId),
-          ...(input.attemptId === "retry-attempt"
-            ? { output: { answer: 42, text: "42" } }
-            : {}),
-        },
-      },
+    (operation: string, input: { attemptId: string }) => ({
+      data:
+        operation === "runs.answer"
+          ? { attemptId: input.attemptId, evidenceHash: "h", answer: 42 }
+          : {
+              attempt: {
+                ...view.attempts.find((item) => item.id === input.attemptId),
+                ...(input.attemptId === "retry-attempt"
+                  ? { output: { answer: 42, text: "42" } }
+                  : {}),
+              },
+            },
       error: null,
       refresh: () => {},
     }),
@@ -139,8 +144,12 @@ it("shows the recovered verdict and its source instead of the original execution
       ?.textContent,
   ).toBe("correct");
   expect(resource).toHaveBeenCalledWith(
-    "runs.attempt",
-    { runId: "original", attemptId: "retry-attempt" },
+    "runs.answer",
+    {
+      runId: "original",
+      attemptId: "retry-attempt",
+      expectedEvidenceHash: "h",
+    },
     undefined,
     true,
   );
@@ -185,14 +194,24 @@ it("permits human review of the applied answer without rewriting the original fa
       />,
     ),
   );
+  await act(async () => {
+    const disclosure =
+      document.querySelector<HTMLDetailsElement>("dialog details")!;
+    disclosure.open = true;
+    disclosure.dispatchEvent(new Event("toggle"));
+  });
   expect(document.body.textContent).toContain("Applied rerun answer");
   expect(
     document.querySelector<HTMLOptionElement>('option[value="correct"]')
       ?.disabled,
   ).toBe(false);
   expect(resource).toHaveBeenCalledWith(
-    "runs.attempt",
-    { runId: "original", attemptId: "retry-attempt" },
+    "runs.answer",
+    {
+      runId: "original",
+      attemptId: "retry-attempt",
+      expectedEvidenceHash: "h",
+    },
     undefined,
     true,
   );
@@ -244,5 +263,11 @@ it("does not enable verdict overrides for an old no-answer score after its resul
     document.querySelector<HTMLOptionElement>('option[value="incorrect"]')
       ?.disabled,
   ).toBe(true);
+  await act(async () => {
+    const disclosure =
+      document.querySelector<HTMLDetailsElement>("dialog details")!;
+    disclosure.open = true;
+    disclosure.dispatchEvent(new Event("toggle"));
+  });
   expect(document.body.textContent).toContain("No answer recorded.");
 });

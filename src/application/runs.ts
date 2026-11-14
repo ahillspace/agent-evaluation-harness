@@ -652,11 +652,11 @@ export class RunService {
     } = this.db.runState(runId);
     return { run, ...this.project(run) };
   }
-  attempt(
+  private readAttempt(
     runId: string,
     attemptId: string,
     expectedEvidenceHash?: string,
-  ): AttemptDetail {
+  ) {
     this.db.require("run", runId);
     const { attempt } = new AnswerSources(this.db).authorize(runId, attemptId);
     if (
@@ -670,6 +670,26 @@ export class RunService {
         "conflict",
         "This attempt does not match the selected sealed answer.",
       );
+    return attempt;
+  }
+  answer(input: CommandInput<"runs.answer">) {
+    const attempt = this.readAttempt(
+      input.runId,
+      input.attemptId,
+      input.expectedEvidenceHash,
+    );
+    return {
+      attemptId: attempt.id,
+      evidenceHash: input.expectedEvidenceHash,
+      answer: attempt.output!.answer,
+    };
+  }
+  attempt(
+    runId: string,
+    attemptId: string,
+    expectedEvidenceHash?: string,
+  ): AttemptDetail {
+    const attempt = this.readAttempt(runId, attemptId, expectedEvidenceHash);
     const assessments = this.db.attemptAssessments(attempt.runId, attemptId);
     if (
       !assessments.some(

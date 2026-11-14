@@ -186,7 +186,7 @@ it.each([
             );
       }
       if (
-        url.endsWith("/runs.attempt") &&
+        url.endsWith("/runs.answer") &&
         input.attemptId === "a3" &&
         phase === "completed" &&
         bodyUnavailable
@@ -195,6 +195,13 @@ it.each([
           { error: { message: "Saved answer temporarily unavailable." } },
           { status: 503 },
         );
+      if (url.endsWith("/runs.answer"))
+        return Response.json({
+          attemptId: input.attemptId,
+          evidenceHash: input.expectedEvidenceHash,
+          answer: attempts().find((item) => item.id === input.attemptId)?.output
+            ?.answer,
+        });
       if (url.endsWith("/runs.attempt"))
         return Response.json({
           attempt: attempts().find((item) => item.id === input.attemptId),
@@ -253,10 +260,11 @@ it.each([
       expect(
         container.querySelector(".observation-properties dd")?.textContent,
       ).toBe("completed");
+      const answerRetryExpected = bodyUnavailable;
       if (bodyUnavailable) {
         expect(
           container.querySelector(".activity-body")?.textContent,
-        ).toContain("Could not load the saved answer.");
+        ).toContain("Saved answer temporarily unavailable.");
         bodyUnavailable = false;
         await act(async () =>
           Array.from(container.querySelectorAll("button"))
@@ -267,6 +275,25 @@ it.each([
       expect(container.querySelector(".activity-body")?.textContent).toContain(
         "41",
       );
+      expect(
+        request.mock.calls
+          .filter(([url]) => url.endsWith("/runs.answer"))
+          .map(([, options]) => JSON.parse(options.body as string)),
+      ).toEqual(
+        Array.from({ length: answerRetryExpected ? 2 : 1 }, () => ({
+          runId: "run",
+          attemptId: "a3",
+          expectedEvidenceHash: "sealed-answer-a3",
+        })),
+      );
+      expect(
+        request.mock.calls
+          .filter(([url]) => url.endsWith("/runs.attempt"))
+          .every(
+            ([, options]) =>
+              JSON.parse(options.body as string).attemptId === "a2",
+          ),
+      ).toBe(true);
       expect(container.querySelector(".question-queue")).toBe(queue);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3000);

@@ -154,6 +154,15 @@ Judge audit and usage keep their logical Run ownership, and sealed judge evidenc
 Visible Activity incrementally polls its appendable physical stream, including events added by later saved judging or another client.
 Background reads preserve initialized content and errors until successful recovery; only initial history loading adds a loading indicator, after retained rows.
 Selected attempt detail retains complete answer and failure evidence without duplicating event history.
+`runs.answer` requires a logical Run, physical attempt, and expected sealed hash, then returns only that attempt identifier, hash, and typed answer.
+It shares `runs.attempt` authorization and completed-output digest verification without reading deterministic or Jev assessments.
+The engine still loads and hashes the complete target output internally to verify integrity.
+Completed Answer views use this compact operation only while visible; human review reads an answer only while its existing answer/reference disclosure is open.
+Original response text and recorded attempt data use the complete `runs.attempt` contract only while their disclosures are open.
+Failed and interrupted Answer views retain their saved transport response through the full attempt read while visible.
+Their complete submission failure JSON mounts only while its disclosure is open, using the already loaded evidence without another read.
+The selected logical Run, result, pass, physical attempt, and hash own these disclosure subtrees; unrelated judgment revisions preserve their state.
+Selection changes, closing, and unmounting cancel reads and remove raw content even when the transport later returns a success or error.
 Current observations own the selected score, coverage, question verdicts, and answer identities.
 Each observed pass includes an `observationRevision` derived from its compact projection with the canonical digest.
 `runs.assessment` includes that revision and returns an inspection projection with matching frozen configuration, corrected references, comparison details, and recorded-exchange availability.

@@ -1504,6 +1504,13 @@ export const commandSchemas = {
       runId: identifier,
     })
     .strict(),
+  "runs.answer": z
+    .object({
+      runId: identifier,
+      attemptId: identifier,
+      expectedEvidenceHash: identifier,
+    })
+    .strict(),
   "runs.attempt": z
     .object({
       runId: identifier,
@@ -1831,6 +1838,7 @@ export interface CommandResultMap {
   "runs.list": { runs: RunSummary[]; total: number; nextOffset: number | null };
   "runs.get": RunView;
   "runs.observe": RunObservation;
+  "runs.answer": { attemptId: string; evidenceHash: string; answer: Json };
   "runs.attempt": AttemptDetail;
   "runs.attempt-events": { events: ObservationEvent[]; cursor: number };
   "runs.control": RunView;

@@ -1,14 +1,19 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import type {
   AssessmentPassObservation,
   AssessmentPassDetail,
   RunView,
 } from "../contracts.js";
 import { savedTarget } from "../contracts/targets.js";
-import { useResource } from "./api.js";
 import { useAttemptEvents } from "./attempt-events.js";
-import { EventList } from "./observation-events.js";
 import { Answer } from "./answer.js";
+import { EventList } from "./observation-events.js";
+import {
+  FailedAnswer,
+  OriginalResponse,
+  RecordedAttemptData,
+  SavedAnswer,
+} from "./selected-answer.js";
 import { JevAssessment } from "./jev-assessment.js";
 import { AssessmentExchange } from "./assessment-exchange.js";
 import { ReportFinding } from "./report-finding.js";
@@ -94,18 +99,13 @@ export function RunQuestions({
     : undefined;
   const history = evidence?.history ?? [];
   const summary = evidence?.attempt;
-  const detail = useResource(
-    "runs.attempt",
-    {
-      runId: run.id,
-      attemptId: summary?.id ?? "",
-      expectedEvidenceHash: summary?.evidenceHash,
-    },
-    undefined,
-    !!summary &&
-      summary.status !== "running" &&
-      (!summary.hasOutput || !!summary.evidenceHash),
-  );
+  const evidenceKey = JSON.stringify([
+    run.id,
+    current?.id,
+    pass?.id,
+    summary?.id,
+    summary?.evidenceHash,
+  ]);
   const events = useAttemptEvents(
     { runId: run.id, attemptId: summary?.id ?? "" },
     !!summary && tab === "activity",
@@ -153,17 +153,8 @@ export function RunQuestions({
       item.id === judgment?.jevAssessmentId &&
       item.status === judgment.jevAssessmentStatus,
   );
-  const failedEvidence = detail.data?.attempt.failure?.transport;
-  const failedText =
-    failedEvidence &&
-    typeof failedEvidence === "object" &&
-    !Array.isArray(failedEvidence) &&
-    typeof failedEvidence.text === "string"
-      ? failedEvidence.text
-      : undefined;
   return (
     <section className="observer">
-      <ErrorNotice error={detail.error} />
       <div className="observation-columns">
         <aside className="question-queue">
           <div className="section-label">
@@ -245,7 +236,7 @@ export function RunQuestions({
             ]}
           >
             {tab === "answer" && (
-              <>
+              <Fragment key={evidenceKey}>
                 {evidence?.fromRerun && summary && (
                   <p className="answer-provenance">
                     Rerun answer from{" "}
@@ -276,26 +267,16 @@ export function RunQuestions({
                       Recorded attempts remain available in Attempts.
                     </p>
                   )}
-                {detail.data?.attempt.output ? (
-                  <Answer value={detail.data.attempt.output.answer} />
-                ) : summary?.hasOutput ? (
+                {summary?.status === "completed" && summary.hasOutput ? (
                   <>
-                    <p className="waiting-text">
-                      {!summary.evidenceHash
-                        ? "The saved answer has no sealed evidence identity."
-                        : detail.error
-                          ? "Could not load the saved answer."
-                          : "Loading saved answer..."}
-                    </p>
-                    {detail.error && (
-                      <button
-                        className="button secondary"
-                        onClick={detail.refresh}
-                      >
-                        Retry loading answer
-                      </button>
+                    <SavedAnswer runId={run.id} attempt={summary} />
+                    {summary.evidenceHash && (
+                      <OriginalResponse runId={run.id} attempt={summary} />
                     )}
                   </>
+                ) : summary &&
+                  ["failed", "interrupted"].includes(summary.status) ? (
+                  <FailedAnswer runId={run.id} attempt={summary} />
                 ) : (
                   <p className="waiting-text">
                     {summary
@@ -305,26 +286,7 @@ export function RunQuestions({
                         : "No attempt recorded for this question."}
                   </p>
                 )}
-                {detail.data?.attempt.output && (
-                  <details className="disclosure">
-                    <summary>Original response text</summary>
-                    <pre>{detail.data.attempt.output.text}</pre>
-                  </details>
-                )}
-                {failedText && (
-                  <section className="stack">
-                    <p className="notice">
-                      Final response saved, but no answer was submitted
-                      successfully. This remains an execution failure.
-                    </p>
-                    <pre className="code-block">{failedText}</pre>
-                    <details className="disclosure">
-                      <summary>Submission failure evidence</summary>
-                      <JsonView value={failedEvidence} />
-                    </details>
-                  </section>
-                )}
-              </>
+              </Fragment>
             )}
             {tab === "activity" && (
               <>
@@ -401,19 +363,11 @@ export function RunQuestions({
                     )}
                   </div>
                 ))}
-                <details className="disclosure">
-                  <summary>Recorded attempt data</summary>
-                  <JsonView
-                    value={
-                      attempt
-                        ? {
-                            metadata: attempt,
-                            recordedEvidence: detail.data?.attempt,
-                          }
-                        : { status: "No attempt recorded" }
-                    }
-                  />
-                </details>
+                <RecordedAttemptData
+                  key={evidenceKey}
+                  runId={run.id}
+                  attempt={summary}
+                />
               </>
             )}
           </Tabs>

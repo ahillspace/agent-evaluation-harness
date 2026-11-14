@@ -173,6 +173,8 @@ Both operations accept only `runId` and return no event history or cursor.
 Use `runs.events` or `runs.attempt-events` with an optional `cursor` for incremental history reads.
 `runs.attempt` retrieves full evidence for a selected attempt; its input requires `runId` and `attemptId`.
 Its response retains the complete recorded output, failure, and assessments; event history is read separately through `runs.attempt-events`.
+`runs.answer` requires `runId`, `attemptId`, and `expectedEvidenceHash`, and returns only `attemptId`, `evidenceHash`, and the typed JSON `answer`.
+It verifies authorization and the complete output's sealed integrity before returning the selected answer.
 For an adopted attempt, `runs.attempt-events` includes the physical owner's events and the requesting Run's contextual events for that attempt in one ordered page, excluding other Runs.
 
 Reusing a launch idempotency key with identical input returns the original run.

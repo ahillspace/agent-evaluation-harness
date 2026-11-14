@@ -921,50 +921,75 @@ export class Database {
       }));
   }
   researchUsage(sessionId: string): {
-    currentRunId: string;
-    pending: boolean;
-    interruptedTurns: number | undefined;
-    accounting: ResearchTurnAccounting;
-    turns: Array<{
+    attributionKnown: boolean;
+    reports: Array<{
+      state: "accepted" | "pending" | "interrupted";
       runId: string | null;
       usage?: UsageReport["usage"];
       usageScope?: string;
     }>;
   } {
-    const record = this.db
-      .prepare(
-        "SELECT json_extract(value,'$.currentRunId') AS current_run_id,json_type(value,'$.pendingTurn') IS NOT NULL AS pending FROM records WHERE kind='research' AND id=?",
-      )
-      .get(sessionId);
-    if (!record)
-      throw new AppError("not_found", "The research session does not exist.");
-    const turns = this.db
-      .prepare(
-        `SELECT CASE WHEN json_valid(json_extract(item.value,'$.input')) THEN COALESCE(json_extract(json_extract(item.value,'$.input'),'$.completedRun.runId'),json_extract(json_extract(item.value,'$.input'),'$.baselineRun.runId'),json_extract(json_extract(item.value,'$.input'),'$.runId')) ELSE NULL END AS run_id,json_extract(item.value,'$.output.usage') AS usage,json_extract(item.value,'$.output.usageScope') AS scope FROM records,json_each(records.value,'$.turns') item WHERE records.kind='research' AND records.id=?`,
-      )
-      .all(sessionId)
-      .map((row) => ({
-        runId: row.run_id as string | null,
-        ...(row.usage
-          ? {
-              usage: JSON.parse(row.usage as string) as {
-                inputTokens?: number;
-                cachedInputTokens?: number;
-                outputTokens?: number;
-                costUsd?: number;
-              },
-            }
-          : {}),
-        ...(row.scope ? { usageScope: String(row.scope) } : {}),
-      }));
     const accounting = this.researchAccounting(sessionId);
-    return {
-      currentRunId: String(record.current_run_id),
-      pending: record.pending === 1,
-      interruptedTurns: accounting.interrupted,
-      accounting,
-      turns,
-    };
+    const rows = this.db
+      .prepare(
+        `WITH session AS (SELECT id,value FROM records WHERE kind='research' AND id=?),
+        interruptions AS (
+          SELECT sequence,CASE WHEN json_valid(data) THEN data ELSE '{}' END AS data FROM events
+          WHERE session_id=(SELECT id FROM session) AND run_id IS NULL AND attempt_id IS NULL AND type='research.turn.interrupted'
+        ), requests(state,position,input,input_type,usage,scope,started_at,completion) AS (
+          SELECT 'accepted',item.key,json_extract(item.value,'$.input'),json_type(item.value,'$.input'),json_extract(item.value,'$.output.usage'),json_extract(item.value,'$.output.usageScope'),NULL,NULL
+          FROM session,json_each(session.value,'$.turns') item
+          UNION ALL
+          SELECT 'pending',0,json_extract(value,'$.pendingTurn.input'),json_type(value,'$.pendingTurn.input'),NULL,NULL,NULL,NULL
+          FROM session WHERE json_type(value,'$.pendingTurn') IS NOT NULL
+          UNION ALL
+          SELECT 'interrupted',sequence,json_extract(data,'$.input'),json_type(data,'$.input'),NULL,NULL,json_extract(data,'$.startedAt'),json_extract(data,'$.completion') FROM interruptions
+        ), inputs AS (
+          SELECT *,CASE WHEN input_type='text' AND json_valid(input) THEN CASE WHEN json_type(input)='object' THEN input ELSE '{}' END ELSE '{}' END AS payload FROM requests
+        ), owners AS (
+          SELECT *,CASE WHEN
+            (json_type(payload,'$.completedRun') IS NOT NULL AND json_type(payload,'$.completedRun')!='object') OR
+            (json_type(payload,'$.baselineRun') IS NOT NULL AND json_type(payload,'$.baselineRun')!='object') OR
+            (json_type(payload,'$.completedRun')='object' AND COALESCE(json_type(payload,'$.completedRun.runId'),'missing')!='text') OR
+            (json_type(payload,'$.baselineRun')='object' AND COALESCE(json_type(payload,'$.baselineRun.runId'),'missing')!='text') OR
+            (json_type(payload,'$.runId') IS NOT NULL AND json_type(payload,'$.runId')!='text')
+            THEN NULL ELSE (
+              SELECT CASE WHEN count(*)>0 AND min(value)=max(value) AND length(trim(min(value)))>0 THEN min(value) END
+              FROM json_each(json_array(json_extract(payload,'$.completedRun.runId'),json_extract(payload,'$.baselineRun.runId'),json_extract(payload,'$.runId'))) WHERE type!='null'
+            ) END AS owner FROM inputs
+        )
+        SELECT state,CASE WHEN EXISTS(SELECT 1 FROM session,json_each(session.value,'$.runIds') link WHERE link.value=owner.id) THEN owner.id END AS run_id,usage,scope,started_at,completion
+        FROM owners LEFT JOIN records owner ON owner.kind='run' AND owner.id=owners.owner AND owner.session_id=(SELECT id FROM session)
+        ORDER BY CASE state WHEN 'accepted' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,position`,
+      )
+      .all(sessionId);
+    const interrupted = rows.filter((row) => row.state === "interrupted");
+    const attributionKnown =
+      accounting.status === "known" &&
+      interrupted.length === accounting.interrupted &&
+      rows.every((row) => row.run_id !== null) &&
+      interrupted.every(
+        (row) =>
+          row.completion === "unknown" &&
+          typeof row.started_at === "string" &&
+          Number.isFinite(Date.parse(row.started_at)),
+      );
+    const reports = rows.map((row) => ({
+      state: row.state as "accepted" | "pending" | "interrupted",
+      runId: row.run_id as string | null,
+      ...(row.usage
+        ? {
+            usage: JSON.parse(row.usage as string) as {
+              inputTokens?: number;
+              cachedInputTokens?: number;
+              outputTokens?: number;
+              costUsd?: number;
+            },
+          }
+        : {}),
+      ...(row.scope ? { usageScope: String(row.scope) } : {}),
+    }));
+    return { attributionKnown, reports };
   }
   researchAccounting(sessionId: string): ResearchTurnAccounting {
     const row = this.db

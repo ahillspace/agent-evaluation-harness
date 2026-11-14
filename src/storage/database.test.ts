@@ -22,6 +22,7 @@ import {
   type AttemptRecord,
   type ResultRecord,
   type JevAssessmentRecord,
+  type ResearchRecord,
 } from "../contracts.js";
 import { Database } from "./database.js";
 import { digest } from "../domain/identity.js";
@@ -77,6 +78,309 @@ function run(id: string): RunRecord {
     },
   };
 }
+
+async function researcherUsageFixture() {
+  const db = await setup();
+  for (const id of ["run1", "run2"])
+    db.insert("run", { ...run(id), researchSessionId: "research1" });
+  db.insert("run", {
+    ...run("other-session-run"),
+    researchSessionId: "research2",
+  });
+  const session: ResearchRecord = {
+    id: "research1",
+    name: "Usage ownership",
+    createdAt: bank.createdAt,
+    updatedAt: bank.createdAt,
+    status: "halted",
+    intent: "halt",
+    phase: "researching",
+    baselineRunId: "run1",
+    bestRunId: "run1",
+    currentRunId: "run2",
+    runIds: ["run1", "run2"],
+    researcherInvocations: 0,
+    configuration: researchSchema.parse({
+      baseline: { bankRevisionId: bank.id, agent: run("run1").manifest.agent },
+      researcher: run("run1").manifest.agent,
+      objective: "Accuracy",
+    }),
+    turns: [],
+  };
+  db.insert("research", session);
+  return { db, session };
+}
+
+describe("researcher usage ownership", () => {
+  const output = {
+    conversationId: "fixture",
+    message: "Reviewed",
+    usage: { inputTokens: 100, outputTokens: 20 },
+  };
+  it.each(["baselineRun", "completedRun", "legacy"])(
+    "uses %s input for accepted, pending, and interrupted ownership",
+    async (shape) => {
+      const { db, session } = await researcherUsageFixture();
+      const input = JSON.stringify(
+        shape === "legacy" ? { runId: "run1" } : { [shape]: { runId: "run1" } },
+      );
+      db.update("research", {
+        ...session,
+        researcherInvocations: 3,
+        interruptedTurns: 7,
+        turns: [{ input, output, createdAt: bank.createdAt }],
+        pendingTurn: { input, startedAt: bank.createdAt },
+      });
+      db.append({
+        sessionId: session.id,
+        type: "research.turn.interrupted",
+        message: "Interrupted",
+        data: { input, startedAt: bank.createdAt, completion: "unknown" },
+      });
+      const before = db.require("research", session.id);
+      expect(runPerformance(db, "run1").researcher).toMatchObject({
+        inputTokens: 100,
+        turns: null,
+        reporting: { inputTokens: { reported: 1, missing: 1, pending: 1 } },
+      });
+      expect(runPerformance(db, "run2").researcher).toMatchObject({
+        inputTokens: 0,
+        turns: 0,
+        reporting: { inputTokens: { reported: 0, missing: 0, pending: 0 } },
+      });
+      expect(db.researchAccounting(session.id)).toEqual({
+        status: "known",
+        interrupted: 1,
+        nextInvocation: 4,
+      });
+      expect(db.require("research", session.id)).toEqual(before);
+    },
+  );
+  it.each([
+    "invalid JSON",
+    "missing",
+    "nonstring",
+    "foreign",
+    "contradictory",
+    "malformed nested",
+    "nonstring input",
+  ])(
+    "keeps %s input ownership unknown in every admission state",
+    async (kind) => {
+      const { db, session } = await researcherUsageFixture();
+      const input =
+        kind === "nonstring input"
+          ? ({ runId: "run1" } as unknown as string)
+          : kind === "invalid JSON"
+            ? "unparseable"
+            : JSON.stringify(
+                kind === "missing"
+                  ? {}
+                  : kind === "nonstring"
+                    ? { runId: 42 }
+                    : kind === "foreign"
+                      ? { runId: "other-session-run" }
+                      : kind === "contradictory"
+                        ? {
+                            completedRun: { runId: "run1" },
+                            baselineRun: { runId: "run2" },
+                          }
+                        : { completedRun: false, runId: "run1" },
+              );
+      for (const state of ["accepted", "pending", "interrupted"]) {
+        db.update("research", {
+          ...session,
+          researcherInvocations: 1,
+          turns:
+            state === "accepted"
+              ? [{ input, output, createdAt: bank.createdAt }]
+              : [],
+          pendingTurn:
+            state === "pending"
+              ? { input, startedAt: bank.createdAt }
+              : undefined,
+        });
+        if (state === "interrupted")
+          db.append({
+            sessionId: session.id,
+            type: "research.turn.interrupted",
+            message: "Interrupted",
+            data: { input, startedAt: bank.createdAt, completion: "unknown" },
+          });
+        for (const runId of session.runIds) {
+          const usage = runPerformance(db, runId).researcher;
+          expect(usage, state).toMatchObject({
+            inputTokens: null,
+            outputTokens: null,
+            costUsd: null,
+            turns: null,
+          });
+          expect(usage.reporting, state).toBeUndefined();
+        }
+      }
+    },
+  );
+  it.each(["missing", "excess", "old shape", "invalid date", "unknown count"])(
+    "does not assign %s interruption history to the current Run",
+    async (kind) => {
+      const { db, session } = await researcherUsageFixture();
+      const input = JSON.stringify({ completedRun: { runId: "run1" } });
+      db.update("research", {
+        ...session,
+        researcherInvocations: kind === "unknown count" ? undefined : 1,
+      });
+      if (kind !== "missing") {
+        for (let index = 0; index < (kind === "excess" ? 2 : 1); index++)
+          db.append({
+            sessionId: session.id,
+            type: "research.turn.interrupted",
+            message: "Interrupted",
+            data:
+              kind === "old shape"
+                ? { completion: "unknown" }
+                : {
+                    input,
+                    startedAt:
+                      kind === "invalid date" ? "not a date" : bank.createdAt,
+                    completion: "unknown",
+                  },
+          });
+      }
+      for (const runId of session.runIds) {
+        const usage = runPerformance(db, runId).researcher;
+        expect(usage).toMatchObject({ inputTokens: null, turns: null });
+        expect(usage.reporting).toBeUndefined();
+      }
+    },
+  );
+  it("excludes child and attempt scoped runtime events from interruption evidence", async () => {
+    const { db, session } = await researcherUsageFixture();
+    for (const scope of [
+      { runId: "run1" },
+      { attemptId: "attempt1" },
+      { sessionId: "other-session" },
+    ])
+      db.append({
+        sessionId: session.id,
+        ...scope,
+        type: "research.turn.interrupted",
+        message: "Runtime event",
+        data: { completion: "unknown" },
+      });
+    expect(runPerformance(db, "run1").researcher).toMatchObject({
+      inputTokens: 0,
+      turns: 0,
+    });
+    expect(runPerformance(db, "run2").researcher).toMatchObject({
+      inputTokens: 0,
+      turns: 0,
+    });
+  });
+  it("keeps two Run interruptions and a pending admission with their captured owners", async () => {
+    const { db, session } = await researcherUsageFixture();
+    const request = (runId: string) =>
+      JSON.stringify({ completedRun: { runId } });
+    db.update("research", {
+      ...session,
+      researcherInvocations: 3,
+      pendingTurn: {
+        input: request("run1"),
+        startedAt: "2026-10-03T00:00:02Z",
+      },
+    });
+    for (const [index, runId] of session.runIds.entries())
+      db.append({
+        sessionId: session.id,
+        type: "research.turn.interrupted",
+        message: "Interrupted",
+        data: {
+          input: request(runId),
+          startedAt: `2026-10-03T00:00:0${index}Z`,
+          completion: "unknown",
+        },
+      });
+    expect(
+      runPerformance(db, "run1").researcher.reporting!.inputTokens,
+    ).toEqual({ reported: 0, missing: 1, pending: 1 });
+    expect(
+      runPerformance(db, "run2").researcher.reporting!.inputTokens,
+    ).toEqual({ reported: 0, missing: 1, pending: 0 });
+  });
+  it("counts distinct interruption audits with equal timestamps as separate admissions", async () => {
+    const { db, session } = await researcherUsageFixture();
+    db.update("research", { ...session, researcherInvocations: 2 });
+    for (let index = 0; index < 2; index++)
+      db.append({
+        sessionId: session.id,
+        type: "research.turn.interrupted",
+        message: "Interrupted",
+        data: {
+          input: JSON.stringify({ runId: "run1" }),
+          startedAt: bank.createdAt,
+          completion: "unknown",
+        },
+      });
+    const audits = db.events({ sessionId: session.id });
+    expect(new Set(audits.map((event) => event.sequence)).size).toBe(2);
+    expect(db.researchAccounting(session.id)).toEqual({
+      status: "known",
+      interrupted: 2,
+      nextInvocation: 3,
+    });
+    expect(
+      runPerformance(db, "run1").researcher.reporting!.inputTokens,
+    ).toEqual({ reported: 0, missing: 2, pending: 0 });
+    expect(runPerformance(db, "run2").researcher).toMatchObject({
+      inputTokens: 0,
+      turns: 0,
+    });
+  });
+  it.each(["partial", "decreasing"])(
+    "preserves %s conversation predecessors across Run owners",
+    async (kind) => {
+      const { db, session } = await researcherUsageFixture();
+      db.update("research", {
+        ...session,
+        researcherInvocations: 2,
+        turns: [
+          {
+            input: JSON.stringify({ baselineRun: { runId: "run1" } }),
+            output: {
+              ...output,
+              usageScope: "conversation",
+              usage: {
+                inputTokens: 100,
+                ...(kind === "decreasing" ? { outputTokens: 20 } : {}),
+              },
+            },
+            createdAt: bank.createdAt,
+          },
+          {
+            input: JSON.stringify({ completedRun: { runId: "run2" } }),
+            output: {
+              ...output,
+              usageScope: "conversation",
+              usage: {
+                inputTokens: kind === "decreasing" ? 90 : 160,
+                outputTokens: 30,
+              },
+            },
+            createdAt: bank.createdAt,
+          },
+        ],
+      });
+      const candidate = runPerformance(db, "run2").researcher;
+      expect(candidate.inputTokens).toBe(kind === "decreasing" ? null : 60);
+      expect(candidate.outputTokens).toBe(kind === "decreasing" ? 10 : null);
+      expect(candidate.reporting!.inputTokens.missing).toBe(
+        kind === "decreasing" ? 1 : 0,
+      );
+      expect(candidate.reporting!.outputTokens.missing).toBe(
+        kind === "decreasing" ? 0 : 1,
+      );
+    },
+  );
+});
 
 describe("typed durable records", () => {
   it.each<[string, string[], string | undefined, string[] | undefined]>([

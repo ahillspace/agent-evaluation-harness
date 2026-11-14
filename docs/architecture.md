@@ -309,6 +309,9 @@ These mechanisms bound ordinary observation payloads without establishing large-
 [package.json](../package.json) requires Node.js 22.13.0 or newer; [.nvmrc](../.nvmrc) selects Node.js 24.
 **npm ci** installs the lockfile.
 **npm run build** emits server/CLI artifacts to **dist** and Vite assets to **web-dist**.
+The [prebuild script](../scripts/clean-build.ts) removes the checkout's generated **dist** directory before compilation, so deleted modules leave no stale artifacts.
+It rejects redirected output directories and leaves sources and saved workspaces intact.
+Vite owns cleanup of **web-dist**.
 **npm start** serves those artifacts, so source edits require a new build.
 The timestamp build identifier distinguishes builds without certifying correspondence to dirty source.
 Development uses separate API and Vite processes; the default proxy targets API port 4381.

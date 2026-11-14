@@ -93,3 +93,46 @@ it("matches a saved target regardless of persisted object key order", () => {
     }),
   ).toBe(false);
 });
+
+it.each([0, 999, 600001, 601000])(
+  "rejects external timeout %i in the shared launch contract",
+  (timeoutMs) => {
+    expect(() =>
+      launchSchema.parse({
+        bankRevisionId: "bank",
+        target: {
+          kind: "external",
+          adapterId: "http",
+          adapterVersion: 1,
+          name: "Endpoint",
+          configuration: {},
+        },
+        limits: { timeoutMs },
+      }),
+    ).toThrow();
+  },
+);
+it.each([1000, 600000])("accepts external timeout boundary %i", (timeoutMs) => {
+  expect(
+    launchSchema.parse({
+      bankRevisionId: "bank",
+      target: {
+        kind: "external",
+        adapterId: "http",
+        adapterVersion: 1,
+        name: "Endpoint",
+        configuration: {},
+      },
+      limits: { timeoutMs },
+    }).limits.timeoutMs,
+  ).toBe(timeoutMs);
+});
+it("preserves managed deadlines above the external maximum", () => {
+  expect(
+    launchSchema.parse({
+      bankRevisionId: "bank",
+      agent,
+      limits: { timeoutMs: 601000 },
+    }).limits.timeoutMs,
+  ).toBe(601000);
+});

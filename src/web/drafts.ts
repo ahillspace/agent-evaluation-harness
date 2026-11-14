@@ -1,5 +1,7 @@
 import {
   questionSchema,
+  externalRequestTimeoutSchema,
+  limitsSchema,
   launchSchema,
   type AgentConfig,
   type Blueprint,
@@ -171,6 +173,38 @@ export function replaceExpectedAnswer(
     ...(derivedFormat ? { answerFormat: undefined } : {}),
   };
 }
+export function questionTimeoutRange(draft: SetupDraft) {
+  const schema =
+    draft.targetKind === "external"
+      ? externalRequestTimeoutSchema
+      : limitsSchema.shape.timeoutMs;
+  return {
+    min: schema.removeDefault().minValue! / 1000,
+    max: schema.removeDefault().maxValue! / 1000,
+  };
+}
+function questionTimeoutMilliseconds(draft: SetupDraft): number {
+  const milliseconds = Math.round(draft.timeoutSeconds * 1000);
+  if (draft.timeoutSeconds !== milliseconds / 1000)
+    throw new Error("Use increments of 0.001 seconds.");
+  const schema =
+    draft.targetKind === "external"
+      ? externalRequestTimeoutSchema
+      : limitsSchema.shape.timeoutMs;
+  if (!schema.safeParse(milliseconds).success) {
+    const { min, max } = questionTimeoutRange(draft);
+    throw new Error(`Enter a timeout from ${min} to ${max} seconds.`);
+  }
+  return milliseconds;
+}
+export function questionTimeoutIssue(draft: SetupDraft): string | undefined {
+  try {
+    questionTimeoutMilliseconds(draft);
+    return undefined;
+  } catch (error) {
+    return (error as Error).message;
+  }
+}
 export function createLaunch(draft: SetupDraft): LaunchInput {
   if (draft.questionSelection === "selected" && !draft.questionIds.length)
     throw new Error("Select at least one question before starting a run.");
@@ -247,7 +281,7 @@ export function createLaunch(draft: SetupDraft): LaunchInput {
             },
           },
     limits: {
-      timeoutMs: draft.timeoutSeconds * 1000,
+      timeoutMs: questionTimeoutMilliseconds(draft),
       concurrency: draft.concurrency,
       maxOutputBytes: draft.maxOutputBytes,
     },

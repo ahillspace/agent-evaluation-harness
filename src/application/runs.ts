@@ -208,14 +208,6 @@ export class RunService {
         "Question selection contains duplicate IDs.",
       );
     const resolvedTarget = await this.runtime.resolveTarget(input.target);
-    if (
-      input.target.kind === "external" &&
-      (input.limits.timeoutMs < 1000 || input.limits.timeoutMs > 600_000)
-    )
-      throw new AppError(
-        "invalid_input",
-        "External request timeout must be between 1 second and 10 minutes.",
-      );
     const jevJudge =
       frozenJevJudge ??
       (input.jevJudge

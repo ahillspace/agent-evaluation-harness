@@ -17,6 +17,7 @@ import { digest } from "../domain/identity.js";
 import { TargetRegistry } from "../runtime/targets/registry.js";
 import type { TargetAdapter } from "../runtime/targets/contracts.js";
 import { managedCapabilities } from "../contracts/targets.js";
+import { runCli } from "../cli.js";
 import { startServer } from "../server.js";
 
 const agent: AgentConfig = {
@@ -1826,4 +1827,57 @@ it("returns Run snapshots without event history while dedicated HTTP and CLI cur
   } finally {
     reader.close();
   }
+});
+
+it("rejects invalid external deadlines through HTTP and CLI before target resolution or admission", async () => {
+  const port = runtime();
+  const resolve = vi.spyOn(port, "resolveTarget");
+  const execute = vi.spyOn(port, "execute");
+  const { app, bank } = await setup(port);
+  const server = await startServer({ application: app, port: 0 });
+  cleanups.push(() => server.close());
+  const input = {
+    bankRevisionId: bank.id,
+    target: {
+      kind: "external",
+      adapterId: "http",
+      adapterVersion: 1,
+      name: "Fixture",
+      configuration: {},
+    },
+    limits: { timeoutMs: 601000 },
+  };
+  for (const timeoutMs of [0, 999, 601000]) {
+    const invalid = { ...input, limits: { timeoutMs } };
+    const response = await fetch(server.url + "/api/commands/runs.launch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(invalid),
+    });
+    expect(response.status).toBe(400);
+    await expect(
+      runCli([
+        "runs.launch",
+        "--url",
+        server.url,
+        "--json",
+        JSON.stringify(invalid),
+      ]),
+    ).rejects.toMatchObject({ response: { error: { code: "invalid_input" } } });
+  }
+  expect(resolve).not.toHaveBeenCalled();
+  expect(execute).not.toHaveBeenCalled();
+  expect((await app.execute("workspace.get", {})).totalRuns).toBe(0);
+  for (const timeoutMs of [1000, 600000]) {
+    const run = (await app.execute("runs.launch", {
+      ...input,
+      limits: { timeoutMs },
+    })) as RunView;
+    await app.waitForIdle();
+    expect(
+      ((await app.execute("runs.get", { runId: run.run.id })) as RunView).run
+        .status,
+    ).toBe("completed");
+  }
+  expect(execute).toHaveBeenCalledTimes(2);
 });

@@ -73,7 +73,7 @@ export function ResearchPanel({
         <SectionIntro
           title="Research observation"
           description="Watch the researcher propose changes and compare candidate agents."
-          details="The baseline runs first. The researcher then reviews evidence and proposes changes within your limits. Research activity and evaluation activity are recorded separately."
+          details="The baseline runs first. Researcher intent records recommendations about the evaluated configuration and requests to continue or stop. A proposal describes the next configuration to evaluate. Session status and retained run labels show the current outcome."
         />
         <div className="row research-candidate-row">
           {researchRuns.length > 1 ? (
@@ -124,27 +124,29 @@ export function ResearchPanel({
         )}
         {session.turns.length > 0 && (
           <section className="stack">
-            <h3>Decisions</h3>
+            <h3>Researcher intent</h3>
             {session.turns.map((turn, index) => (
               <div key={index} className="research-turn">
                 <h3>Turn {index + 1}</h3>
                 <p>{turn.output.message}</p>
                 <p className="subtle">
                   {turn.output.disposition === "keep"
-                    ? "Candidate kept"
+                    ? "Recommends keeping"
                     : turn.output.disposition === "discard"
-                      ? "Candidate discarded"
+                      ? "Recommends discarding"
                       : turn.output.decision === "keep"
-                        ? "Candidate kept"
+                        ? "Recommends keeping"
                         : turn.output.decision === "discard"
-                          ? "Candidate discarded"
-                          : "Evidence reviewed"}
-                  {turn.output.control === "stop" ||
-                  turn.output.decision === "stop"
-                    ? " · Research stopped"
-                    : " · Research continued"}
+                          ? "Recommends discarding"
+                          : "Retention unspecified"}
+                  {turn.output.control === "continue"
+                    ? " · Requests continuation"
+                    : turn.output.control === "stop" ||
+                        turn.output.decision === "stop"
+                      ? " · Requests stop"
+                      : " · Control unspecified"}
                   {turn.output.stopCategory === "blocked"
-                    ? " because technical problems prevent a useful comparison"
+                    ? " · Reports a technical blocker"
                     : ""}
                 </p>
                 {turn.output.reason && <p>{turn.output.reason}</p>}

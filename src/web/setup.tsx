@@ -6,6 +6,7 @@ import type { JevProfileRevision } from "../contracts.js";
 import { command, CommandError, navigate, useResource } from "./api.js";
 import {
   createLaunch,
+  questionTimeoutIssue,
   objectJson,
   roleSettings,
   initialSetup,
@@ -308,6 +309,7 @@ export function Setup({
       number: bank.number,
       count: bank.questions.length,
     });
+  const timeoutIssue = questionTimeoutIssue(draft);
   const launch = async () => {
     setPending(true);
     setError(null);
@@ -691,6 +693,11 @@ export function Setup({
                     Evaluation section to update Jev setup.
                   </span>
                 )}
+              {section !== "evaluation" && timeoutIssue && (
+                <span className="notice" role="status">
+                  {timeoutIssue} Review the Evaluation section.
+                </span>
+              )}
               <button
                 className="button primary"
                 disabled={
@@ -700,6 +707,7 @@ export function Setup({
                       bankState !== "ready" ||
                       !!jevIssues?.connection ||
                       !!jevIssues?.profile ||
+                      !!timeoutIssue ||
                       (draft.questionSelection === "selected" &&
                         !draft.questionIds.length) ||
                       (draft.targetKind === "external"

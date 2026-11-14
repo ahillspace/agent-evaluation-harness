@@ -2,7 +2,11 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { evaluatorSettingsSchema, type WorkspaceView } from "../contracts.js";
+import {
+  evaluatorSettingsSchema,
+  launchSchema,
+  type WorkspaceView,
+} from "../contracts.js";
 import { Setup } from "./setup.js";
 import { createLaunch, initialSetup } from "./drafts.js";
 import {
@@ -109,9 +113,15 @@ afterEach(async () => {
   sessionStorage.clear();
   vi.unstubAllGlobals();
 });
-const render = () =>
+const render = (sourceRunId?: string) =>
   act(async () =>
-    root.render(<Setup workspace={workspace} refresh={() => {}} />),
+    root.render(
+      <Setup
+        workspace={workspace}
+        refresh={() => {}}
+        sourceRunId={sourceRunId}
+      />,
+    ),
   );
 const start = () =>
   container.querySelector<HTMLButtonElement>(".setup-footer .primary")!;
@@ -254,4 +264,132 @@ it("replays an exact stored launch even when loading its bank fails", async () =
   expect(launches).toEqual([input]);
   expect(sessionStorage.getItem(key)).toBeNull();
   expect(window.location.hash).toBe("#/runs/accepted-run");
+});
+
+it("blocks an invalid external timeout before submission and retains the entered draft", async () => {
+  sessionStorage.setItem(
+    key,
+    encodeSetupDraft({ ...draft, timeoutSeconds: 601 }, "evaluation", ""),
+  );
+  fetchMock.mockResolvedValue(Response.json(detail()));
+  await render();
+  const timeout = container.querySelector<HTMLInputElement>(
+    '[aria-label="Question timeout"]',
+  )!;
+  expect(timeout.max).toBe("600");
+  expect(timeout.getAttribute("aria-invalid")).toBe("true");
+  expect(start().disabled).toBe(true);
+  expect(container.textContent).toContain(
+    "Enter a timeout from 1 to 600 seconds.",
+  );
+  expect(savedDraft().timeoutSeconds).toBe(601);
+  await act(async () => start().click());
+  expect(
+    fetchMock.mock.calls.every(([url]) => String(url).endsWith("banks.get")),
+  ).toBe(true);
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    setter.call(timeout, "600");
+    timeout.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  expect(start().disabled).toBe(false);
+  expect(timeout.getAttribute("aria-invalid")).toBeNull();
+  expect(container.textContent).not.toContain("Enter a timeout from");
+});
+
+it.each([
+  ["external", 1000],
+  ["external", 1001],
+  ["external", 1500],
+  ["external", 600000],
+  ["managed", 100],
+  ["managed", 500],
+  ["managed", 1001],
+  ["managed", 3600000],
+] as const)(
+  "reuses %s %ims through actual Setup and submits the exact deadline",
+  async (kind, timeoutMs) => {
+    sessionStorage.clear();
+    const launch = launchSchema.parse({
+      bankRevisionId: "revision-a",
+      target:
+        kind === "external"
+          ? draft.externalTarget
+          : {
+              kind: "managed",
+              agent: { harness: "codex", model: "synthetic-model" },
+            },
+      limits: { timeoutMs },
+    });
+    const run = {
+      id: "source-run",
+      name: "Saved source",
+      manifest: {
+        ...launch,
+        bank: { id: "revision-a", bankId: "a" },
+        evaluator: { id: "evaluator-a" },
+        questions: [{ id: "q1" }],
+      },
+    };
+    const before = JSON.stringify(run),
+      launches: Array<{ limits: { timeoutMs: number } }> = [];
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.endsWith("runs.get")) return Response.json({ run });
+      if (url.endsWith("banks.get")) return Response.json(detail());
+      if (url.endsWith("runtime.discover"))
+        return Response.json({
+          harnesses: [],
+          connectionProviders: [],
+          maxConcurrency: 8,
+        });
+      if (url.endsWith("runs.launch")) {
+        launches.push(JSON.parse(String(init.body)));
+        return Response.json({ run: { id: "accepted-run" } });
+      }
+      throw Error("Unexpected request: " + url);
+    });
+    await render("source-run");
+    const evaluation = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.includes("Evaluation"),
+    )!;
+    await act(async () => evaluation.click());
+    const timeout = container.querySelector<HTMLInputElement>(
+      '[aria-label="Question timeout"]',
+    )!;
+    expect(timeout.value).toBe(String(timeoutMs / 1000));
+    expect(timeout.min).toBe(kind === "external" ? "1" : "0.1");
+    expect(timeout.max).toBe(kind === "external" ? "600" : "3600");
+    expect(timeout.step).toBe("0.001");
+    expect(start().disabled).toBe(false);
+    expect(createLaunch(savedDraft()).limits.timeoutMs).toBe(timeoutMs);
+    await act(async () => start().click());
+    expect(launches).toHaveLength(1);
+    expect(launches[0]!.limits.timeoutMs).toBe(timeoutMs);
+    expect(JSON.stringify(run)).toBe(before);
+  },
+);
+it("retains unsupported submillisecond precision and prevents submission", async () => {
+  sessionStorage.setItem(
+    key,
+    encodeSetupDraft({ ...draft, timeoutSeconds: 1.0001 }, "evaluation", ""),
+  );
+  fetchMock.mockResolvedValue(Response.json(detail()));
+  await render();
+  const timeout = container.querySelector<HTMLInputElement>(
+    '[aria-label="Question timeout"]',
+  )!;
+  expect(timeout.value).toBe("1.0001");
+  expect(savedDraft().timeoutSeconds).toBe(1.0001);
+  expect(start().disabled).toBe(true);
+  expect(container.textContent).toContain("Use increments of 0.001 seconds.");
+  expect(() => createLaunch(savedDraft())).toThrow(
+    "Use increments of 0.001 seconds.",
+  );
+  await act(async () => start().click());
+  expect(
+    fetchMock.mock.calls.every(([url]) => String(url).endsWith("banks.get")),
+  ).toBe(true);
 });

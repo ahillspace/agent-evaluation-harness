@@ -713,6 +713,12 @@ export type JevAssessmentSummary = Pick<
   fallbackUsage?: z.infer<typeof usageSchema>;
   fallbackResultUsage?: z.infer<typeof usageSchema>;
 };
+export const externalRequestTimeoutSchema = z
+  .number()
+  .int()
+  .min(1000)
+  .max(600_000)
+  .default(120_000);
 export const limitsSchema = z
   .object({
     concurrency: z.number().int().min(1).max(8).default(1),
@@ -762,9 +768,23 @@ export const launchSchema = z
       ...input.limits,
       timeoutMs:
         input.limits.timeoutMs ??
-        (input.target.kind === "external" ? 120_000 : 300_000),
+        (input.target.kind === "external"
+          ? externalRequestTimeoutSchema.parse(undefined)
+          : 300_000),
     },
-  }));
+  }))
+  .superRefine((input, context) => {
+    if (
+      input.target.kind === "external" &&
+      !externalRequestTimeoutSchema.safeParse(input.limits.timeoutMs).success
+    )
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["limits", "timeoutMs"],
+        message:
+          "External request timeout must be between 1 second and 10 minutes.",
+      });
+  });
 export type LaunchInput = z.infer<typeof launchSchema>;
 export const controlSchema = z.enum(["pause", "halt", "resume", "cancel"]);
 export type Control = z.infer<typeof controlSchema>;

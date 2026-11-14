@@ -1,3 +1,5 @@
+import { useId } from "react";
+import { questionTimeoutIssue, questionTimeoutRange } from "./drafts.js";
 import { JsonEditor } from "./json-editor.js";
 import { modelSettingsGuide } from "./json-guides.js";
 import { validateModelSettings } from "../contracts/model-settings.js";
@@ -34,6 +36,9 @@ export function EvaluationSettings({
   refreshBank: () => void;
   onJevProfilePublished: (profile: JevProfileRevision) => void;
 }) {
+  const timeoutId = useId();
+  const timeoutIssue = questionTimeoutIssue(draft);
+  const timeoutRange = questionTimeoutRange(draft);
   return (
     <>
       <div className="form-grid">
@@ -77,14 +82,22 @@ export function EvaluationSettings({
         >
           <input
             aria-label="Question timeout"
+            aria-invalid={timeoutIssue ? true : undefined}
+            aria-describedby={timeoutIssue ? timeoutId : undefined}
             type="number"
-            min="1"
-            max="3600"
+            min={timeoutRange.min}
+            max={timeoutRange.max}
+            step="0.001"
             value={draft.timeoutSeconds}
             onChange={(event) =>
               set("timeoutSeconds", Number(event.target.value))
             }
           />
+          {timeoutIssue && (
+            <small id={timeoutId} className="notice error" role="status">
+              {timeoutIssue}
+            </small>
+          )}
         </Field>
         <Field
           label="Concurrent questions"

@@ -277,6 +277,15 @@ export function Setup({
   const bank = detail.data?.revisions.find(
     (item) => item.id === draft.bankRevisionId,
   );
+  const bankState = !draft.bankRevisionId
+    ? "unselected"
+    : detail.loading
+      ? "loading"
+      : detail.error
+        ? "failed"
+        : bank
+          ? "ready"
+          : "unavailable";
   const bankRecord = workspace.banks.find((item) => item.id === selectedBankId);
   const jevIssues = draft.jevEnabled
     ? jevConfigurationIssues(
@@ -569,6 +578,9 @@ export function Setup({
                   bank={bank}
                   published={published}
                   workspace={workspace}
+                  bankState={bankState}
+                  bankError={detail.error}
+                  retryBank={detail.refresh}
                 />
               )}
               {section === "agent" && (
@@ -662,9 +674,15 @@ export function Setup({
             </fieldset>
             <footer className="setup-footer">
               <span>
-                {bank
+                {bankState === "ready" && bank
                   ? `${selectedQuestionIds(draft, bank.questions).length} questions × ${draft.repetitions} repetitions`
-                  : "Choose a question bank"}
+                  : {
+                      unselected: "Choose a question bank",
+                      loading: "Loading question bank...",
+                      failed: "Question bank could not be loaded",
+                      unavailable: "Selected bank revision is unavailable",
+                      ready: "",
+                    }[bankState]}
               </span>
               {section !== "evaluation" &&
                 (jevIssues?.connection || jevIssues?.profile) && (
@@ -679,7 +697,7 @@ export function Setup({
                   pending ||
                   (!pendingLaunch &&
                     (!draftReady ||
-                      !bank ||
+                      bankState !== "ready" ||
                       !!jevIssues?.connection ||
                       !!jevIssues?.profile ||
                       (draft.questionSelection === "selected" &&

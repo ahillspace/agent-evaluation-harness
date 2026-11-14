@@ -49,12 +49,18 @@ export function useResource<K extends CommandName>(
   const [error, setError] = useState<Error | null>(null);
   const [failedKey, setFailedKey] = useState("");
   const [version, setVersion] = useState(0);
+  const requestKey = `${operation}:${key}:${version}`;
+  const [requestState, setRequestState] = useState({
+    key: "",
+    loading: false,
+  });
   const refresh = useCallback(() => setVersion((value) => value + 1), []);
   useEffect(() => {
     if (!enabled) return;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
+      setRequestState({ key: requestKey, loading: true });
       try {
         const result = await command(
           operation,
@@ -71,6 +77,9 @@ export function useResource<K extends CommandName>(
           setError(cause instanceof Error ? cause : new Error(String(cause)));
           setFailedKey(`${operation}:${key}`);
         }
+      } finally {
+        if (!controller.signal.aborted)
+          setRequestState({ key: requestKey, loading: false });
       }
       if (!controller.signal.aborted && interval)
         timer = setTimeout(() => {
@@ -82,10 +91,12 @@ export function useResource<K extends CommandName>(
       controller.abort();
       clearTimeout(timer);
     };
-  }, [operation, key, version, interval, enabled]);
+  }, [operation, key, requestKey, interval, enabled]);
   return {
     data: enabled && loadedKey === `${operation}:${key}` ? data : null,
     error: enabled && failedKey === `${operation}:${key}` ? error : null,
+    loading:
+      enabled && (requestState.key !== requestKey || requestState.loading),
     refresh,
   };
 }

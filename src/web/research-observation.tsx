@@ -29,6 +29,20 @@ export function ResearchPanel({
   } | null>(null);
   if (!resource.data) return <ErrorNotice error={resource.error} />;
   const { session, allowedActions, events } = resource.data;
+  const researchRuns = session.runIds.map((id, index) => {
+    const name = index === 0 ? "Baseline" : `Candidate ${index}`;
+    return {
+      id,
+      name,
+      label: [
+        name,
+        ...(id === session.bestRunId ? ["retained"] : []),
+        ...(id === session.currentRunId ? ["current"] : []),
+      ].join(" · "),
+    };
+  });
+  const selectedRun = researchRuns.find((run) => run.id === selectedRunId);
+  const retainedRun = researchRuns.find((run) => run.id === session.bestRunId);
   return (
     <section className="panel research-panel">
       <div className="panel-heading">
@@ -58,36 +72,48 @@ export function ResearchPanel({
       <div className="panel-body">
         <SectionIntro
           title="Research observation"
-          description="Watch the researcher propose changes and compare candidate agents. Select a run below to inspect its answers."
+          description="Watch the researcher propose changes and compare candidate agents."
           details="The baseline runs first. The researcher then reviews evidence and proposes changes within your limits. Research activity and evaluation activity are recorded separately."
         />
         <div className="row research-candidate-row">
-          <Field label="Candidate run">
-            <select
-              aria-label="Research candidate run"
-              value={selectedRunId}
-              onChange={(event) =>
-                navigate(`/runs/${event.target.value}?session=${sessionId}`)
-              }
+          {researchRuns.length > 1 ? (
+            <Field label="Research run">
+              <select
+                aria-label="Research run"
+                value={selectedRun?.id ?? ""}
+                onChange={(event) =>
+                  navigate(`/runs/${event.target.value}?session=${sessionId}`)
+                }
+              >
+                {!selectedRun && (
+                  <option value="" disabled>
+                    Choose a research run
+                  </option>
+                )}
+                {researchRuns.map((run) => (
+                  <option key={run.id} value={run.id}>
+                    {run.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          ) : researchRuns.length === 1 ? (
+            <Field
+              label={selectedRun ? "Research run" : "Available research run"}
             >
-              {session.runIds.map((id, index) => (
-                <option key={id} value={id}>
-                  {index === 0 ? "Baseline" : `Candidate ${index}`}
-                  {id === session.bestRunId ? " · retained" : ""}
-                  {id === session.currentRunId ? " · current" : ""}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <a
-            className="button secondary"
-            href={`#/runs/${session.bestRunId}?session=${sessionId}`}
-          >
-            Open retained{" "}
-            {session.bestRunId === session.baselineRunId
-              ? "baseline"
-              : "candidate"}
-          </a>
+              <strong>{researchRuns[0]?.label}</strong>
+            </Field>
+          ) : (
+            <p className="subtle">No research runs recorded yet.</p>
+          )}
+          {retainedRun && retainedRun.id !== selectedRunId && (
+            <a
+              className="button secondary"
+              href={`#/runs/${retainedRun.id}?session=${sessionId}`}
+            >
+              Open retained {retainedRun.name.toLowerCase()}
+            </a>
+          )}
         </div>
         {session.stopReason && (
           <p className="notice">

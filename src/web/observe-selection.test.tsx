@@ -130,6 +130,12 @@ beforeEach(() => {
       );
     if (url.endsWith("/runs.select-assessment"))
       return selectionResponse(input.passId);
+    if (url.endsWith("/runs.answer"))
+      return Response.json({
+        attemptId: input.attemptId,
+        evidenceHash: input.expectedEvidenceHash,
+        answer: input.attemptId === "a3" ? 41 : 42,
+      });
     if (url.endsWith("/runs.attempt"))
       return Response.json({
         attempt: {
@@ -1319,6 +1325,9 @@ it("keeps historical no-answer judgments separate from explicitly browsed later 
   expect(container.querySelector(".activity-body")?.textContent).not.toContain(
     "41",
   );
+  expect(
+    request.mock.calls.filter(([url]) => url.endsWith("/runs.answer")),
+  ).toHaveLength(0);
   await click("Attempts");
   await act(async () => {
     const attempts = container.querySelector<HTMLSelectElement>(
@@ -1331,6 +1340,13 @@ it("keeps historical no-answer judgments separate from explicitly browsed later 
   expect(container.querySelector(".activity-body")?.textContent).toContain(
     "41",
   );
+  expect(
+    request.mock.calls
+      .filter(([url]) => url.endsWith("/runs.answer"))
+      .map(([, options]) => JSON.parse(options.body as string)),
+  ).toEqual([
+    { runId: "run", attemptId: "a3", expectedEvidenceHash: "sealed-a3" },
+  ]);
   expect(container.querySelector(".activity-body")?.textContent).toContain(
     "This score has no assessed answer for this question. Showing another recorded attempt.",
   );

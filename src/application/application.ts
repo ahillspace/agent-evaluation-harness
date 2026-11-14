@@ -365,6 +365,10 @@ export async function createApplication(options: {
           performance: runPerformance(db, value.runId, usage),
         };
       }
+      case "runs.answer": {
+        const value = commandSchemas["runs.answer"].parse(input);
+        return runs.answer(value);
+      }
       case "runs.attempt": {
         const value = commandSchemas["runs.attempt"].parse(input);
         return runs.attempt(

@@ -17,6 +17,11 @@
 - Run reads return current-state snapshots without event history or cursors; manual refresh retains the frozen manifest, and Run switches isolate stale responses.
 - Dedicated Run and attempt event cursors, and research observation cursors, return complete durable event history without creating duplicate work.
 - Completed answers load without activity requests or duplicated event history in attempt detail; Activity retains its selected-attempt cursor across evidence tabs and settlement.
+- Visible completed answers use an authorized, hash-pinned compact read without assessment or Jev queries; full output hashing still verifies sealed integrity internally.
+- Activity never eagerly reads completed answer bodies; original response and attempt data load only inside their open disclosures.
+- Human review reads the selected sealed answer only while its answer/reference disclosure is open, preserving draft edits across question selections.
+- Failed and interrupted answers retain saved transport response text; complete submission failure JSON mounts only while disclosed without another read.
+- Read failures expose retry, and canceled responses cannot replace selected evidence.
 
 ## Evaluation
 

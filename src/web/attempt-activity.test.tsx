@@ -103,6 +103,12 @@ function requests(
     vi.fn(async (url: string, options: RequestInit) => {
       const input = JSON.parse(options.body as string);
       if (url.endsWith("/runs.attempt-events")) return events(input, options);
+      if (url.endsWith("/runs.answer"))
+        return Response.json({
+          attemptId: input.attemptId,
+          evidenceHash: input.expectedEvidenceHash,
+          answer: 42,
+        });
       if (url.endsWith("/runs.attempt"))
         return Response.json({
           attempt: {

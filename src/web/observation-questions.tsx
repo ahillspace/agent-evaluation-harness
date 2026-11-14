@@ -6,7 +6,7 @@ import type {
 } from "../contracts.js";
 import { savedTarget } from "../contracts/targets.js";
 import { useResource } from "./api.js";
-import { useObservation, mergeEvents } from "./observation-stream.js";
+import { useAttemptEvents } from "./attempt-events.js";
 import { EventList } from "./observation-events.js";
 import { Answer } from "./answer.js";
 import { JevAssessment } from "./jev-assessment.js";
@@ -103,18 +103,9 @@ export function RunQuestions({
       summary.status !== "running" &&
       (!summary.hasOutput || !!summary.evidenceHash),
   );
-  const live = [
-    "queued",
-    "running",
-    "pausing",
-    "halting",
-    "cancelling",
-  ].includes(run.status);
-  const events = useObservation(
-    "runs.attempt-events",
+  const events = useAttemptEvents(
     { runId: run.id, attemptId: summary?.id ?? "" },
-    !!summary,
-    live,
+    !!summary && tab === "activity",
   );
   const judgment = judgmentsByResult.get(current?.id ?? "");
   const judgmentDetail = assessmentDetail?.judgments.find(
@@ -149,10 +140,9 @@ export function RunQuestions({
       attentionOnly,
     ),
   );
-  const activity = mergeEvents(
-    detail.data?.events ?? [],
-    events.data?.events ?? [],
-  ).filter((item) => item.attemptId === summary?.id || !item.attemptId);
+  const activity = events.events.filter(
+    (item) => item.attemptId === summary?.id || !item.attemptId,
+  );
   const attempt = summary;
   const external = savedTarget(run.manifest).kind === "external";
   const jev = view.jevAssessments?.find(
@@ -170,7 +160,7 @@ export function RunQuestions({
       : undefined;
   return (
     <section className="observer">
-      <ErrorNotice error={detail.error ?? events.error} />
+      <ErrorNotice error={detail.error} />
       <div className="observation-columns">
         <aside className="question-queue">
           <div className="section-label">
@@ -335,16 +325,28 @@ export function RunQuestions({
             )}
             {tab === "activity" && (
               <>
+                <ErrorNotice error={events.error} />
+                {events.error && (
+                  <button className="button secondary" onClick={events.refresh}>
+                    Retry loading activity
+                  </button>
+                )}
                 {external && (
                   <p className="notice">
                     Internal activity is managed by the external system. Halt or
                     Cancel stops local waiting; remote work can continue.
                   </p>
                 )}
-                <EventList
-                  events={activity}
-                  empty="No recorded activity for this attempt yet."
-                />
+                {(activity.length > 0 ||
+                  (!events.loading && !events.error)) && (
+                  <EventList
+                    events={activity}
+                    empty="No recorded activity for this attempt yet."
+                  />
+                )}
+                {events.loading && !events.error && (
+                  <p className="waiting-text">Loading activity...</p>
+                )}
               </>
             )}
             {tab === "evidence" && (

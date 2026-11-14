@@ -377,7 +377,10 @@ export async function createApplication(options: {
         const value = commandSchemas["runs.attempt-events"].parse(input);
         const { attempt } = answers.authorize(value.runId, value.attemptId);
         const events = db.events(
-          { runId: attempt.runId, attemptId: value.attemptId },
+          {
+            runId: [...new Set([attempt.runId, value.runId])],
+            attemptId: value.attemptId,
+          },
           value.cursor,
           { limit: 200 },
         );

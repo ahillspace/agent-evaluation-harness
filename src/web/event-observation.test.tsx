@@ -5,7 +5,7 @@ import { expect, it, vi } from "vitest";
 import { useObservation } from "./observation-stream.js";
 import { EventList } from "./observation-events.js";
 
-it.each(["runs.attempt-events", "research.get"] as const)(
+it.each(["research.get"] as const)(
   "retains complete %s event continuation independently of snapshot refresh",
   async (operation) => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -30,9 +30,7 @@ it.each(["runs.attempt-events", "research.get"] as const)(
     function Probe() {
       const result = useObservation(
         operation,
-        operation === "research.get"
-          ? { sessionId: "research" }
-          : { runId: "run", attemptId: "attempt" },
+        { sessionId: "research" },
         true,
         false,
       );

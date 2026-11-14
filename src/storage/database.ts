@@ -1106,7 +1106,11 @@ export class Database {
     return Number(row?.sequence ?? 0);
   }
   events(
-    scope: { runId?: string; sessionId?: string; attemptId?: string },
+    scope: {
+      runId?: string | string[];
+      sessionId?: string;
+      attemptId?: string;
+    },
     cursor = 0,
     options: { limit?: number; summary?: boolean } = {},
   ): ObservationEvent[] {
@@ -1125,8 +1129,13 @@ export class Database {
     })) {
       const value = scope[key as keyof typeof scope];
       if (value === undefined) continue;
-      clauses.push(`${column}=?`);
-      parameters.push(value);
+      const values = Array.isArray(value) ? [...new Set(value)] : [value];
+      clauses.push(
+        values.length
+          ? `${column} IN (${values.map(() => "?").join(",")})`
+          : "0",
+      );
+      parameters.push(...values);
     }
     if (clauses.length === 1) return [];
     const projection = options.summary

@@ -1310,7 +1310,6 @@ export type RunObservation = Omit<RunView, "run"> & {
 export interface AttemptDetail {
   jevAssessments: JevAssessmentSummary[];
   attempt: AttemptRecord;
-  events: ObservationEvent[];
   assessments: Array<{
     scoreSetId: string;
     evaluator: EvaluatorRevision;

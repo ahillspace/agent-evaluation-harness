@@ -16,6 +16,7 @@
 - Failed Resume readiness leaves parent and child unchanged, and competing controls cannot be overwritten by stale admission.
 - Run reads return current-state snapshots without event history or cursors; manual refresh retains the frozen manifest, and Run switches isolate stale responses.
 - Dedicated Run and attempt event cursors, and research observation cursors, return complete durable event history without creating duplicate work.
+- Completed answers load without activity requests or duplicated event history in attempt detail; Activity retains its selected-attempt cursor across evidence tabs and settlement.
 
 ## Evaluation
 

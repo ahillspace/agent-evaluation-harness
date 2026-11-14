@@ -16,11 +16,16 @@ export function mergeEvents(
   ].sort((a, b) => a.sequence - b.sequence);
 }
 
-export function useObservation<
-  K extends "research.get" | "runs.attempt-events",
->(operation: K, input: CommandInput<K>, enabled = true, polling = true) {
+export function useObservation(
+  operation: "research.get",
+  input: CommandInput<"research.get">,
+  enabled = true,
+  polling = true,
+) {
   const key = JSON.stringify(input);
-  const [data, setData] = useState<CommandResultMap[K] | null>(null),
+  const [data, setData] = useState<CommandResultMap["research.get"] | null>(
+      null,
+    ),
     [error, setError] = useState<Error | null>(null),
     [version, setVersion] = useState(0);
   const [loadedKey, setLoadedKey] = useState("");

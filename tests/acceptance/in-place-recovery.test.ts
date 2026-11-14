@@ -836,6 +836,13 @@ it("protects a legacy applied completed answer even when an explicit selection n
       ],
       assessmentPassIds: [],
     });
+    db.append({
+      runId: child.run.id,
+      attemptId: physical.completedAttemptId!,
+      type: "agent.message",
+      message: "Adopted physical activity",
+      data: { complete: "retained adopted event data" },
+    });
   } finally {
     db.close();
   }
@@ -847,6 +854,26 @@ it("protects a legacy applied completed answer even when an explicit selection n
     status: "failed",
     answerSource: { attemptId: physical.completedAttemptId },
   });
+  const adopted = {
+    runId: original.run.id,
+    attemptId: physical.completedAttemptId!,
+  };
+  const adoptedDetail = await f.command("runs.attempt", adopted);
+  expect(adoptedDetail).not.toHaveProperty("events");
+  expect(adoptedDetail.attempt.output?.answer).toBe(42);
+  expect(adoptedDetail.attempt.runId).toBe(child.run.id);
+  const adoptedEvents = await f.command("runs.attempt-events", adopted);
+  expect(adoptedEvents).toEqual(
+    await f.command("runs.attempt-events", { ...adopted, runId: child.run.id }),
+  );
+  expect(adoptedEvents.events).toContainEqual(
+    expect.objectContaining({
+      runId: child.run.id,
+      attemptId: physical.completedAttemptId,
+      message: "Adopted physical activity",
+      data: { complete: "retained adopted event data" },
+    }),
+  );
   const rejected = await f.request("runs.retry-failed", {
     runId: original.run.id,
     resultIds: [logical.id],

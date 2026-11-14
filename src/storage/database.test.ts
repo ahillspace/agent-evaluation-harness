@@ -23,6 +23,7 @@ import {
   type ResultRecord,
   type JevAssessmentRecord,
   type ResearchRecord,
+  type ObservationEvent,
 } from "../contracts.js";
 import { Database } from "./database.js";
 import { digest } from "../domain/identity.js";
@@ -1030,6 +1031,64 @@ describe("typed durable records", () => {
     const full = db.events({ runId: "run1", attemptId: "attempt1" });
     expect(full).toHaveLength(1);
     expect(full[0]?.data).toEqual({ detail: "full-event-marker" });
+  });
+  it("pages a combined event Run scope once in global order without widening its attempt or payload scope", async () => {
+    const db = await setup();
+    const expected: ObservationEvent[] = [];
+    db.transaction(() => {
+      for (let index = 0; index < 241; index++) {
+        expected.push(
+          db.append({
+            runId: index % 2 ? "logical" : "physical",
+            attemptId: "selected-attempt",
+            type: "agent.message",
+            message: `${index}:` + "full-message".repeat(120),
+            data: { index, body: `full-data-${index}` },
+          }),
+        );
+        db.append({
+          runId: "sibling",
+          attemptId: "selected-attempt",
+          type: "judge.started",
+          message: "Excluded logical sibling",
+        });
+        db.append({
+          runId: "physical",
+          attemptId: "other-attempt",
+          type: "agent.message",
+          message: "Excluded physical attempt",
+        });
+      }
+    });
+    const first = db.events(
+      {
+        runId: ["physical", "logical", "physical"],
+        attemptId: "selected-attempt",
+      },
+      0,
+      { limit: 200 },
+    );
+    expect(first).toEqual(expected.slice(0, 200));
+    const second = db.events(
+      { runId: ["physical", "logical"], attemptId: "selected-attempt" },
+      first.at(-1)!.sequence,
+      { limit: 200 },
+    );
+    expect(second).toEqual(expected.slice(200));
+    expect(
+      db.events(
+        { runId: ["physical", "logical"], attemptId: "selected-attempt" },
+        second.at(-1)!.sequence,
+        { limit: 200 },
+      ),
+    ).toEqual([]);
+    expect(db.events({ runId: [], attemptId: "selected-attempt" })).toEqual([]);
+    expect(
+      db.events({
+        runId: ["physical", "physical"],
+        attemptId: "selected-attempt",
+      }),
+    ).toEqual(db.events({ runId: "physical", attemptId: "selected-attempt" }));
   });
   it("records its schema version and refuses a newer catalog", async () => {
     const directory = await mkdtemp(join(tmpdir(), "aeh-schema-"));

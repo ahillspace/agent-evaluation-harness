@@ -10,6 +10,8 @@ import type {
   BankRevision,
   EvaluatorDraft,
   EvaluatorRevision,
+  AttemptDetail,
+  ObservationEvent,
 } from "../contracts.js";
 import { createApplication } from "./application.js";
 import { Database } from "../storage/database.js";
@@ -1828,6 +1830,113 @@ it("returns Run snapshots without event history while dedicated HTTP and CLI cur
     reader.close();
   }
 });
+
+it("keeps HTTP and CLI attempt detail compact while authorized cursors retain more than 5000 complete events", async () => {
+  let calls = 0;
+  const output = {
+    answer: 42,
+    text: "42",
+    transcript: { artifactOnly: "retained provider transcript" },
+    transport: { requestId: "retained transport" },
+  };
+  const { app, bank } = await setup(
+    runtime(async ({ onEvent }) => {
+      if (++calls === 1)
+        for (let index = 1; index <= 5001; index++)
+          onEvent({
+            type: "agent.message",
+            message: `complete-${index}`,
+            data: { index, payload: `full-${index}` },
+          });
+      return output;
+    }),
+  );
+  const first = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+  });
+  await app.waitForIdle();
+  const second = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+  });
+  await app.waitForIdle();
+  const snapshot = await app.execute("runs.get", { runId: first.run.id });
+  const attempt = snapshot.attempts[0]!;
+  const input = {
+    runId: first.run.id,
+    attemptId: attempt.id,
+    expectedEvidenceHash: attempt.evidenceHash,
+  };
+  const server = await startServer({ application: app, port: 0 });
+  cleanups.push(() => server.close());
+  const post = (operation: string, body: unknown) =>
+    fetch(`${server.url}/api/commands/${operation}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const cli = (operation: string, body: unknown) =>
+    runCli([operation, "--url", server.url, "--json", JSON.stringify(body)]);
+  const eventReads = vi.spyOn(Database.prototype, "events");
+  try {
+    const response = await post("runs.attempt", input);
+    expect(response.status).toBe(200);
+    for (const detail of [
+      await response.json(),
+      await cli("runs.attempt", input),
+    ] as AttemptDetail[]) {
+      expect(detail).not.toHaveProperty("events");
+      expect(detail.attempt.output).toEqual(output);
+      expect(detail.attempt.evidenceHash).toBe(attempt.evidenceHash);
+      expect(detail.assessments).toHaveLength(1);
+      expect(JSON.stringify(detail).length).toBeLessThan(5000);
+    }
+    expect(eventReads).not.toHaveBeenCalled();
+  } finally {
+    eventReads.mockRestore();
+  }
+  const all: ObservationEvent[] = [];
+  let cursor = 0;
+  for (;;) {
+    const page = (await cli("runs.attempt-events", {
+      runId: first.run.id,
+      attemptId: attempt.id,
+      cursor,
+    })) as { events: ObservationEvent[]; cursor: number };
+    all.push(...page.events);
+    cursor = page.cursor;
+    if (page.events.length < 200) break;
+  }
+  const messages = all.filter((event) => event.type === "agent.message");
+  expect(messages).toHaveLength(5001);
+  expect(messages[0]).toMatchObject({
+    message: "complete-1",
+    data: { index: 1, payload: "full-1" },
+  });
+  expect(messages.at(-1)).toMatchObject({
+    message: "complete-5001",
+    data: { index: 5001, payload: "full-5001" },
+  });
+  const terminal = await post("runs.attempt-events", {
+    runId: first.run.id,
+    attemptId: attempt.id,
+    cursor,
+  });
+  expect(await terminal.json()).toEqual({ events: [], cursor });
+  for (const operation of ["runs.attempt", "runs.attempt-events"]) {
+    const foreign = { runId: second.run.id, attemptId: attempt.id };
+    expect((await post(operation, foreign)).status).toBe(404);
+    await expect(cli(operation, foreign)).rejects.toMatchObject({
+      response: { error: { code: "not_found" } },
+    });
+  }
+  expect(
+    (await post("runs.attempt", { ...input, expectedEvidenceHash: "wrong" }))
+      .status,
+  ).toBe(409);
+  expect(calls).toBe(2);
+}, 30_000);
 
 it("rejects invalid external deadlines through HTTP and CLI before target resolution or admission", async () => {
   const port = runtime();

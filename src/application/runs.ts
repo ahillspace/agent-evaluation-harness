@@ -692,7 +692,6 @@ export class RunService {
       jevAssessments: this.db
         .jevSummaries(attempt.runId)
         .filter((value) => value.attemptId === attemptId),
-      events: this.db.events({ runId: attempt.runId, attemptId }),
       assessments,
     };
   }

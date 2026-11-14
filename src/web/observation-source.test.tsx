@@ -12,10 +12,6 @@ vi.mock("./api.js", async (importOriginal) => ({
   command: vi.fn(),
   useResource: resource,
 }));
-vi.mock("./observation-stream.js", () => ({
-  useObservation: () => ({ data: { events: [] }, error: null }),
-  mergeEvents: (left: unknown[], right: unknown[]) => [...left, ...right],
-}));
 const view = {
   run: {
     id: "original",
@@ -108,7 +104,6 @@ beforeEach(() => {
             ? { output: { answer: 42, text: "42" } }
             : {}),
         },
-        events: [],
       },
       error: null,
       refresh: () => {},

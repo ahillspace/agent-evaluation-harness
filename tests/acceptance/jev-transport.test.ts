@@ -304,11 +304,14 @@ it("keeps ordinary score inspection thin while authorized Jev inspection and exp
   const jevReads = () =>
     reads.mock.calls.filter(([kind]) => kind === "jevAssessment");
   for (const passId of [jev.id, review.id]) {
+    const observed = observations.find((pass) => pass.id === passId)!;
     reads.mockClear();
     const inspection = await app.post("runs.assessment", {
       runId: context.runId,
       passId,
+      expectedObservationRevision: observed.observationRevision,
     });
+    expect(inspection.observationRevision).toBe(observed.observationRevision);
     expect(Object.keys(inspection).sort()).toEqual([
       "configuration",
       "judgments",
@@ -320,7 +323,7 @@ it("keeps ordinary score inspection thin while authorized Jev inspection and exp
       inspection.judgments.map(
         ({ details: _details, ...metadata }) => metadata,
       ),
-    ).toEqual(observations.find((pass) => pass.id === passId)!.judgments);
+    ).toEqual(observed.judgments);
     for (const judgment of inspection.judgments) {
       expect(judgment).not.toHaveProperty("request");
       expect(judgment).not.toHaveProperty("response");
@@ -339,16 +342,51 @@ it("keeps ordinary score inspection thin while authorized Jev inspection and exp
   expect(record.response).toEqual(exported.judgments[0]!.response);
   expect(JSON.stringify(record)).not.toContain("request-2");
   for (const passId of [llm.id, llmReview.id]) {
+    const observed = observations.find((pass) => pass.id === passId)!;
     const full = await app.post("runs.export-assessment", {
       runId: context.runId,
       passId,
+      expectedObservationRevision: observed.observationRevision,
     });
     const inspection = await app.post("runs.assessment", {
       runId: context.runId,
       passId,
+      expectedObservationRevision: observed.observationRevision,
     });
-    expect(full.judgments[0]!.request).toBeDefined();
-    expect(inspection.judgments).toEqual(full.judgments);
+    expect(inspection.observationRevision).toBe(observed.observationRevision);
+    expect(inspection.configuration).toEqual(full.configuration);
+    expect(full.judgments).toHaveLength(3);
+    for (const judgment of full.judgments) {
+      expect(judgment.request).toEqual({
+        configuration: full.configuration.judge,
+        evidence: app.evidence.find(
+          (item) => item.resultId === judgment.resultId,
+        ),
+      });
+      expect(judgment.response).toEqual({
+        verdict: true,
+        explanation: "LLM fixture verdict",
+        usage: { inputTokens: 10, outputTokens: 1 },
+      });
+    }
+    expect(inspection.judgments).toEqual(
+      full.judgments.map(
+        ({ request: _request, response: _response, ...metadata }) => ({
+          ...metadata,
+          hasRecordedExchange: true,
+        }),
+      ),
+    );
+    for (const judgment of inspection.judgments) {
+      expect(judgment).not.toHaveProperty("request");
+      expect(judgment).not.toHaveProperty("response");
+    }
+    expect(
+      inspection.judgments.map(
+        ({ details: _details, hasRecordedExchange: _exchange, ...metadata }) =>
+          metadata,
+      ),
+    ).toEqual(observed.judgments);
   }
   reads.mockClear();
   const stale = await fetch(`${app.server.url}/api/commands/runs.assessment`, {

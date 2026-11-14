@@ -10,6 +10,7 @@ import { useAttemptEvents } from "./attempt-events.js";
 import { EventList } from "./observation-events.js";
 import { Answer } from "./answer.js";
 import { JevAssessment } from "./jev-assessment.js";
+import { AssessmentExchange } from "./assessment-exchange.js";
 import { ReportFinding } from "./report-finding.js";
 import { failureLabels } from "./retry-failures.js";
 import { questionEvidence } from "./question-evidence.js";
@@ -525,18 +526,25 @@ export function RunQuestions({
                 </p>
               )}
             </details>
-            {!judgmentDetail?.jevAssessmentId &&
-              (judgmentDetail?.request || judgmentDetail?.response) && (
-                <details className="disclosure inspector-section">
-                  <summary>Assessment request and response</summary>
-                  <JsonView
-                    value={{
-                      request: judgmentDetail.request,
-                      response: judgmentDetail.response,
-                      configuration: assessmentDetail?.configuration.judge,
-                    }}
-                  />
-                </details>
+            {pass &&
+              judgment &&
+              judgmentDetail?.hasRecordedExchange &&
+              !judgment.jevAssessmentId && (
+                <AssessmentExchange
+                  key={JSON.stringify([
+                    run.id,
+                    pass.id,
+                    pass.observationRevision,
+                    current?.id,
+                    summary?.id,
+                    summary?.evidenceHash,
+                    judgment.attemptId,
+                    judgment.evidenceHash,
+                  ])}
+                  runId={run.id}
+                  pass={pass}
+                  judgment={judgment}
+                />
               )}
             <details className="disclosure inspector-section">
               <summary>Attempt details</summary>

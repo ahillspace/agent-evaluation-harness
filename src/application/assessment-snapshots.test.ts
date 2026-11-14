@@ -7,6 +7,7 @@ import { agentSchema, type RuntimePort } from "../contracts.js";
 import { Database } from "../storage/database.js";
 import { AppError } from "../domain/errors.js";
 import { createApplication } from "./application.js";
+import { observePass } from "./assessment-passes.js";
 import { targetFixture } from "../../tests/fixtures/runtime-targets.js";
 
 function recordState(reader: DatabaseSync) {
@@ -44,6 +45,87 @@ function fixtureRuntime(execute: RuntimePort["execute"]): RuntimePort {
     },
   };
 }
+
+it.each([false, true, null, "comparison", 17, { expected: false }])(
+  "preserves exact legacy fallback comparison details %j without parsing judge exchanges",
+  async (details) => {
+    const directory = await mkdtemp(join(tmpdir(), "aeh-inspection-legacy-"));
+    const runtime = fixtureRuntime(async () => ({ answer: 42, text: "42" }));
+    let app = await createApplication({ dataDirectory: directory, runtime });
+    try {
+      const bank = await app.execute("banks.create", {
+        name: "Legacy comparison",
+        questions: [{ id: "q", text: "Count?", expected: 42 }],
+      });
+      const launch = await app.execute("runs.launch", {
+        bankRevisionId: bank.id,
+        agent: agentSchema.parse({ harness: "codex", model: "fixture" }),
+      });
+      await app.waitForIdle();
+      await app.close();
+      const db = new Database(join(directory, "workspace.sqlite"));
+      const assessment = db.list("assessment", { runId: launch.run.id })[0]!;
+      db.insert(
+        "scoreSet",
+        {
+          id: "legacy-comparison",
+          runId: launch.run.id,
+          evaluator: launch.run.manifest.evaluator,
+          createdAt: new Date().toISOString(),
+          kind: "rescore",
+          published: true,
+          assessments: [
+            {
+              ...assessment,
+              deterministic: { ...assessment.deterministic, details },
+              judgeRequest: { marker: "LEGACY_RAW_EXCHANGE" },
+              judgeResponse: false,
+            },
+          ],
+        },
+        true,
+      );
+      db.close();
+      app = await createApplication({ dataDirectory: directory, runtime });
+      const observed = (
+        await app.execute("runs.observe", { runId: launch.run.id })
+      ).assessmentPasses!.find(
+        (pass) => pass.id === "scores_legacy-comparison",
+      )!;
+      const input = {
+        runId: launch.run.id,
+        passId: observed.id,
+        expectedObservationRevision: observed.observationRevision,
+      };
+      const full = await app.execute("runs.export-assessment", input);
+      expect(observePass(full).observationRevision).toBe(
+        observed.observationRevision,
+      );
+      const originalParse = JSON.parse;
+      const rawBodies: string[] = [];
+      const parse = vi
+        .spyOn(JSON, "parse")
+        .mockImplementation((text, reviver) => {
+          if (text.includes("LEGACY_RAW_EXCHANGE")) rawBodies.push(text);
+          return originalParse(text, reviver);
+        });
+      try {
+        const inspection = await app.execute("runs.assessment", input);
+        expect(inspection.observationRevision).toBe(
+          observed.observationRevision,
+        );
+        expect(inspection.judgments[0]).toHaveProperty("details", details);
+        expect(inspection.configuration).toEqual(full.configuration);
+        expect(rawBodies).toHaveLength(0);
+      } finally {
+        parse.mockRestore();
+      }
+    } finally {
+      await app.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 it.each(["completed", "cancelled", "failed"] as const)(
   "seals original passes at %s settlement and keeps conditional reads and actions free of writes",

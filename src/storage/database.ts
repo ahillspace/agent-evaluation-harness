@@ -31,6 +31,10 @@ import type {
 import { digest, id } from "../domain/identity.js";
 import { AppError } from "../domain/errors.js";
 import { canonical, now } from "../domain/identity.js";
+import {
+  researchTurnAccounting,
+  type ResearchTurnAccounting,
+} from "../domain/research-turns.js";
 
 export interface RecordMap {
   retryApplication: RunRetryApplication;
@@ -919,7 +923,8 @@ export class Database {
   researchUsage(sessionId: string): {
     currentRunId: string;
     pending: boolean;
-    interruptedTurns: number;
+    interruptedTurns: number | undefined;
+    accounting: ResearchTurnAccounting;
     turns: Array<{
       runId: string | null;
       usage?: UsageReport["usage"];
@@ -928,7 +933,7 @@ export class Database {
   } {
     const record = this.db
       .prepare(
-        "SELECT json_extract(value,'$.currentRunId') AS current_run_id,json_type(value,'$.pendingTurn') IS NOT NULL AS pending,COALESCE(json_extract(value,'$.interruptedTurns'),0) AS interrupted FROM records WHERE kind='research' AND id=?",
+        "SELECT json_extract(value,'$.currentRunId') AS current_run_id,json_type(value,'$.pendingTurn') IS NOT NULL AS pending FROM records WHERE kind='research' AND id=?",
       )
       .get(sessionId);
     if (!record)
@@ -952,12 +957,37 @@ export class Database {
           : {}),
         ...(row.scope ? { usageScope: String(row.scope) } : {}),
       }));
+    const accounting = this.researchAccounting(sessionId);
     return {
       currentRunId: String(record.current_run_id),
       pending: record.pending === 1,
-      interruptedTurns: Number(record.interrupted),
+      interruptedTurns: accounting.interrupted,
+      accounting,
       turns,
     };
+  }
+  researchAccounting(sessionId: string): ResearchTurnAccounting {
+    const row = this.db
+      .prepare(
+        "SELECT json_extract(value,'$.researcherInvocations') AS admitted,json_type(value,'$.researcherInvocations') AS admitted_type,json_array_length(value,'$.turns') AS completed,json_type(value,'$.pendingTurn') IS NOT NULL AS pending,json_extract(value,'$.interruptedTurns') AS interrupted,(COALESCE(length(json_extract(value,'$.conversationId')),0)>0 OR json_type(value,'$.pendingProposal')='object' OR json_extract(value,'$.phase') IN ('researching','evaluating') OR json_array_length(value,'$.runIds')>1 OR EXISTS(SELECT 1 FROM events WHERE session_id=records.id AND run_id IS NULL AND attempt_id IS NULL AND type NOT IN ('research.control.requested','research.evidence.retrieved','research.gold.retrieved','research.completed','research.error','research.paused','research.halted','research.cancelled'))) AS history FROM records WHERE kind='research' AND id=?",
+      )
+      .get(sessionId);
+    if (!row)
+      throw new AppError("not_found", "The research session does not exist.");
+    return researchTurnAccounting({
+      admitted:
+        row.admitted_type === null || row.admitted_type === "null"
+          ? undefined
+          : (row.admitted_type === "integer" || row.admitted_type === "real") &&
+              typeof row.admitted === "number"
+            ? row.admitted
+            : Number.NaN,
+      completed: Number(row.completed),
+      pending: row.pending === 1,
+      recordedInterrupted:
+        row.interrupted === null ? undefined : Number(row.interrupted),
+      history: row.history === 1,
+    });
   }
   researchSummary(sessionId: string): ResearchSummary {
     const row = this.db
@@ -983,8 +1013,13 @@ export class Database {
       for (const [key, value] of Object.entries(turn.output))
         if (value === null)
           delete (turn.output as unknown as Record<string, unknown>)[key];
+    const metadata = JSON.parse(row.metadata as string) as Omit<
+      ResearchSummary,
+      "turns"
+    >;
     return {
-      ...(JSON.parse(row.metadata as string) as Omit<ResearchSummary, "turns">),
+      ...metadata,
+      interruptedTurns: this.researchAccounting(sessionId).interrupted,
       turns,
     };
   }

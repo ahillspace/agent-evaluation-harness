@@ -5,6 +5,20 @@ import {
   type ResearchRecord,
 } from "../contracts.js";
 import { researchBudgetReason } from "./research-budget.js";
+import { researchTurnAccounting } from "./research-turns.js";
+
+function accounting(value: ResearchRecord) {
+  return researchTurnAccounting({
+    admitted: value.researcherInvocations,
+    completed: value.turns.length,
+    pending: !!value.pendingTurn,
+    recordedInterrupted: value.interruptedTurns,
+    history:
+      value.turns.length > 0 ||
+      !!value.pendingTurn ||
+      (value.interruptedTurns ?? 0) > 0,
+  });
+}
 
 const agent = { harness: "codex", model: "model" };
 function session(): ResearchRecord {
@@ -44,6 +58,19 @@ const attempt: AttemptRecord = {
   },
 };
 describe("research admission budgets", () => {
+  it("uses admitted turns rather than historical recorded counters for unknown spending", () => {
+    const value = session();
+    value.researcherInvocations = 0;
+    value.interruptedTurns = 99;
+    expect(
+      researchBudgetReason(value, [attempt], accounting(value)),
+    ).toBeUndefined();
+    value.researcherInvocations = 1;
+    value.interruptedTurns = 0;
+    expect(researchBudgetReason(value, [attempt], accounting(value))).toContain(
+      "interrupted researcher",
+    );
+  });
   it("counts cumulative researcher usage once and includes independent judge usage", () => {
     const value = session();
     value.turns = [30, 60].map((tokens) => ({
@@ -56,9 +83,12 @@ describe("research admission budgets", () => {
         usage: { inputTokens: tokens, outputTokens: 0 },
       },
     }));
-    expect(researchBudgetReason(value, [attempt])).toBeUndefined();
+    value.researcherInvocations = value.turns.length;
     expect(
-      researchBudgetReason(value, [attempt], 0, Date.now(), [
+      researchBudgetReason(value, [attempt], accounting(value)),
+    ).toBeUndefined();
+    expect(
+      researchBudgetReason(value, [attempt], accounting(value), 0, Date.now(), [
         { inputTokens: 20, outputTokens: 0 },
       ]),
     ).toContain("Token budget");
@@ -66,15 +96,17 @@ describe("research admission budgets", () => {
   it("rejects unknown spending and reserves each physical attempt", () => {
     const value = session();
     value.configuration.maxTargetInvocations = 1;
-    expect(researchBudgetReason(value, [attempt], 1)).toContain(
-      "invocation budget",
-    );
     expect(
-      researchBudgetReason(value, [attempt], 0, Date.now(), [undefined]),
+      researchBudgetReason(value, [attempt], accounting(value), 1),
+    ).toContain("invocation budget");
+    expect(
+      researchBudgetReason(value, [attempt], accounting(value), 0, Date.now(), [
+        undefined,
+      ]),
     ).toContain("unavailable");
     value.interruptedTurns = 1;
-    expect(researchBudgetReason(value, [attempt])).toContain(
-      "interrupted researcher",
+    expect(researchBudgetReason(value, [attempt], accounting(value))).toContain(
+      "admission history",
     );
   });
 });

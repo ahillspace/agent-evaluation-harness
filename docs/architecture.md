@@ -222,8 +222,27 @@ Mutation validation constrains candidates, which use the ordinary Run engine.
 A fixed eligible basis and coverage guard prevent failures from improving selection by shrinking the denominator.
 
 Pending inputs and conversation identifiers are checkpointed.
+The pending admission and its full request event commit together before provider admission.
+Interruption consumes that pending admission and records unknown usage in the same lifecycle transition.
+One domain rule derives interrupted usage from admitted invocations, saved outputs, and the pending checkpoint.
+Historical interruption counters remain unchanged and serve as a fallback only when admission counts are absent.
+One bounded database projection supplies durable history to accounting, observation, and every research budget boundary.
+Unavailable admission history remains unknown in usage and blocks candidate, target, and researcher admissions, even without financial limits.
+Only pristine empty history can initialize an absent admission count.
+Acknowledged conversation identity, a saved proposal, researching or evaluating phase, candidate linkage, and recorded turn events all establish prior admission history.
+Researcher-session events establish history except the explicit pre-admission product control, evidence, and settlement events.
+Child Run and attempt events do not establish researcher history.
+Finished phase alone does not establish that history because a baseline budget stop can finish before researcher admission.
+Startup validates known admission counts before consuming a checkpoint, preserving inconsistent saved records and inputs for inspection.
+The transition also preserves the captured input and start time in an interruption event, even when no earlier request event exists.
+Recovery consumes pending admissions on terminal sessions without replacing their status or intent.
+An initializing launch cannot settle a newer research job; the owning job drains its provider before settling Pause, Halt, or Cancel.
+Startup reconciles unfinished admissions, missing baseline linkage, continuity loss, and unsettled lifecycle state without resuming providers.
+Already settled research records remain unchanged during startup, reads, and shutdown.
 Unavailable continuity or exhausted context stops the session instead of replacing the conversation.
 Launch replay shares initialization and reconciles a committed baseline receipt.
+Baseline receipt recovery preserves established current and retained Runs, ordered Run links, and decisions.
+It fills missing selection only for a sole baseline; ambiguous or foreign links stop recovery before a write.
 Evidence resolves authorized original and adopted physical attempts and drains each scoped event cursor.
 Responses above 16 MiB fail explicitly without returning partial evidence; whole-Run requests can select a result instead.
 

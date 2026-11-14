@@ -158,7 +158,7 @@ export function runPerformance(
   }
   if (parent?.currentRunId === runId) {
     if (parent.pending) researcherUsage.push({ pending: true });
-    for (let index = 0; index < parent.interruptedTurns; index++)
+    for (let index = 0; index < (parent.interruptedTurns ?? 1); index++)
       researcherUsage.push({});
   }
   const originalJudges = [
@@ -233,7 +233,9 @@ export function runPerformance(
       ...aggregateUsage(researcherUsage),
       turns:
         parent &&
-        ((parent.interruptedTurns > 0 && parent.currentRunId === runId) ||
+        (((parent.accounting.status === "unavailable" ||
+          (parent.interruptedTurns ?? 0) > 0) &&
+          parent.currentRunId === runId) ||
           parent.turns.some((turn) => turn.runId === null))
           ? null
           : parent

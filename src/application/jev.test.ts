@@ -274,7 +274,7 @@ it.each([
       currentRunId: runId,
       bestRunId: runId,
       runIds: [runId],
-      phase: "evaluating",
+      phase: "baseline",
       turns: [],
     });
     db.close();

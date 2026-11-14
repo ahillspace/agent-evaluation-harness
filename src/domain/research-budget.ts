@@ -3,17 +3,23 @@ import type {
   ResearchRecord,
   TargetOutput,
 } from "../contracts.js";
+import {
+  RESEARCH_HISTORY_UNAVAILABLE,
+  type ResearchTurnAccounting,
+} from "./research-turns.js";
 
 export function researchBudgetReason(
   session: ResearchRecord,
   attempts: AttemptRecord[],
+  accounting: ResearchTurnAccounting,
   additionalTargets = 0,
   timestamp = Date.now(),
   additionalUsage: Array<TargetOutput["usage"]> = [],
 ): string | undefined {
   const config = session.configuration;
+  if (accounting.status === "unavailable") return RESEARCH_HISTORY_UNAVAILABLE;
   if (
-    (session.interruptedTurns ?? 0) > 0 &&
+    accounting.interrupted > 0 &&
     (config.maxTotalTokens !== undefined || config.maxCostUsd !== undefined)
   )
     return "An interrupted researcher turn has unknown usage; the configured spending budget cannot be enforced.";

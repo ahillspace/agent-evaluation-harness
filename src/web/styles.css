@@ -2441,6 +2441,9 @@ tr:last-child td {
   .activity-body {
     padding: 20px;
   }
+  .activity-body.answer-body {
+    min-height: 0;
+  }
   .grading-body {
     grid-template-columns: 1fr;
   }

@@ -84,9 +84,11 @@ afterEach(async () => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
-const render = async (sessionId = "session-a") =>
+const render = async (sessionId = "session-a", selectedRunId = "run") =>
   act(async () => {
-    root.render(<ResearchPanel sessionId={sessionId} selectedRunId="run" />);
+    root.render(
+      <ResearchPanel sessionId={sessionId} selectedRunId={selectedRunId} />,
+    );
   });
 const inspect = async (index: number) =>
   act(async () => {
@@ -111,6 +113,124 @@ const unavailable = () =>
     { error: { message: "Saved turn unavailable" } },
     { status: 503 },
   );
+
+const runNavigation = () =>
+  container.querySelector<HTMLElement>(".research-candidate-row")!;
+const runSelector = () =>
+  runNavigation().querySelector<HTMLSelectElement>("select");
+const retainedLink = () =>
+  runNavigation().querySelector<HTMLAnchorElement>("a");
+const addCandidate = () => {
+  view.session.runIds.push("candidate-1");
+  view.session.currentRunId = "candidate-1";
+};
+
+it("names the sole baseline and its saved facts without redundant navigation", async () => {
+  await render();
+  expect(runSelector()).toBeNull();
+  expect(runNavigation().textContent).toContain("Research run");
+  expect(runNavigation().textContent).toContain(
+    "Baseline · retained · current",
+  );
+  expect(retainedLink()).toBeNull();
+  expect(reads).toHaveLength(0);
+});
+
+it("preserves ordered research choices, selected identity, and session routing", async () => {
+  addCandidate();
+  view.session.runIds.push("candidate-2");
+  view.session.currentRunId = "candidate-2";
+  view.session.bestRunId = "candidate-1";
+  await render("session-a", "candidate-2");
+  const selector = runSelector()!;
+  expect(selector.getAttribute("aria-label")).toBe("Research run");
+  expect(selector.value).toBe("candidate-2");
+  expect(
+    Array.from(selector.options, (option) => [option.value, option.text]),
+  ).toEqual([
+    ["run", "Baseline"],
+    ["candidate-1", "Candidate 1 · retained"],
+    ["candidate-2", "Candidate 2 · current"],
+  ]);
+  expect(retainedLink()?.textContent).toBe("Open retained candidate 1");
+  expect(retainedLink()?.getAttribute("href")).toBe(
+    "#/runs/candidate-1?session=session-a",
+  );
+  await act(async () => {
+    selector.value = "run";
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(window.location.hash).toBe("#/runs/run?session=session-a");
+  expect(
+    request.mock.calls.every(([url]) => url.endsWith("/research.get")),
+  ).toBe(true);
+});
+
+it("omits the retained shortcut only when its run is already selected", async () => {
+  addCandidate();
+  await render();
+  expect(retainedLink()).toBeNull();
+  await render("session-a", "candidate-1");
+  expect(retainedLink()?.textContent).toBe("Open retained baseline");
+  expect(retainedLink()?.getAttribute("href")).toBe(
+    "#/runs/run?session=session-a",
+  );
+  view.session.bestRunId = "candidate-1";
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(retainedLink()).toBeNull();
+  expect(runSelector()?.value).toBe("candidate-1");
+});
+
+it("turns a newly extended session into a chooser without changing the viewed baseline", async () => {
+  await render();
+  expect(runSelector()).toBeNull();
+  addCandidate();
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(runSelector()?.value).toBe("run");
+  expect(Array.from(runSelector()!.options, (option) => option.text)).toEqual([
+    "Baseline · retained",
+    "Candidate 1 · current",
+  ]);
+  expect(retainedLink()).toBeNull();
+  expect(reads).toHaveLength(0);
+});
+
+it("does not claim an unrelated viewed run is the selected research candidate", async () => {
+  addCandidate();
+  await render("session-a", "unrelated-run");
+  const selector = runSelector()!;
+  expect(selector.value).toBe("");
+  expect(selector.selectedOptions[0]?.text).toBe("Choose a research run");
+  expect(selector.selectedOptions[0]?.disabled).toBe(true);
+  expect(retainedLink()?.getAttribute("href")).toBe(
+    "#/runs/run?session=session-a",
+  );
+});
+
+it("identifies the available sole run without relabeling an unrelated viewed run", async () => {
+  await render("session-a", "unrelated-run");
+  expect(runSelector()).toBeNull();
+  expect(runNavigation().textContent).toContain("Available research run");
+  expect(runNavigation().textContent).toContain(
+    "Baseline · retained · current",
+  );
+  expect(retainedLink()?.getAttribute("href")).toBe(
+    "#/runs/run?session=session-a",
+  );
+});
+
+it("shows an empty initialization honestly without constructing an empty run link", async () => {
+  view.session.runIds = [];
+  view.session.baselineRunId = "";
+  view.session.currentRunId = "";
+  view.session.bestRunId = "";
+  await render("session-a", "unrelated-run");
+  expect(runSelector()).toBeNull();
+  expect(retainedLink()).toBeNull();
+  expect(runNavigation().textContent).toContain(
+    "No research runs recorded yet.",
+  );
+});
 
 it("keeps the latest requested turn when earlier raw evidence arrives last", async () => {
   await render();

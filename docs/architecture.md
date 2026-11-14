@@ -91,6 +91,10 @@ Navigation and reload read saved state without launching work.
 The [Runs library](../src/web/runs.tsx) owns comparison, blueprints, configuration reuse, and export entry points.
 [Observe](../src/web/observe.tsx) remains the shared live and saved Run view.
 
+The shared [Modal](../src/web/ui.tsx) delegates focus and inertness to the browser's native dialog.
+Callers receive dismissal requests and decide whether to unmount it.
+Help tooltips inside a dialog render within its top layer.
+
 ### Publish a question bank
 
 The [bank workspace](../src/web/bank-workspace.tsx) owns a draft with captured revision identifiers.

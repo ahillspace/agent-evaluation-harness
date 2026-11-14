@@ -73,6 +73,107 @@ const input = async (value: string) =>
     )!.set!.call(element, value);
     element.dispatchEvent(new Event("input", { bubbles: true }));
   });
+
+async function selectComparisonRuns() {
+  const runs = [run, { ...run, id: "other", name: "Other run" }];
+  await act(async () =>
+    root.render(<Runs workspace={{ ...workspace, runs }} refresh={() => {}} />),
+  );
+  for (const checkbox of Array.from(
+    container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+  )) {
+    await act(async () => checkbox.click());
+  }
+  const compare = Array.from(container.querySelectorAll("button")).find(
+    (button) => button.textContent === "Compare (2)",
+  )!;
+  compare.focus();
+  await act(async () => compare.click());
+  return compare;
+}
+
+it.each(["Escape", "Close"])(
+  "opens comparison immediately and cancels a pending read on %s without reopening late",
+  async (dismissal) => {
+    let resolveComparison!: (response: Response) => void;
+    let comparisonSignal: AbortSignal | undefined;
+    request.mockImplementation(async (url: string, options: RequestInit) => {
+      if (url.endsWith("/runs.compare")) {
+        comparisonSignal = options.signal as AbortSignal;
+        return new Promise<Response>((resolve) => {
+          resolveComparison = resolve;
+        });
+      }
+      return Response.json({
+        runs: [run, { ...run, id: "other", name: "Other run" }],
+        total: 2,
+        nextOffset: null,
+      });
+    });
+    const compare = await selectComparisonRuns();
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.textContent).toContain("Loading comparison...");
+    expect(compare.disabled).toBe(false);
+    expect(comparisonSignal?.aborted).toBe(false);
+    await act(async () => {
+      if (dismissal === "Close")
+        dialog
+          .querySelector<HTMLButtonElement>('[aria-label="Close dialog"]')!
+          .click();
+      else
+        dialog.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+        );
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(compare);
+    expect(comparisonSignal?.aborted).toBe(true);
+    await act(async () =>
+      resolveComparison(
+        Response.json({ comparable: true, warnings: [], rows: [] }),
+      ),
+    );
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(compare);
+  },
+);
+
+it.each([false, true])(
+  "keeps comparison success or error in the dialog and restores focus on Escape (error=%s)",
+  async (failed) => {
+    request.mockImplementation(async (url: string) => {
+      if (url.endsWith("/runs.compare"))
+        return failed
+          ? Response.json(
+              { error: { message: "Comparison unavailable" } },
+              { status: 500 },
+            )
+          : Response.json({ comparable: true, warnings: [], rows: [] });
+      return Response.json({
+        runs: [run, { ...run, id: "other", name: "Other run" }],
+        total: 2,
+        nextOffset: null,
+      });
+    });
+    const compare = await selectComparisonRuns();
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.textContent).toContain(
+      failed
+        ? "Comparison unavailable"
+        : "These runs share a compatible comparison basis.",
+    );
+    expect(dialog.querySelector('[role="alert"]') !== null).toBe(failed);
+    await act(async () =>
+      dialog.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      ),
+    );
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(compare);
+  },
+);
 it("searches the source and resets pagination while displaying matching counts", async () => {
   await act(async () =>
     root.render(<Runs workspace={workspace} refresh={() => {}} />),

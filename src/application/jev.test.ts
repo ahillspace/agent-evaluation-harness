@@ -714,10 +714,8 @@ it("persists Jev error provenance without converting it into an incorrect determ
   });
   expect(detail.observationRevision).toBe(observed.observationRevision);
   expect(observed.judgments[0]).not.toHaveProperty("error");
-  expect(detail.judgments[0]).toMatchObject({
-    response: { error: "too long" },
-    error: { httpStatus: 422 },
-  });
+  expect(detail.judgments[0]).not.toHaveProperty("response");
+  expect(detail.judgments[0]).not.toHaveProperty("error");
   const assessmentContext = {
     runId: run.run.id,
     passId: observed.id,
@@ -867,9 +865,15 @@ it.each(["original", "retry"])(
       expect(record.response).toBeDefined();
       const detail = await app.execute("runs.assessment", context);
       expect.soft(detail.judgments[0]).toMatchObject({
+        evidenceHash: record.attemptEvidenceHash,
+      });
+      expect(detail.judgments[0]).not.toHaveProperty("request");
+      expect(detail.judgments[0]).not.toHaveProperty("response");
+      expect(
+        (await app.execute("runs.export-assessment", context)).judgments[0],
+      ).toMatchObject({
         request: record.request,
         response: record.response,
-        evidenceHash: record.attemptEvidenceHash,
       });
       await expect
         .soft(
@@ -922,10 +926,10 @@ it("rejects Jev inspection and enrichment with mismatched captured evidence or o
   });
   await app.waitForIdle();
   const runId = launched.run.id;
-  const { observationRevision: _revision, ...seed } = await app.execute(
-    "runs.assessment",
-    { runId, passId: `original_jev_${runId}` },
-  );
+  const seed = await app.execute("runs.export-assessment", {
+    runId,
+    passId: `original_jev_${runId}`,
+  });
   const first = seed.judgments[0]!;
   const second = seed.judgments[1]!;
   const { request: _request, response: _response, ...captured } = first;
@@ -992,6 +996,17 @@ it("rejects Jev inspection and enrichment with mismatched captured evidence or o
       });
       expect(detail.judgments[0], testCase.name).not.toHaveProperty("request");
       expect(detail.judgments[0], testCase.name).not.toHaveProperty("response");
+      const exported = await app.execute("runs.export-assessment", {
+        runId,
+        passId: pass.id,
+        expectedObservationRevision: detail.observationRevision,
+      });
+      expect(exported.judgments[0], testCase.name).not.toHaveProperty(
+        "request",
+      );
+      expect(exported.judgments[0], testCase.name).not.toHaveProperty(
+        "response",
+      );
       await expect(
         app.execute("jev.get", {
           assessmentId: record.id,
@@ -1078,8 +1093,12 @@ it("does not inspect a later Jev completion through a frozen finding snapshot of
     });
     expect(captured.judgments[0]).toMatchObject({
       jevAssessmentStatus: "pending",
-      request: { marker: "pending-request" },
     });
+    expect(captured.judgments[0]).not.toHaveProperty("request");
+    expect(
+      (await app.execute("runs.export-assessment", assessmentContext))
+        .judgments[0],
+    ).toHaveProperty("request.marker", "pending-request");
     expect(
       await app.execute("jev.get", { assessmentId, assessmentContext }),
     ).toHaveProperty("status", "pending");
@@ -1102,7 +1121,7 @@ it("does not inspect a later Jev completion through a frozen finding snapshot of
     });
     const nestedReview = await app.execute("runs.review-assessment", {
       runId,
-      parentPassId: firstRead.id,
+      parentPassId: firstReview.id,
       expectedObservationRevision: firstRead.observationRevision,
       name: "Nested pending review",
       overrides: [
@@ -1139,7 +1158,7 @@ it("does not inspect a later Jev completion through a frozen finding snapshot of
       app.execute("jev.get", { assessmentId, assessmentContext }),
     ).rejects.toMatchObject({ code: "conflict" });
     expect(
-      (await app.execute("runs.assessment", { runId, passId: nestedRead.id }))
+      (await app.execute("runs.assessment", { runId, passId: nestedReview.id }))
         .judgments,
     ).toEqual(nestedRead.judgments);
     await expect(
@@ -1147,7 +1166,7 @@ it("does not inspect a later Jev completion through a frozen finding snapshot of
         assessmentId,
         assessmentContext: {
           runId,
-          passId: nestedRead.id,
+          passId: nestedReview.id,
           expectedObservationRevision: nestedRead.observationRevision,
         },
       }),
@@ -1182,10 +1201,10 @@ it("normalizes proven legacy computed Jev states without mistaking nested human 
   });
   await app.waitForIdle();
   const runId = launched.run.id;
-  const { observationRevision: _revision, ...seed } = await app.execute(
-    "runs.assessment",
-    { runId, passId: `original_jev_${runId}` },
-  );
+  const seed = await app.execute("runs.export-assessment", {
+    runId,
+    passId: `original_jev_${runId}`,
+  });
   const { jevAssessmentStatus: _binding, ...legacyJudgment } =
     seed.judgments[0]!;
   const computed = measurePass({
@@ -1276,10 +1295,11 @@ it("normalizes proven legacy computed Jev states without mistaking nested human 
       passId: id,
       expectedObservationRevision: snapshot.observationRevision,
     });
-    expect(detail.judgments[0]).toHaveProperty(
-      "request.marker",
-      "captured-pending-request",
-    );
+    expect(detail.judgments[0]).not.toHaveProperty("request");
+    expect(
+      (await app.execute("runs.export-assessment", { runId, passId: id }))
+        .judgments[0],
+    ).toHaveProperty("request.marker", "captured-pending-request");
     expect(detail.judgments[0]).not.toHaveProperty("response");
     await expect(
       app.execute("jev.get", {

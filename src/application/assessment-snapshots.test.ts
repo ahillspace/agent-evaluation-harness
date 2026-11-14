@@ -115,14 +115,14 @@ it.each(["completed", "cancelled", "failed"] as const)(
         "observationRevision",
         expectedObservationRevision,
       );
-      expect(detail.coverage).toEqual(pass.coverage);
       const exported = await app.execute("runs.export-assessment", {
         runId,
         passId,
         expectedObservationRevision,
       });
-      const { observationRevision: _revision, ...fullPass } = detail;
-      expect(exported).toEqual(fullPass);
+      expect(exported.coverage).toEqual(pass.coverage);
+      expect(detail.configuration).toEqual(exported.configuration);
+      expect(detail.judgments).toEqual(exported.judgments);
       expect(exported).not.toHaveProperty("observationRevision");
       const answer = view.attempts.find((attempt) => attempt.hasOutput)!;
       expect(
@@ -419,11 +419,11 @@ it.each([
         judgeFails = false;
         const retry = await app.execute("runs.retry-assessment", {
           runId,
-          passId: original.id,
+          passId: `original_llm_${runId}`,
           expectedObservationRevision: original.observationRevision,
         });
         passId = retry.parentPassId!;
-        expect(passId).not.toBe(original.id);
+        expect(passId).not.toBe(`original_llm_${runId}`);
       }
       const before = await app.execute("runs.assessment", { runId, passId });
       const summaryBefore = (await app.execute("runs.list", {})).runs
@@ -443,7 +443,7 @@ it.each([
         ),
       ).not.toHaveProperty("attemptId");
       expect(q2Calls).toBe(2);
-      const current = await app.execute("runs.assessment", {
+      const current = await app.execute("runs.export-assessment", {
         runId,
         passId: `original_deterministic_${runId}`,
       });

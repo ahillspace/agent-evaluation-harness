@@ -332,6 +332,11 @@ node dist/cli.js runs.select-assessment --file pass-reference.json
 node dist/cli.js runs.export-assessment --file pass-reference.json
 ```
 
+`runs.assessment` returns frozen configuration, judgment inspection data, and the observation revision.
+It excludes Jev request and response bodies, including exchanges inherited by human reviews.
+Use `jev.get` with the assessment ID and selected pass context to inspect matching Jev provenance, or export the complete pass with `runs.export-assessment`.
+If that Jev record no longer matches the captured state, complete-pass export retains the snapshot's recorded exchange.
+
 `runs.retry-assessment` uses the same reference and creates a derived pass for failed judgments.
 It does not rerun the target.
 

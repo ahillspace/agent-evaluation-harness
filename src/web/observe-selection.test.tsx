@@ -3,17 +3,18 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type {
-  AssessmentPassDetail,
+  AssessmentPass,
   JevAssessmentRecord,
   JevAssessmentSummary,
   RunView,
 } from "../contracts.js";
 import { Observe } from "./observe.js";
 import { JevAssessment } from "./jev-assessment.js";
+type FixturePass = AssessmentPass & { observationRevision: string };
 
 const reviewedName =
   "Human review with a deliberately long descriptive name for saved answer corrections";
-function pass(id: string, correct: number): AssessmentPassDetail {
+function pass(id: string, correct: number): FixturePass {
   return {
     id,
     observationRevision: `revision-${id}`,
@@ -99,11 +100,17 @@ const request = vi.fn();
 let assessmentResponse: (id: string, revision?: string) => Promise<Response>;
 let selectionResponse: (id: string) => Promise<Response>;
 let jevResponse: (input: Record<string, unknown>) => Promise<Response>;
+let exportResponse: (
+  id: string,
+  revision?: string,
+  signal?: AbortSignal,
+) => Promise<Response>;
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   view = structuredClone(baseView);
   assessmentResponse = async (id) =>
     Response.json(passes.find((item) => item.id === id));
+  exportResponse = (id, revision) => assessmentResponse(id, revision);
   selectionResponse = async (id) => {
     view.selectedAssessmentPassId = id;
     return Response.json({ selectedAssessmentPassId: id });
@@ -137,9 +144,10 @@ beforeEach(() => {
     if (url.endsWith("/runs.attempt-events"))
       return Response.json({ events: [], cursor: 0 });
     if (url.endsWith("/runs.export-assessment"))
-      return assessmentResponse(
+      return exportResponse(
         input.passId,
         input.expectedObservationRevision,
+        options.signal ?? undefined,
       );
     if (url.endsWith("/runs.review-assessment"))
       return Response.json(
@@ -304,7 +312,7 @@ it("keeps the newly selected score and judgments when its detail query fails", a
 });
 
 it("honors a linked saved pass and displays interrupted and running status without a zero score", async () => {
-  const pendingPass: AssessmentPassDetail = {
+  const pendingPass: FixturePass = {
     ...passes[3]!,
     status: "interrupted",
     judgedAccuracy: null,
@@ -412,7 +420,7 @@ function interruptedRun() {
     },
   ];
   view.progress = { completed: 1, total: 2, failed: 1 };
-  const original: AssessmentPassDetail = {
+  const original: FixturePass = {
     ...passes[0]!,
     id: "original_deterministic_run",
     name: "Original deterministic",
@@ -455,8 +463,8 @@ function interruptedRun() {
   view.selectedAssessmentPassId = original.id;
   return original;
 }
-function resumeAndHalt(original: AssessmentPassDetail): AssessmentPassDetail {
-  const advanced: AssessmentPassDetail = {
+function resumeAndHalt(original: FixturePass): FixturePass {
+  const advanced: FixturePass = {
     ...original,
     observationRevision: "after-resume",
     judgments: [
@@ -728,7 +736,7 @@ const fullJev = {
     criteria: { marker: "FALLBACK_CRITERIA" },
   },
 } as unknown as JevAssessmentRecord;
-function observingJev(): AssessmentPassDetail {
+function observingJev(): FixturePass {
   const original = interruptedRun();
   const pass = {
     ...original,
@@ -756,6 +764,282 @@ function observingJev(): AssessmentPassDetail {
   view.jevAssessments = [pendingJev];
   return pass;
 }
+
+function capturedScores() {
+  const original = observingJev();
+  const scores = ["A", "B"].map((id) => ({
+    ...original,
+    id,
+    name: `Captured score ${id}`,
+    status: "interrupted" as const,
+    observationRevision: `revision-${id}`,
+  }));
+  view.run.status = "completed";
+  view.assessmentPasses = scores;
+  view.selectedAssessmentPassId = "A";
+  view.jevAssessments = [{ ...pendingJev, status: "completed" }];
+  assessmentResponse = async (id) => {
+    const selected = scores.find((score) => score.id === id)!;
+    return Response.json({
+      configuration: selected.configuration,
+      judgments: selected.judgments,
+      observationRevision: selected.observationRevision,
+    });
+  };
+  return scores;
+}
+
+it.each([false, true])(
+  "keeps the latest explicit captured-score inspection after superseded failure=%s",
+  async (failure) => {
+    const scores = capturedScores();
+    const deferred = new Map<
+      string,
+      { resolve: (response: Response) => void; signal?: AbortSignal }
+    >();
+    exportResponse = (id, _revision, signal) =>
+      new Promise((resolve) => deferred.set(id, { resolve, signal }));
+    await render("A", "result");
+    await click("Inspect captured score");
+    await select("B");
+    expect(deferred.get("A")!.signal?.aborted).not.toBe(true);
+    await click("Inspect captured score");
+    await act(async () => deferred.get("B")!.resolve(Response.json(scores[1])));
+    expect(
+      JSON.parse(document.querySelector("dialog pre")!.textContent!).id,
+    ).toBe("B");
+    await act(async () =>
+      deferred.get("A")!.resolve(
+        failure
+          ? Response.json(
+              {
+                error: {
+                  code: "late_failure",
+                  message: "SUPERSEDED_INSPECTION_FAILURE",
+                },
+              },
+              { status: 500 },
+            )
+          : Response.json(scores[0]),
+      ),
+    );
+    expect(
+      JSON.parse(document.querySelector("dialog pre")!.textContent!).id,
+    ).toBe("B");
+    expect(document.body.textContent).not.toContain(
+      "SUPERSEDED_INSPECTION_FAILURE",
+    );
+    expect(document.querySelector("dialog p")?.textContent).toBe(
+      "Captured score B",
+    );
+    expect(deferred.get("A")!.signal?.aborted).toBe(true);
+    expect(deferred.get("B")!.signal?.aborted).toBe(false);
+    expect(summary().querySelector("h2")?.textContent).toBe("Captured score B");
+    let download: Blob | undefined;
+    const createObjectURL = vi
+      .spyOn(URL, "createObjectURL")
+      .mockImplementation((blob) => {
+        if (!(blob instanceof Blob))
+          throw new Error("Expected downloadable score JSON");
+        download = blob;
+        return "blob:inspection-fixture";
+      });
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const anchor = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        expect(this.download).toBe("run-B.json");
+      });
+    await act(async () =>
+      Array.from(document.querySelectorAll("dialog button"))
+        .find((button) => button.textContent?.trim() === "Download score JSON")!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    expect(anchor).toHaveBeenCalledOnce();
+    expect(JSON.parse(await download!.text()).id).toBe("B");
+  },
+);
+
+it("cancels captured-score inspection on unmount even when its transport ignores abort", async () => {
+  const scores = capturedScores();
+  let release!: (response: Response) => void, signal: AbortSignal | undefined;
+  exportResponse = (_id, _revision, active) => {
+    signal = active;
+    return new Promise((resolve) => {
+      release = resolve;
+    });
+  };
+  await render("A", "result");
+  await click("Inspect captured score");
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  expect(signal?.aborted).toBe(true);
+  await act(async () => release(Response.json(scores[0])));
+  expect(document.querySelector("dialog")).toBeNull();
+});
+
+it("fulfills a named earlier inspection after selection alone and clears action errors on the next request", async () => {
+  const scores = capturedScores();
+  let release!: (response: Response) => void;
+  exportResponse = () =>
+    new Promise((resolve) => {
+      release = resolve;
+    });
+  await render("A", "result");
+  await click("Inspect captured score");
+  await select("B");
+  await act(async () =>
+    release(
+      Response.json(
+        { error: { code: "unavailable", message: "FIRST_INSPECTION_ERROR" } },
+        { status: 503 },
+      ),
+    ),
+  );
+  expect(document.body.textContent).toContain("FIRST_INSPECTION_ERROR");
+  await select("A");
+  await click("Inspect captured score");
+  await select("B");
+  expect(document.body.textContent).not.toContain("FIRST_INSPECTION_ERROR");
+  await act(async () => release(Response.json(scores[0])));
+  expect(
+    JSON.parse(document.querySelector("dialog pre")!.textContent!).id,
+  ).toBe("A");
+  expect(document.querySelector("dialog p")?.textContent).toBe(
+    "Captured score A",
+  );
+  expect(summary().querySelector("h2")?.textContent).toBe("Captured score B");
+});
+
+it.each([false, true])(
+  "opens only the captured score on explicit inspection after Jev settles, with stale=%s",
+  async (stale) => {
+    const captured = observingJev();
+    captured.id = "finding-snapshot";
+    captured.status = "interrupted";
+    captured.source = "human";
+    captured.judgments[0]!.request = { marker: "CAPTURED_PENDING_REQUEST" };
+    view.run.status = "completed";
+    view.assessmentPasses = [captured];
+    view.selectedAssessmentPassId = captured.id;
+    view.jevAssessments = [{ ...pendingJev, status: "completed" }];
+    assessmentResponse = async () =>
+      Response.json({
+        configuration: captured.configuration,
+        observationRevision: captured.observationRevision,
+        judgments: captured.judgments.map(
+          ({ request: _request, response: _response, ...judgment }) => judgment,
+        ),
+      });
+    exportResponse = async () =>
+      stale
+        ? Response.json(
+            {
+              error: {
+                code: "conflict",
+                message: "The captured score changed.",
+              },
+            },
+            { status: 409 },
+          )
+        : Response.json(captured);
+    await render(captured.id, "result");
+    expect(container.textContent).toContain(
+      "This score retains its captured Jev state",
+    );
+    expect(document.body.textContent).not.toContain("CAPTURED_PENDING_REQUEST");
+    expect(
+      request.mock.calls.some(([url]) =>
+        url.endsWith("/runs.export-assessment"),
+      ),
+    ).toBe(false);
+    expect(
+      Array.from(container.querySelectorAll("button")).some(
+        (button) => button.textContent === "Inspect captured score",
+      ),
+    ).toBe(true);
+    await click("Inspect captured score");
+    const exportCall = request.mock.calls.find(([url]) =>
+      url.endsWith("/runs.export-assessment"),
+    )!;
+    expect(JSON.parse(exportCall[1].body as string)).toEqual({
+      runId: "run",
+      passId: captured.id,
+      expectedObservationRevision: captured.observationRevision,
+    });
+    if (stale) {
+      expect(document.body.textContent).toContain(
+        "The captured score changed.",
+      );
+      expect(document.body.textContent).not.toContain(
+        "CAPTURED_PENDING_REQUEST",
+      );
+    } else {
+      expect(document.body.textContent).toContain("Export saved score");
+      expect(document.body.textContent).toContain("CAPTURED_PENDING_REQUEST");
+      expect(document.body.textContent).toContain(
+        '"jevAssessmentStatus": "pending"',
+      );
+    }
+    expect(document.body.textContent).not.toContain("PRIMARY_RESPONSE");
+    expect(request.mock.calls.some(([url]) => url.endsWith("/jev.get"))).toBe(
+      false,
+    );
+    expect(summary().querySelector("h2")?.textContent).toBe(captured.name);
+    expect(
+      container.querySelector('[aria-label="Selected question"] h2')
+        ?.textContent,
+    ).toBe("Total revenue?");
+  },
+);
+
+it.each([true, false])(
+  "uses one raw provenance entry point for Jev-bound judgments: %s",
+  async (jevBound) => {
+    const selected = observingJev();
+    selected.status = "completed";
+    view.run.status = "completed";
+    view.jevAssessments = [{ ...pendingJev, status: "completed" }];
+    const judgment = selected.judgments[0]!;
+    judgment.jevAssessmentStatus = "completed";
+    judgment.request = { marker: "INLINE_JEV_REQUEST" };
+    judgment.response = { marker: "INLINE_JEV_RESPONSE" };
+    if (!jevBound) {
+      selected.source = "llm";
+      delete judgment.jevAssessmentId;
+      delete judgment.jevAssessmentStatus;
+      judgment.request = { marker: "LLM_REQUEST" };
+      judgment.response = { marker: "LLM_RESPONSE" };
+      view.jevAssessments = [];
+    }
+    assessmentResponse = async () => Response.json(selected);
+    jevResponse = async () => Response.json(fullJev);
+    await render();
+    if (!jevBound) {
+      expect(container.textContent).toContain(
+        "Assessment request and response",
+      );
+      expect(container.textContent).toContain("LLM_REQUEST");
+      expect(container.textContent).toContain("LLM_RESPONSE");
+      expect(container.querySelector(".jev-assessment")).toBeNull();
+      return;
+    }
+    expect(container.textContent).not.toContain(
+      "Assessment request and response",
+    );
+    expect(container.querySelectorAll(".jev-assessment button")).toHaveLength(
+      1,
+    );
+    expect(
+      request.mock.calls.filter(([url]) => url.endsWith("/jev.get")),
+    ).toHaveLength(0);
+    await click("Inspect recorded request and provenance");
+    expect(document.body.textContent).toContain("PRIMARY_REQUEST");
+    expect(document.body.textContent).toContain("PRIMARY_RESPONSE");
+    expect(document.body.textContent).not.toContain("INLINE_JEV_REQUEST");
+  },
+);
 
 it("conditions Observe Jev provenance on the captured pass revision and rejects newer evidence", async () => {
   const pass = observingJev();

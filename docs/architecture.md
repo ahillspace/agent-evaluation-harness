@@ -156,7 +156,14 @@ Background reads preserve initialized content and errors until successful recove
 Selected attempt detail retains complete answer and failure evidence without duplicating event history.
 Current observations own the selected score, coverage, question verdicts, and answer identities.
 Each observed pass includes an `observationRevision` derived from its compact projection with the canonical digest.
-Detail requests include that revision and supply matching frozen configuration, corrected references, comparison bodies, and judge evidence.
+`runs.assessment` includes that revision and returns an inspection projection with matching frozen configuration, corrected references, comparison details, and non-Jev judge exchanges.
+Jev exchanges load only through `jev.get` with the selected pass and observation revision; the question inspector has one Jev provenance entry point.
+Inspection omits Jev-bound exchanges already copied into human reviews or snapshots without changing their saved records.
+When no matching Jev record remains, the captured-state notice opens the existing full-score export modal only on an explicit inspection action.
+The shared score-inspection action cancels its previous request and ignores canceled success or failure responses; the latest explicit request owns the modal and download record.
+Changing score selection alone does not cancel an earlier explicitly requested inspection, and unmounting cancels the active request.
+This preserves access to a snapshot's pending request after the canonical Jev record settles, without substituting later response or status data.
+`runs.export-assessment`, snapshots, retries, and review creation retain complete saved-pass evidence.
 Pending, stale, or failed detail reads cannot replace current observation facts.
 Observed attempt metadata owns execution status; settled answer bodies load against their sealed evidence hash.
 Historical scores keep missing answer bindings empty, while Attempts exposes later physical answers as explicit history browsing.

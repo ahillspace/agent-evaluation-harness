@@ -144,6 +144,20 @@ async function fixture(jevEnabled = false) {
     db,
     run,
     service,
+    readExport(
+      runId: string,
+      passId: string,
+      expectedObservationRevision?: string,
+    ) {
+      return {
+        ...service.get(runId, passId, expectedObservationRevision),
+        observationRevision: service.read(
+          runId,
+          passId,
+          expectedObservationRevision,
+        ).observationRevision,
+      };
+    },
     async close() {
       db.close();
       await rm(directory, { recursive: true, force: true });
@@ -209,7 +223,7 @@ it.each(["original", "recovery"] as const)(
         httpStatus: 422,
       });
       const before = ["deterministic", "llm", "jev"].map((source) =>
-        f.service.read(
+        f.readExport(
           "run",
           f.service.currentAutomaticId(
             "run",
@@ -223,10 +237,10 @@ it.each(["original", "recovery"] as const)(
       }
       f.service.freezeCurrent("run");
       for (const pass of before) {
-        expect(f.service.read("run", pass.id)).toEqual(pass);
-        expect(
-          f.service.read("run", pass.id, pass.observationRevision),
-        ).toEqual(pass);
+        expect(f.readExport("run", pass.id)).toEqual(pass);
+        expect(f.readExport("run", pass.id, pass.observationRevision)).toEqual(
+          pass,
+        );
       }
       const manual = {
         ...interrupted,
@@ -240,9 +254,9 @@ it.each(["original", "recovery"] as const)(
       };
       f.db.update("run", manual);
       for (const pass of before)
-        expect(
-          f.service.read("run", pass.id, pass.observationRevision),
-        ).toEqual(pass);
+        expect(f.readExport("run", pass.id, pass.observationRevision)).toEqual(
+          pass,
+        );
       f.db.update("run", {
         ...manual,
         status: "completed",
@@ -253,19 +267,19 @@ it.each(["original", "recovery"] as const)(
       });
       f.service.sealCurrent("run");
       const completedId = f.service.currentAutomaticId("run");
-      const completed = f.service.read("run", completedId);
+      const completed = f.readExport("run", completedId);
       expect(completed).toMatchObject({
         status: "completed",
         finishedAt: "2026-11-03T00:00:00.000Z",
       });
       f.service.recover();
       expect(
-        f.service.read("run", completedId, completed.observationRevision),
+        f.readExport("run", completedId, completed.observationRevision),
       ).toEqual(completed);
       for (const pass of before)
-        expect(
-          f.service.read("run", pass.id, pass.observationRevision),
-        ).toEqual(pass);
+        expect(f.readExport("run", pass.id, pass.observationRevision)).toEqual(
+          pass,
+        );
       const savedJev = f.db
         .require("assessmentPass", before[2]!.id)
         .judgments.find((judgment) => judgment.resultId === "correct")!;
@@ -293,7 +307,7 @@ it("persists the completed raw first-family projection for a drained halted scop
       execution: { ...f.run.execution!, settledAt },
     });
     const passId = f.service.currentAutomaticId("run");
-    const before = f.service.read("run", passId);
+    const before = f.readExport("run", passId);
     expect(before).toMatchObject({
       status: "completed",
       finishedAt: settledAt,
@@ -304,11 +318,11 @@ it("persists the completed raw first-family projection for a drained halted scop
       status: "completed",
       finishedAt: settledAt,
     });
-    expect(f.service.read("run", passId, before.observationRevision)).toEqual(
+    expect(f.readExport("run", passId, before.observationRevision)).toEqual(
       before,
     );
     f.service.sealCurrent("run");
-    expect(f.service.read("run", passId, before.observationRevision)).toEqual(
+    expect(f.readExport("run", passId, before.observationRevision)).toEqual(
       before,
     );
   } finally {
@@ -716,12 +730,12 @@ it.each(["raw", "legacy"] as const)(
         pass.id.startsWith("automatic_"),
       )) {
         expect(
-          f.service.read("run", pass.id, pass.observationRevision)
+          f.readExport("run", pass.id, pass.observationRevision)
             .observationRevision,
         ).toBe(pass.observationRevision);
       }
       expect(
-        f.service.read("run", currentId, compact.observationRevision)
+        f.readExport("run", currentId, compact.observationRevision)
           .observationRevision,
       ).toBe(compact.observationRevision);
       expect(

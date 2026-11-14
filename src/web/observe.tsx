@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   AssessmentPass,
   AssessmentPassObservation,
@@ -67,6 +67,8 @@ export function Observe({
   const [pending, setPending] = useState<string | null>(null);
   const [exported, setExported] = useState<AssessmentPass | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const inspectionRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => inspectionRequest.current?.abort(), []);
   const recovery = useRunRecovery({
     workspaceId: workspace?.workspaceId,
     runId,
@@ -112,6 +114,28 @@ export function Observe({
   const researchControls = view.controllingJob?.kind === "research";
   const passes = view.assessmentPasses ?? [];
   const pass = currentPass;
+  const exportScore = () => {
+    if (!pass) return;
+    inspectionRequest.current?.abort();
+    const controller = new AbortController();
+    inspectionRequest.current = controller;
+    setError(null);
+    void command(
+      "runs.export-assessment",
+      {
+        runId,
+        passId: pass.id,
+        expectedObservationRevision: pass.observationRevision,
+      },
+      controller.signal,
+    )
+      .then((value) => {
+        if (!controller.signal.aborted) setExported(value);
+      })
+      .catch((cause) => {
+        if (!controller.signal.aborted) setError(cause);
+      });
+  };
   const refresh = () => {
     resource.refresh();
     refreshWorkspace();
@@ -316,18 +340,7 @@ export function Observe({
                 </div>
                 <div className="actions">
                   {pass && (
-                    <button
-                      className="button secondary"
-                      onClick={() => {
-                        void command("runs.export-assessment", {
-                          runId,
-                          passId: pass.id,
-                          expectedObservationRevision: pass.observationRevision,
-                        })
-                          .then(setExported)
-                          .catch(setError);
-                      }}
-                    >
+                    <button className="button secondary" onClick={exportScore}>
                       Export score
                     </button>
                   )}
@@ -399,6 +412,7 @@ export function Observe({
             assessmentDetail={detail ?? undefined}
             selectedResultId={selectedResultId}
             onSelectResult={setSelectedResultId}
+            onInspectCapturedScore={exportScore}
             onReview={(resultId) => {
               if (pass) setReview({ view, pass, resultId });
             }}
@@ -428,6 +442,7 @@ export function Observe({
       )}
       {exported !== null && (
         <Modal title="Export saved score" onClose={() => setExported(null)}>
+          <p className="subtle">{exported.name}</p>
           <DownloadButton
             filename={`${exported.runId}-${exported.id}.json`}
             value={exported}

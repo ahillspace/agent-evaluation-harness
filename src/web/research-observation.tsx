@@ -33,8 +33,7 @@ export function ResearchPanel({
           <div className="eyebrow">Research session</div>
           <h2>{session.name}</h2>
           <p>
-            {session.runIds.length} runs · {session.turns.length} researcher
-            turns · <Status value={session.status} />
+            <Status value={session.status} />
           </p>
         </div>
         <ControlButtons
@@ -59,7 +58,7 @@ export function ResearchPanel({
           description="Watch the researcher propose changes and compare candidate agents. Select a run below to inspect its answers."
           details="The baseline runs first. The researcher then reviews evidence and proposes changes within your limits. Research activity and evaluation activity are recorded separately."
         />
-        <div className="row">
+        <div className="row research-candidate-row">
           <Field label="Candidate run">
             <select
               aria-label="Research candidate run"
@@ -89,52 +88,51 @@ export function ResearchPanel({
         </div>
         {session.stopReason && (
           <p className="notice">
-            <strong>Research stopped:</strong> {session.stopReason}
+            <span>
+              <strong>Research stopped:</strong> {session.stopReason}
+            </span>
           </p>
         )}
-        <section className="stack">
-          <h3>Decisions</h3>
-          {!session.turns.length && (
-            <p className="subtle">
-              The researcher begins after the baseline evaluation completes.
-            </p>
-          )}
-          {session.turns.map((turn, index) => (
-            <div key={index} className="research-turn">
-              <h3>Turn {index + 1}</h3>
-              <p>{turn.output.message}</p>
-              <p className="subtle">
-                {turn.output.disposition === "keep"
-                  ? "Candidate kept"
-                  : turn.output.disposition === "discard"
-                    ? "Candidate discarded"
-                    : turn.output.decision === "keep"
-                      ? "Candidate kept"
-                      : turn.output.decision === "discard"
-                        ? "Candidate discarded"
-                        : "Evidence reviewed"}
-                {turn.output.control === "stop" ||
-                turn.output.decision === "stop"
-                  ? " · Research stopped"
-                  : " · Research continued"}
-                {turn.output.stopCategory === "blocked"
-                  ? " because technical problems prevent a useful comparison"
-                  : ""}
-              </p>
-              {turn.output.reason && <p>{turn.output.reason}</p>}
-              <button
-                className="text-button"
-                onClick={() => {
-                  void command("research.turn", { sessionId, index })
-                    .then(setFullTurn)
-                    .catch(setError);
-                }}
-              >
-                Inspect full researcher turn
-              </button>
-            </div>
-          ))}
-        </section>
+        {session.turns.length > 0 && (
+          <section className="stack">
+            <h3>Decisions</h3>
+            {session.turns.map((turn, index) => (
+              <div key={index} className="research-turn">
+                <h3>Turn {index + 1}</h3>
+                <p>{turn.output.message}</p>
+                <p className="subtle">
+                  {turn.output.disposition === "keep"
+                    ? "Candidate kept"
+                    : turn.output.disposition === "discard"
+                      ? "Candidate discarded"
+                      : turn.output.decision === "keep"
+                        ? "Candidate kept"
+                        : turn.output.decision === "discard"
+                          ? "Candidate discarded"
+                          : "Evidence reviewed"}
+                  {turn.output.control === "stop" ||
+                  turn.output.decision === "stop"
+                    ? " · Research stopped"
+                    : " · Research continued"}
+                  {turn.output.stopCategory === "blocked"
+                    ? " because technical problems prevent a useful comparison"
+                    : ""}
+                </p>
+                {turn.output.reason && <p>{turn.output.reason}</p>}
+                <button
+                  className="text-button"
+                  onClick={() => {
+                    void command("research.turn", { sessionId, index })
+                      .then(setFullTurn)
+                      .catch(setError);
+                  }}
+                >
+                  Inspect full researcher turn
+                </button>
+              </div>
+            ))}
+          </section>
+        )}
         <details className="disclosure">
           <summary>Recorded research activity</summary>
           <EventList

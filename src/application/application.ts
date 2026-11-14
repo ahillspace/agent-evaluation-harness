@@ -352,7 +352,7 @@ export async function createApplication(options: {
       case "runs.get": {
         const value = commandSchemas["runs.get"].parse(input);
         return {
-          ...passes.enrich(runs.view(value.runId, value.cursor)),
+          ...passes.enrich(runs.view(value.runId)),
           ...answers.history(value.runId),
           performance: runPerformance(db, value.runId, usage),
         };
@@ -360,7 +360,7 @@ export async function createApplication(options: {
       case "runs.observe": {
         const value = commandSchemas["runs.observe"].parse(input);
         return {
-          ...passes.enrich(runs.observe(value.runId, value.cursor)),
+          ...passes.enrich(runs.observe(value.runId)),
           ...answers.history(value.runId),
           performance: runPerformance(db, value.runId, usage),
         };

@@ -226,8 +226,10 @@ Use **Summary** for run-level outcomes and performance.
 Execution failures and judge errors remain distinct from incorrect answers.
 
 Observation uses HTTP polling, not a persistent push connection.
-[`useObservation`](../src/web/observation-stream.ts) first requests `runs.get`, then requests `runs.observe` without resending the frozen manifest.
-It merges events by durable sequence, drains 200-event pages, and retries after request failures.
+[`useRunObservation`](../src/web/run-observation.ts) first requests `runs.get`, then requests `runs.observe` without resending the frozen manifest.
+Manual score and control refreshes retain that manifest; switching Runs loads the new Run's manifest and discards stale responses.
+Run snapshots contain no event history or cursor.
+Separate selected-attempt and research activity queries merge events by durable sequence, drain 200-event pages, and retry after request failures.
 Selected attempt evidence and assessment details load through separate queries.
 [`Observe`](../src/web/observe.tsx) uses engine-provided allowed actions and refreshes observation after a control request succeeds.
 Pause, Halt, Resume, and Cancel affect engine work; leaving the page does not send one of these controls.

@@ -14,8 +14,8 @@ vi.mock("./api.js", () => ({
   command,
   useResource: () => ({ data: null, error: null }),
 }));
-vi.mock("./observation-stream.js", () => ({
-  useObservation: () => ({ data: observed.view, refresh }),
+vi.mock("./run-observation.js", () => ({
+  useRunObservation: () => ({ data: observed.view, refresh }),
 }));
 vi.mock("./observation-questions.js", () => ({
   RunQuestions: () => null,

@@ -974,7 +974,9 @@ it("settles a crash after sealed answers only after recovering their determinist
     correct: 1,
   });
   expect(
-    recovered.events.some((event) => event.type === "evaluation.recovered"),
+    (await f.command("runs.events", { runId })).events.some(
+      (event) => event.type === "evaluation.recovered",
+    ),
   ).toBe(true);
   expect(f.requests).toHaveLength(1);
 });

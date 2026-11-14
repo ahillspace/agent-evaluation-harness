@@ -592,23 +592,16 @@ export class RunService {
       allowedActions: actions,
     };
   }
-  view(runId: string, cursor = 0): RunView {
+  view(runId: string): RunView {
     const run = this.db.require("run", runId);
-    return { run, ...this.project(run, cursor) };
+    return { run, ...this.project(run) };
   }
-  private project(
-    run: Omit<RunRecord, "manifest">,
-    cursor: number,
-  ): Omit<RunView, "run"> {
+  private project(run: Omit<RunRecord, "manifest">): Omit<RunView, "run"> {
     const runId = run.id;
     const sources = new AnswerSources(this.db);
     const results = sources.results(runId);
     const physicalAttempts = sources.physicalAttempts(runId);
     const sourceRuns = [...new Set(physicalAttempts.values())];
-    const events = this.db.events({ runId }, cursor, {
-      summary: true,
-      limit: 200,
-    });
     const controllingJob = this.controlOwner(runId);
     const actions = controllingJob.allowedActions;
     const failed = results.filter(
@@ -656,18 +649,16 @@ export class RunService {
           .length,
         total: results.length,
       },
-      events,
-      cursor: events.at(-1)?.sequence ?? cursor,
     };
   }
-  observe(runId: string, cursor = 0): RunObservation {
+  observe(runId: string): RunObservation {
     const {
       targetKind: _kind,
       targetHarness: _harness,
       researchStatus: _researchStatus,
       ...run
     } = this.db.runState(runId);
-    return { run, ...this.project(run, cursor) };
+    return { run, ...this.project(run) };
   }
   attempt(
     runId: string,

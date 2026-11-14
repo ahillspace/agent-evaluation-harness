@@ -167,8 +167,10 @@ node dist/cli.js runs.get --file run-reference.json
 node dist/cli.js runs.events --file run-reference.json
 ```
 
-Use event cursors for incremental reads rather than repeatedly requesting the entire history.
-`runs.observe` returns live observation without the full frozen manifest.
+`runs.get` returns the current Run snapshot with its full frozen manifest.
+`runs.observe` returns the same current state without that manifest.
+Both operations accept only `runId` and return no event history or cursor.
+Use `runs.events` or `runs.attempt-events` with an optional `cursor` for incremental history reads.
 `runs.attempt` retrieves full evidence for a selected attempt; its input requires `runId` and `attemptId`.
 
 Reusing a launch idempotency key with identical input returns the original run.

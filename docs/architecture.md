@@ -142,7 +142,11 @@ It normalizes settled recovered scopes after grading recovery and before sealing
 Unknown external completion requires duplicate-work acknowledgment before potentially repeating a request.
 Unconfirmed cleanup blocks unsafe admission.
 
-[Observe](../src/web/observe.tsx) reads summaries and merges cursor-based events.
+[Observe](../src/web/observe.tsx) reads current-state Run snapshots.
+[useRunObservation](../src/web/run-observation.ts) loads the frozen manifest once per Run and refreshes compact state through `runs.observe`, including after score and control changes.
+Run snapshots contain no event history or cursor.
+Dedicated `runs.events` and `runs.attempt-events` operations own Run event history; research observation retains its separate event cursor.
+[useObservation](../src/web/observation-stream.ts) drains pages only for research and selected-attempt activity.
 Current observations own the selected score, coverage, question verdicts, and answer identities.
 Each observed pass includes an `observationRevision` derived from its compact projection with the canonical digest.
 Detail requests include that revision and supply matching frozen configuration, corrected references, comparison bodies, and judge evidence.

@@ -607,14 +607,15 @@ tr:last-child td {
   display: flex;
   overflow-x: auto;
   border-bottom: 1px solid var(--line);
-  padding: 0 24px;
-  gap: 25px;
+  padding: 0 16px;
+  gap: 8px;
+  scroll-padding-inline: 16px;
 }
 .tabs button {
   flex-shrink: 0;
   border: 0;
   border-bottom: 2px solid transparent;
-  padding: 13px 0;
+  padding: 13px 8px;
   background: none;
   color: var(--muted);
   font-size: 11px;
@@ -622,6 +623,9 @@ tr:last-child td {
 .tabs button[aria-selected="true"] {
   color: var(--text);
   border-bottom-color: var(--accent);
+}
+.tabs button:focus-visible {
+  outline-offset: -2px;
 }
 .empty {
   text-align: center;

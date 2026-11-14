@@ -58,7 +58,9 @@ export function Tabs<T extends string>({
               if (target && next !== undefined) {
                 event.preventDefault();
                 onChange(target.value);
-                buttons.current[next]?.focus();
+                const button = buttons.current[next];
+                button?.focus({ preventScroll: true });
+                button?.scrollIntoView({ block: "nearest", inline: "nearest" });
               }
             }}
           >

@@ -225,7 +225,9 @@ export function RunQuestions({
             label="Question evidence"
             value={tab}
             onChange={setTab}
-            panelClassName="activity-body"
+            panelClassName={
+              tab === "answer" ? "activity-body answer-body" : "activity-body"
+            }
             items={[
               { value: "answer", label: "Answer" },
               {

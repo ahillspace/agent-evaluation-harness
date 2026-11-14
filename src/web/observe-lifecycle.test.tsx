@@ -174,8 +174,6 @@ it.each([
         allowedActions: [],
         jevAssessments: [],
         reviews: [],
-        events: [],
-        cursor: 0,
       }) as unknown as RunView;
     const request = vi.fn(async (url: string, options: RequestInit) => {
       const input = JSON.parse(options.body as string);

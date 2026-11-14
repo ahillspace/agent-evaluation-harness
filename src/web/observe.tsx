@@ -7,7 +7,7 @@ import type {
   WorkspaceView,
 } from "../contracts.js";
 import { command, useResource } from "./api.js";
-import { useObservation } from "./observation-stream.js";
+import { useRunObservation } from "./run-observation.js";
 import {
   AssessmentScore,
   AssessmentSelector,
@@ -52,7 +52,7 @@ export function Observe({
   initialResultId?: string;
   initialAssessmentId?: string;
 }) {
-  const resource = useObservation("runs.get", { runId });
+  const resource = useRunObservation(runId);
   const [section, setSection] = useState("questions");
   const [selectedId, setSelectedId] = useState(initialAssessmentId ?? "");
   const [selectedResultId, setSelectedResultId] = useState(

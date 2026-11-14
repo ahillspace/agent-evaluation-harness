@@ -92,8 +92,6 @@ const baseView = {
   allowedActions: [],
   jevAssessments: [],
   reviews: [],
-  events: [],
-  cursor: 0,
 } as unknown as RunView;
 
 let root: Root, container: HTMLDivElement, view: RunView;

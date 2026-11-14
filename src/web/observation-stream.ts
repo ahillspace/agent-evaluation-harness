@@ -3,18 +3,8 @@ import type {
   ObservationEvent,
   CommandInput,
   CommandResultMap,
-  RunRecord,
-  RunObservation,
-  RunView,
 } from "../contracts.js";
 import { command } from "./api.js";
-export function mergeRunObservation(
-  original: RunRecord,
-  update: RunObservation,
-): RunView {
-  return { ...update, run: { ...update.run, manifest: original.manifest } };
-}
-
 export function mergeEvents(
   previous: ObservationEvent[],
   incoming: ObservationEvent[],
@@ -27,7 +17,7 @@ export function mergeEvents(
 }
 
 export function useObservation<
-  K extends "runs.get" | "research.get" | "runs.attempt-events",
+  K extends "research.get" | "runs.attempt-events",
 >(operation: K, input: CommandInput<K>, enabled = true, polling = true) {
   const key = JSON.stringify(input);
   const [data, setData] = useState<CommandResultMap[K] | null>(null),
@@ -39,7 +29,6 @@ export function useObservation<
     if (!enabled) return;
     let cursor = 0;
     let events: ObservationEvent[] = [];
-    let originalRun: RunRecord | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
     const load = async () => {
@@ -47,16 +36,7 @@ export function useObservation<
       let hasMore = false;
       try {
         const request = { ...JSON.parse(key), cursor };
-        let next: CommandResultMap[K];
-        if (operation === "runs.get" && originalRun)
-          next = mergeRunObservation(
-            originalRun,
-            await command("runs.observe", request, controller.signal),
-          ) as CommandResultMap[K];
-        else {
-          next = await command(operation, request, controller.signal);
-          if (operation === "runs.get") originalRun = (next as RunView).run;
-        }
+        const next = await command(operation, request, controller.signal);
         if (controller.signal.aborted) return;
         cursor = next.cursor;
         events = mergeEvents(events, next.events);

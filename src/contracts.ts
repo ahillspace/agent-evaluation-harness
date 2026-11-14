@@ -1277,8 +1277,6 @@ export interface RunView {
     allowedActions: Control[];
   };
   progress: { completed: number; failed: number; total: number };
-  events: ObservationEvent[];
-  cursor: number;
 }
 export interface RunRecoveryEligibility {
   available: boolean;
@@ -1480,13 +1478,11 @@ export const commandSchemas = {
   "runs.get": z
     .object({
       runId: identifier,
-      cursor: z.number().int().nonnegative().default(0),
     })
     .strict(),
   "runs.observe": z
     .object({
       runId: identifier,
-      cursor: z.number().int().nonnegative().default(0),
     })
     .strict(),
   "runs.attempt": z

@@ -14,7 +14,8 @@
 - Pause preserves pending proposals and conversations, and paused initialization can resume without admitting stale or orphan target work.
 - Startup normalizes completed recovered scopes after deterministic and judge recovery, before freezing automatic scores.
 - Failed Resume readiness leaves parent and child unchanged, and competing controls cannot be overwritten by stale admission.
-- Cursor reconnect returns durable observation events without creating duplicate work.
+- Run reads return current-state snapshots without event history or cursors; manual refresh retains the frozen manifest, and Run switches isolate stale responses.
+- Dedicated Run and attempt event cursors, and research observation cursors, return complete durable event history without creating duplicate work.
 
 ## Evaluation
 

@@ -6,9 +6,8 @@ vi.mock("./api.js", () => ({
   command: vi.fn(),
   useResource: () => ({ data: null, error: null, refresh: () => {} }),
 }));
-vi.mock("./observation-stream.js", () => ({
-  mergeEvents: (left: unknown[], right: unknown[]) => [...left, ...right],
-  useObservation: () => ({
+vi.mock("./run-observation.js", () => ({
+  useRunObservation: () => ({
     data: {
       run: {
         id: "run-1",
@@ -38,11 +37,9 @@ vi.mock("./observation-stream.js", () => ({
         { id: "result", questionId: "q1", repetition: 1, status: "queued" },
       ],
       attempts: [],
-      events: [],
       reviews: [],
       allowedActions: ["pause", "halt", "cancel"],
       progress: { completed: 0, total: 1, failed: 0 },
-      cursor: 0,
     },
     error: null,
     refresh: () => {},

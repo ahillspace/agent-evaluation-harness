@@ -1182,18 +1182,21 @@ describe("shared application", () => {
       action: "pause",
     });
     expect(pending.run.status).toBe("pausing");
-    expect(pending.events.some((event) => event.type === "tool.started")).toBe(
-      true,
-    );
+    expect(
+      (await app.execute("runs.events", { runId: run.run.id })).events.some(
+        (event) => event.type === "tool.started",
+      ),
+    ).toBe(true);
     release();
     await app.waitForIdle();
     const paused = await app.execute("runs.get", { runId: run.run.id });
     expect(paused.run.status).toBe("paused");
     expect(paused.progress.completed).toBe(1);
+    const history = await app.execute("runs.events", { runId: run.run.id });
     lateEvent?.();
-    expect(
-      (await app.execute("runs.get", { runId: run.run.id })).events,
-    ).toEqual(paused.events);
+    expect(await app.execute("runs.events", { runId: run.run.id })).toEqual(
+      history,
+    );
     await app.execute("runs.control", { runId: run.run.id, action: "resume" });
     await app.waitForIdle();
     expect(
@@ -1666,8 +1669,8 @@ it("cancels retry waiting without another invocation", async () => {
     agent,
   });
   for (let i = 0; i < 100; i++) {
-    const view = await app.execute("runs.get", { runId: run.run.id });
-    if (view.events.some((event) => event.type === "question.retry.waiting"))
+    const history = await app.execute("runs.events", { runId: run.run.id });
+    if (history.events.some((event) => event.type === "question.retry.waiting"))
       break;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
@@ -1719,4 +1722,108 @@ it("applies reduced shared admission to concurrent automatic retries", async () 
   await app.waitForIdle();
   expect(calls).toBe(4);
   expect(peak).toBe(1);
+});
+
+it("returns Run snapshots without event history while dedicated HTTP and CLI cursors retain every event", async () => {
+  const { app, bank, directory } = await setup(
+    runtime(async ({ onEvent }) => {
+      for (let index = 1; index <= 1001; index++)
+        onEvent({ type: "agent.message", message: "trace-" + index });
+      return { answer: 42, text: "42" };
+    }),
+  );
+  const launched = await app.execute("runs.launch", {
+    bankRevisionId: bank.id,
+    agent,
+  });
+  await app.waitForIdle();
+  const server = await startServer({ application: app, port: 0 });
+  cleanups.push(() => server.close());
+  const { DatabaseSync } = await import("node:sqlite");
+  const reader = new DatabaseSync(join(directory, "workspace.sqlite"), {
+    readOnly: true,
+  });
+  const { runCli } = await import("../cli.js");
+  try {
+    const saved = () =>
+      JSON.stringify({
+        records: reader
+          .prepare("SELECT kind,id,value FROM records ORDER BY ordinal")
+          .all(),
+        events: reader.prepare("SELECT * FROM events ORDER BY sequence").all(),
+      });
+    const before = saved();
+    const stored = reader
+      .prepare(
+        "SELECT sequence,message FROM events WHERE run_id=? ORDER BY sequence",
+      )
+      .all(launched.run.id);
+    const eventsSpy = vi.spyOn(Database.prototype, "events");
+    try {
+      for (const operation of ["runs.get", "runs.observe"] as const) {
+        const response = await fetch(
+          server.url + "/api/commands/" + operation,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ runId: launched.run.id }),
+          },
+        );
+        expect(response.status).toBe(200);
+        const snapshot = await response.json();
+        expect(snapshot).not.toHaveProperty("events");
+        expect(snapshot).not.toHaveProperty("cursor");
+        expect(snapshot.run.id).toBe(launched.run.id);
+        expect(snapshot.progress.completed).toBe(1);
+        if (operation === "runs.get")
+          expect(snapshot.run.manifest).toEqual(launched.run.manifest);
+        else expect(snapshot.run).not.toHaveProperty("manifest");
+      }
+      expect(eventsSpy).not.toHaveBeenCalled();
+    } finally {
+      eventsSpy.mockRestore();
+    }
+    for (const operation of ["runs.get", "runs.observe"] as const) {
+      const response = await fetch(server.url + "/api/commands/" + operation, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runId: launched.run.id, cursor: 0 }),
+      });
+      expect(response.status).toBe(400);
+    }
+    const cliSnapshot = (await runCli([
+      "runs.get",
+      "--url",
+      server.url,
+      "--json",
+      JSON.stringify({ runId: launched.run.id }),
+    ])) as RunView;
+    expect(cliSnapshot).not.toHaveProperty("events");
+    expect(cliSnapshot).not.toHaveProperty("cursor");
+    expect(cliSnapshot.run.manifest).toEqual(launched.run.manifest);
+    const collected: Array<{ sequence: number; message: string }> = [];
+    let cursor = 0;
+    for (;;) {
+      const page = (await runCli([
+        "runs.events",
+        "--url",
+        server.url,
+        "--json",
+        JSON.stringify({ runId: launched.run.id, cursor }),
+      ])) as { events: typeof collected; cursor: number };
+      collected.push(
+        ...page.events.map(({ sequence, message }) => ({ sequence, message })),
+      );
+      cursor = page.cursor;
+      if (page.events.length < 200) break;
+    }
+    expect(collected).toEqual(stored);
+    expect(collected.some((event) => event.message === "trace-1")).toBe(true);
+    expect(collected.some((event) => event.message === "trace-1001")).toBe(
+      true,
+    );
+    expect(saved()).toBe(before);
+  } finally {
+    reader.close();
+  }
 });

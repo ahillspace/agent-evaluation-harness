@@ -43,7 +43,7 @@ export function Runs({
     5000,
   );
   const [error, setError] = useState<unknown>(null),
-    [comparison, setComparison] = useState<RunComparison | null>(null),
+    [comparisonRunIds, setComparisonRunIds] = useState<string[] | null>(null),
     [exported, setExported] = useState<{ id: string; value: unknown } | null>(
       null,
     ),
@@ -109,20 +109,10 @@ export function Runs({
             </select>
             <button
               className="button secondary"
-              disabled={selected.length < 2 || pending}
-              onClick={() => {
-                setPending(true);
-                void command("runs.compare", {
-                  runIds: selected,
-                })
-                  .then(setComparison)
-                  .catch(setError)
-                  .finally(() => setPending(false));
-              }}
+              disabled={selected.length < 2}
+              onClick={() => setComparisonRunIds([...selected])}
             >
-              {pending
-                ? "Comparing..."
-                : `Compare${selected.length ? ` (${selected.length})` : ""}`}
+              {`Compare${selected.length ? ` (${selected.length})` : ""}`}
             </button>
           </div>
           <div className="table-scroll runs-table-container">
@@ -381,14 +371,11 @@ export function Runs({
           </div>
         </section>
       )}
-      {comparison !== null && (
-        <Modal title="Compare saved runs" onClose={() => setComparison(null)}>
-          <p className="subtle">
-            Comparison uses saved evidence. Different question sets or
-            evaluation bases require careful interpretation.
-          </p>
-          <Comparison value={comparison} />
-        </Modal>
+      {comparisonRunIds !== null && (
+        <ComparisonDialog
+          runIds={comparisonRunIds}
+          onClose={() => setComparisonRunIds(null)}
+        />
       )}
       {exported && (
         <Modal
@@ -437,6 +424,30 @@ export function Runs({
         </Modal>
       )}
     </>
+  );
+}
+
+function ComparisonDialog({
+  runIds,
+  onClose,
+}: {
+  runIds: string[];
+  onClose: () => void;
+}) {
+  const comparison = useResource("runs.compare", { runIds });
+  return (
+    <Modal title="Compare saved runs" onClose={onClose}>
+      <p className="subtle">
+        Comparison uses saved evidence. Different question sets or evaluation
+        bases require careful interpretation.
+      </p>
+      <ErrorNotice error={comparison.error} />
+      {comparison.data ? (
+        <Comparison value={comparison.data} />
+      ) : !comparison.error ? (
+        <p className="subtle">Loading comparison...</p>
+      ) : null}
+    </Modal>
   );
 }
 

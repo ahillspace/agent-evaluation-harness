@@ -125,6 +125,101 @@ const addCandidate = () => {
   view.session.currentRunId = "candidate-1";
 };
 
+const intentCaption = () =>
+  container.querySelector(".research-turn .subtle")?.textContent;
+
+type IntentOutput = ResearchView["session"]["turns"][number]["output"];
+it.each<{
+  name: string;
+  output: Partial<IntentOutput>;
+  caption: string;
+}>([
+  {
+    name: "modern keep and stop",
+    output: { disposition: "keep", control: "stop" },
+    caption: "Recommends keeping · Requests stop",
+  },
+  {
+    name: "modern discard and continue",
+    output: { disposition: "discard", control: "continue" },
+    caption: "Recommends discarding · Requests continuation",
+  },
+  {
+    name: "modern keep overrides legacy discard",
+    output: { disposition: "keep", decision: "discard" },
+    caption: "Recommends keeping · Control unspecified",
+  },
+  {
+    name: "modern discard overrides legacy keep",
+    output: { disposition: "discard", decision: "keep" },
+    caption: "Recommends discarding · Control unspecified",
+  },
+  {
+    name: "modern continuation overrides legacy stop",
+    output: { control: "continue", decision: "stop" },
+    caption: "Retention unspecified · Requests continuation",
+  },
+  {
+    name: "modern stop preserves legacy keep",
+    output: { control: "stop", decision: "keep" },
+    caption: "Recommends keeping · Requests stop",
+  },
+  {
+    name: "legacy keep has no explicit control",
+    output: { decision: "keep" },
+    caption: "Recommends keeping · Control unspecified",
+  },
+  {
+    name: "legacy discard has no explicit control",
+    output: { decision: "discard" },
+    caption: "Recommends discarding · Control unspecified",
+  },
+  {
+    name: "legacy stop has no retention choice",
+    output: { decision: "stop" },
+    caption: "Retention unspecified · Requests stop",
+  },
+  {
+    name: "absent choices remain unspecified",
+    output: {},
+    caption: "Retention unspecified · Control unspecified",
+  },
+  {
+    name: "a blocker reports researcher intent",
+    output: { control: "stop", stopCategory: "blocked" },
+    caption:
+      "Retention unspecified · Requests stop · Reports a technical blocker",
+  },
+  {
+    name: "a blocker does not turn continuation into a stop",
+    output: { control: "continue", stopCategory: "blocked" },
+    caption:
+      "Retention unspecified · Requests continuation · Reports a technical blocker",
+  },
+])("presents $name as researcher intent", async ({ output, caption }) => {
+  view.session.turns = [
+    {
+      createdAt: turn(0).createdAt,
+      output: {
+        conversationId: "saved-conversation",
+        message: "Recorded researcher response",
+        ...output,
+      },
+    },
+  ];
+  await render();
+  expect(intentCaption()).toBe(caption);
+  expect(
+    container
+      .querySelector(".research-turn")
+      ?.parentElement?.querySelector("h3")?.textContent,
+  ).toBe("Researcher intent");
+  expect(runNavigation().textContent).toContain(
+    "Baseline · retained · current",
+  );
+  expect(reads).toHaveLength(0);
+});
+
 it("names the sole baseline and its saved facts without redundant navigation", async () => {
   await render();
   expect(runSelector()).toBeNull();

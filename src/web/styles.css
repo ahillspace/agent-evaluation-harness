@@ -1157,15 +1157,23 @@ tr:last-child td {
 }
 .setup-footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: 16px;
   border-top: 1px solid var(--line);
   padding: 18px 26px;
   background: var(--raised);
 }
 .setup-footer > span {
+  flex: 1 1 160px;
+  min-width: 0;
   font: 11px var(--mono);
   color: var(--muted);
+}
+.setup-footer > .button {
+  flex-shrink: 0;
+  margin-left: auto;
 }
 .runtime-note {
   font-size: 11px;

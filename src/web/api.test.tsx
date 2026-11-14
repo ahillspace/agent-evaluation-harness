@@ -29,6 +29,7 @@ function Resource({
     <>
       <output aria-label="Data">{JSON.stringify(resource.data)}</output>
       <output aria-label="Error">{resource.error?.message}</output>
+      <output aria-label="Loading">{String(resource.loading)}</output>
       <button onClick={resource.refresh}>Refresh</button>
       {resource.data && <Draft />}
     </>
@@ -65,6 +66,8 @@ const render = async (props: Parameters<typeof Resource>[0] = {}) =>
 const data = () => container.querySelector('[aria-label="Data"]')!.textContent;
 const error = () =>
   container.querySelector('[aria-label="Error"]')!.textContent;
+const loading = () =>
+  container.querySelector('[aria-label="Loading"]')!.textContent;
 const refresh = async () =>
   act(async () => {
     Array.from(container.querySelectorAll("button"))
@@ -79,18 +82,22 @@ it("ignores late responses from an aborted activation even when the request iden
     .mockReturnValueOnce(original.promise)
     .mockReturnValueOnce(replacement.promise);
   await render();
+  expect(loading()).toBe("true");
   const signal = (request.mock.calls[0]![1] as RequestInit).signal!;
   await render({ enabled: false });
+  expect(loading()).toBe("false");
   expect(signal.aborted).toBe(true);
   await render();
   await act(async () =>
     original.resolve(Response.json({ label: "aborted connection" })),
   );
+  expect(loading()).toBe("true");
   expect(data()).toBe("null");
   await act(async () =>
     replacement.resolve(Response.json({ label: "current connection" })),
   );
   expect(data()).toContain("current connection");
+  expect(loading()).toBe("false");
   expect(data()).not.toContain("aborted connection");
 });
 
@@ -107,19 +114,23 @@ it("retains current data and mounted draft state during an ordinary refresh, fai
   )!;
   await act(async () => draft.click());
   await refresh();
+  expect(loading()).toBe("true");
   expect(data()).toContain("current connection");
   expect(draft.isConnected).toBe(true);
   await act(async () => failed.reject(new Error("Refresh failed.")));
   expect(data()).toContain("current connection");
   expect(error()).toBe("Refresh failed.");
+  expect(loading()).toBe("false");
   expect(draft.textContent).toBe("Draft edits: 1");
   await refresh();
+  expect(loading()).toBe("true");
   expect(data()).toContain("current connection");
   await act(async () =>
     recovered.resolve(Response.json({ label: "refreshed connection" })),
   );
   expect(data()).toContain("refreshed connection");
   expect(error()).toBe("");
+  expect(loading()).toBe("false");
   expect(draft.isConnected).toBe(true);
   expect(draft.textContent).toBe("Draft edits: 1");
 });
@@ -152,8 +163,27 @@ it("isolates old request errors across input changes and disablement", async () 
   expect(error()).toBe("Old connection failed.");
   await render({ connectionId: "other" });
   expect(error()).toBe("");
+  expect(loading()).toBe("true");
   await act(async () => other.reject(new Error("Other connection failed.")));
   expect(error()).toBe("Other connection failed.");
+  expect(loading()).toBe("false");
   await render({ connectionId: "other", enabled: false });
   expect(error()).toBe("");
+  expect(loading()).toBe("false");
+});
+
+it("keeps a replacement request loading when a cancelled request fails late", async () => {
+  const old = deferred(),
+    current = deferred();
+  request.mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+  await render();
+  const signal = (request.mock.calls[0]![1] as RequestInit).signal!;
+  await render({ connectionId: "current" });
+  expect(signal.aborted).toBe(true);
+  await act(async () => old.reject(new Error("Late old failure")));
+  expect(error()).toBe("");
+  expect(loading()).toBe("true");
+  await act(async () => current.resolve(Response.json({ label: "current" })));
+  expect(loading()).toBe("false");
+  expect(data()).toContain("current");
 });

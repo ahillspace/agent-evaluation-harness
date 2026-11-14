@@ -28,6 +28,8 @@ it("preserves explicit question selection and exposes searchable expected-answer
   } as unknown as BankRevision;
   const html = renderToStaticMarkup(
     <RunQuestions
+      bankState="ready"
+      retryBank={() => {}}
       draft={initialSetup()}
       set={() => {}}
       setDraft={() => {}}

@@ -1,7 +1,7 @@
 ﻿import { useState } from "react";
 import type { BankRevision, WorkspaceView } from "../contracts.js";
 import type { SetupDraftProps } from "./setup-types.js";
-import { Field } from "./ui.js";
+import { ErrorNotice, Field } from "./ui.js";
 import {
   filterQuestions,
   questionType,
@@ -17,10 +17,16 @@ export function RunQuestions({
   bank,
   published,
   workspace,
+  bankState,
+  bankError,
+  retryBank,
 }: SetupDraftProps & {
   bank?: BankRevision;
   published: Array<{ id: string; name: string; number: number; count: number }>;
   workspace: Pick<WorkspaceView, "banks" | "connections">;
+  bankState: "unselected" | "loading" | "failed" | "ready" | "unavailable";
+  bankError?: Error | null;
+  retryBank: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [type, setType] = useState("");
@@ -92,6 +98,27 @@ export function RunQuestions({
           ))}
         </select>
       </Field>
+      {bankState === "loading" && (
+        <p className="subtle" role="status">
+          Loading question bank...
+        </p>
+      )}
+      {bankState === "failed" && (
+        <div className="stack">
+          <ErrorNotice error={bankError} />
+          <div className="actions">
+            <button className="button" onClick={retryBank}>
+              Retry loading bank
+            </button>
+          </div>
+        </div>
+      )}
+      {bankState === "unavailable" && (
+        <p className="notice" role="alert">
+          The selected revision is unavailable. Choose another question bank
+          revision.
+        </p>
+      )}
       {bank && (
         <div className="stack">
           <div className="row">

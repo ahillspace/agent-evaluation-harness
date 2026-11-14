@@ -74,6 +74,55 @@ const input = async (value: string) =>
     element.dispatchEvent(new Event("input", { bubbles: true }));
   });
 
+it("keeps a sole saved score visible in its Run cell without a selection command", async () => {
+  const pass = {
+    id: "sole",
+    runId: run.id,
+    name: "Reviewed standard",
+    source: "human",
+    status: "interrupted",
+    createdAt: "2026-10-10",
+    basis: {
+      bankRevisionId: "bank",
+      evaluatorRevisionId: "eval",
+      referenceHash: "hash",
+    },
+    coverage: {
+      eligible: 1,
+      answered: 1,
+      judged: 1,
+      correct: 1,
+      incorrect: 0,
+      unjudged: 0,
+      errors: 0,
+      excluded: 0,
+      reviewed: 1,
+      overridden: 0,
+    },
+    accuracy: 1,
+    judgedAccuracy: 1,
+  } as const;
+  request.mockImplementation(async () =>
+    Response.json({
+      runs: [
+        { ...run, assessmentPasses: [pass], selectedAssessmentPassId: pass.id },
+      ],
+      total: 1,
+      nextOffset: null,
+    }),
+  );
+  await act(async () =>
+    root.render(<Runs workspace={workspace} refresh={() => {}} />),
+  );
+  const cell = container.querySelector(".score-selector")!.closest("td")!;
+  expect(cell.querySelector("select")).toBeNull();
+  expect(cell.textContent).toContain("Reviewed standard (interrupted)");
+  expect(cell.textContent).toContain("1 / 1 judged");
+  expect(request.mock.calls.every(([url]) => url.endsWith("/runs.list"))).toBe(
+    true,
+  );
+});
+
 async function selectComparisonRuns() {
   const runs = [run, { ...run, id: "other", name: "Other run" }];
   await act(async () =>

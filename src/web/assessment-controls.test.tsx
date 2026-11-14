@@ -53,7 +53,7 @@ it("reads judged accuracy from an already running server with older outcome sema
   expect(html).not.toContain("40.0%");
 });
 
-it("offers named saved scores without adding score columns", () => {
+it("keeps a sole saved score identifiable without offering a selection", () => {
   const html = renderToStaticMarkup(
     <AssessmentSelector
       runId="run"
@@ -62,7 +62,7 @@ it("offers named saved scores without adding score columns", () => {
       onSaved={() => {}}
     />,
   );
-  expect(html).toContain('aria-label="Saved score"');
+  expect(html).not.toContain("<select");
   expect(html).toContain("Reviewed answers");
 });
 
@@ -77,6 +77,83 @@ it("shows unknown performance instead of fabricated zero usage", () => {
 // @vitest-environment happy-dom
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+
+it.each([
+  { passes: [] },
+  { passes: [{ ...pass, status: "running" as const }] },
+])(
+  "renders empty or sole running score without issuing selection commands: %j",
+  async ({ passes }) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    command.mockReset();
+    const onSaved = vi.fn();
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <AssessmentSelector runId="run" passes={passes} onSaved={onSaved} />,
+        ),
+      );
+      expect(container.querySelector("select")).toBeNull();
+      expect(container.textContent).toContain(
+        passes.length ? "Reviewed answers (running)" : "Awaiting assessment",
+      );
+      expect(command).not.toHaveBeenCalled();
+      expect(onSaved).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  },
+);
+
+it("keeps multiple-score selection disabled while saving and exposes a failed save", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  let reject!: (error: Error) => void;
+  command.mockReset().mockImplementation(
+    () =>
+      new Promise((_, fail) => {
+        reject = fail;
+      }),
+  );
+  const onSaved = vi.fn();
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <AssessmentSelector
+          runId="run"
+          passes={[pass, { ...pass, id: "other" }]}
+          selectedId="pass"
+          label="Saved score for fixture"
+          onSaved={onSaved}
+        />,
+      ),
+    );
+    const select = container.querySelector("select")!;
+    expect(select.getAttribute("aria-label")).toBe("Saved score for fixture");
+    await act(async () => {
+      select.value = "other";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(select.disabled).toBe(true);
+    expect(command).toHaveBeenCalledExactlyOnceWith("runs.select-assessment", {
+      runId: "run",
+      passId: "other",
+    });
+    await act(async () => reject(new Error("Selection unavailable")));
+    expect(select.disabled).toBe(false);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "Selection unavailable",
+    );
+    expect(onSaved).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    vi.unstubAllGlobals();
+  }
+});
 
 it("distinguishes repeated score names with seconds and selects physical pass IDs", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);

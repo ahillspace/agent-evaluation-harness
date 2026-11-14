@@ -228,12 +228,14 @@ export function Observe({
               <Status value={pass.status} />
             </div>
           )}
-          <AssessmentSelector
-            runId={runId}
-            passes={passes}
-            selectedId={pass?.id}
-            onSaved={select}
-          />
+          {passes.length > 1 && (
+            <AssessmentSelector
+              runId={runId}
+              passes={passes}
+              selectedId={pass?.id}
+              onSaved={select}
+            />
+          )}
         </div>
         <AssessmentScore pass={pass} />
         <div className="selected-score-actions">

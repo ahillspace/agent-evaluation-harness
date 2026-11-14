@@ -446,7 +446,7 @@ function Comparison({ value }: { value: RunComparison }) {
       <div className={`notice ${value.comparable ? "" : "error"}`}>
         {value.comparable
           ? "These runs share a compatible comparison basis."
-          : "These runs have different evaluation bases."}
+          : "Review the warnings when comparing these runs."}
       </div>
       {value.warnings.map((warning) => (
         <p className="warning" key={warning}>

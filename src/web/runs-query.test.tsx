@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { RunSummary, WorkspaceView } from "../contracts.js";
+import type { RunComparison, RunSummary, WorkspaceView } from "../contracts.js";
 import { Runs } from "./runs.js";
 
 let root: Root, container: HTMLDivElement;
@@ -110,3 +110,105 @@ it("sends the selected status to the same paginated source", async () => {
     offset: 0,
   });
 });
+
+it.each([
+  {
+    reason: "incomplete runs with the same basis",
+    comparable: false,
+    warnings: ["Some selected runs or assessments are incomplete."],
+    differentBasis: false,
+  },
+  {
+    reason: "different assessment bases",
+    comparable: false,
+    warnings: [
+      "Selected assessment sources, settings, reference answers, or eligible question slots differ.",
+    ],
+    differentBasis: true,
+  },
+  {
+    reason: "compatible runs",
+    comparable: true,
+    warnings: [],
+    differentBasis: false,
+  },
+])(
+  "compares selected runs and preserves warnings for $reason",
+  async ({ comparable, warnings, differentBasis }) => {
+    const runs = [run, { ...run, id: "other", name: "Other run" }];
+    const comparison: RunComparison = {
+      comparable,
+      warnings,
+      rows: runs.map((saved, index) => ({
+        runId: saved.id,
+        name: saved.name,
+        status:
+          !comparable && !differentBasis && index === 1
+            ? "halted"
+            : "completed",
+        model: saved.model ?? null,
+        harness: saved.harness ?? null,
+        bankRevisionId: "bank-revision",
+        evaluatorRevisionId:
+          differentBasis && index === 1 ? "other-evaluator" : "evaluator",
+        questionDigest: "same-questions",
+        assessmentPassId: `pass-${saved.id}`,
+        accuracy: 1,
+        completed: 1,
+        failed: 0,
+        graded: 1,
+        total: 1,
+        repetitions: 1,
+      })),
+    };
+    request.mockImplementation(async (url: string) =>
+      Response.json(
+        url.endsWith("/runs.compare")
+          ? comparison
+          : { runs, total: runs.length, nextOffset: null },
+      ),
+    );
+    await act(async () =>
+      root.render(
+        <Runs workspace={{ ...workspace, runs }} refresh={() => {}} />,
+      ),
+    );
+    for (const checkbox of Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+    )) {
+      await act(async () => checkbox.click());
+    }
+    await act(async () =>
+      Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Compare (2)")!
+        .click(),
+    );
+    expect(request).toHaveBeenCalledWith(
+      "/api/commands/runs.compare",
+      expect.objectContaining({
+        body: JSON.stringify({ runIds: ["run", "other"] }),
+      }),
+    );
+    const dialog = document.querySelector('[role="dialog"]')!;
+    expect(dialog.querySelector(".notice")?.textContent).toBe(
+      comparable
+        ? "These runs share a compatible comparison basis."
+        : "Review the warnings when comparing these runs.",
+    );
+    expect(
+      Array.from(
+        dialog.querySelectorAll(".warning"),
+        (element) => element.textContent,
+      ),
+    ).toEqual(warnings);
+    expect(
+      Array.from(
+        dialog.querySelectorAll("tbody tr"),
+        (element) => element.querySelector("a")?.textContent,
+      ),
+    ).toEqual(runs.map((saved) => saved.name));
+    expect(dialog.querySelector(".json-view")?.textContent).toContain(
+      "bank-revision",
+    );
+  },
+);
